@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Variables de entorno
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Archivos temporales
+*.log
+*.tmp
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Excel temporales
+~$*.xlsx
+~$*.xlsm
+
+# Pytest
+.pytest_cache/
+
+# Cache
+.cache/
+
+# Playwright
+playwright-report/
+test-results/
