@@ -39,3 +39,5 @@ Desktop.ini
 # Playwright
 playwright-report/
 test-results/
+
+config/google_drive.json

@@ -1,40 +1,30 @@
 from pathlib import Path
-from datetime import datetime
-import os
 import pandas as pd
 
+from utils.google_drive import (
+    leer_excel,
+    leer_csv,
+    buscar_archivo
+)
 
 # =====================================================
-# BUSCAR ARCHIVO
+# RESOLVER NOMBRE DEL ARCHIVO
 # =====================================================
 
-def buscar_archivo(carpeta, nombre):
+def resolver_nombre(nombre):
 
-    carpeta = Path(carpeta)
+    if Path(nombre).suffix != "":
+        return nombre
 
-    if not carpeta.exists():
+    nombre_lower = nombre.strip().lower()
 
-        print(f"La carpeta no existe: {carpeta}")
+    if nombre_lower == "informe tareas":
+        return "Informe Tareas.csv"
 
-        return None
+    if nombre_lower == "maestro clientes":
+        return "Maestro Clientes.xlsm"
 
-    for archivo in carpeta.iterdir():
-
-        if archivo.is_file():
-
-            if archivo.stem.strip().lower() == nombre.strip().lower():
-
-                print(f"Archivo encontrado: {archivo.name}")
-
-                return archivo
-
-    print("")
-    print("=" * 60)
-    print(f"No se encontró el archivo: {nombre}")
-    print(f"Carpeta: {carpeta}")
-    print("=" * 60)
-
-    return None
+    return f"{nombre}.xlsx"
 
 
 # =====================================================
@@ -43,88 +33,33 @@ def buscar_archivo(carpeta, nombre):
 
 def leer_archivo(carpeta, nombre):
 
-    archivo = buscar_archivo(carpeta, nombre)
-
-    if archivo is None:
-
-        return pd.DataFrame()
-
-    print(f"\nLeyendo archivo: {archivo.name}")
-
     try:
 
-        # ---------------------------------------------
-        # CSV
-        # ---------------------------------------------
+        nombre = resolver_nombre(nombre)
 
-        if archivo.suffix.lower() == ".csv":
+        extension = Path(nombre).suffix.lower()
 
-            configuraciones = [
+        print(f"Leyendo desde Google Drive: {nombre}")
 
-                (";", "utf-8-sig"),
+        if extension == ".csv":
 
-                (";", "cp1252"),
+            return leer_csv(nombre)
 
-                (",", "utf-8-sig"),
+        elif extension in [".xlsx", ".xls", ".xlsm"]:
 
-                (",", "cp1252")
+            return leer_excel(nombre)
 
-            ]
+        else:
 
-            ultimo_error = None
-
-            for separador, encoding in configuraciones:
-
-                try:
-
-                    df = pd.read_csv(
-
-                        archivo,
-
-                        sep=separador,
-
-                        encoding=encoding,
-
-                        low_memory=False
-
-                    )
-
-                    print("CSV leído correctamente")
-                    print(f"Separador : {separador}")
-                    print(f"Encoding  : {encoding}")
-                    print(f"Filas     : {len(df)}")
-                    print(f"Columnas  : {len(df.columns)}")
-
-                    return df
-
-                except Exception as e:
-
-                    ultimo_error = e
-
-            print("")
-            print("=" * 60)
-            print("NO SE PUDO LEER EL CSV")
-            print(ultimo_error)
-            print("=" * 60)
+            print(f"Formato no soportado: {nombre}")
 
             return pd.DataFrame()
-
-        # ---------------------------------------------
-        # EXCEL
-        # ---------------------------------------------
-
-        df = pd.read_excel(archivo)
-
-        print(f"Excel leído correctamente ({len(df)} registros)")
-
-        return df
 
     except Exception as e:
 
         print("")
         print("=" * 60)
-        print("ERROR LEYENDO ARCHIVO")
-        print(archivo)
+        print("ERROR LEYENDO DESDE GOOGLE DRIVE")
         print(type(e).__name__)
         print(e)
         print("=" * 60)
@@ -133,21 +68,19 @@ def leer_archivo(carpeta, nombre):
 
 
 # =====================================================
-# FECHA DEL ARCHIVO
+# FECHA ARCHIVO
 # =====================================================
 
 def fecha_archivo(carpeta, nombre):
 
-    archivo = buscar_archivo(carpeta, nombre)
+    try:
 
-    if archivo is None:
+        nombre = resolver_nombre(nombre)
+
+        buscar_archivo(nombre)
+
+        return "Google Drive"
+
+    except:
 
         return "--"
-
-    fecha = datetime.fromtimestamp(
-
-        os.path.getmtime(archivo)
-
-    )
-
-    return fecha.strftime("%d/%m/%Y %H:%M:%S")

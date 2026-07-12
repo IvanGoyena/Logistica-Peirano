@@ -51,6 +51,7 @@ tabla_tareas = construir_tabla_tareas(
     df_pedidos,
     df_clientes
 )
+
 carros_en_curso = obtener_carros_en_curso(
     tabla_tareas
 )
@@ -139,21 +140,6 @@ st.subheader("📈 Indicadores")
 
 st.info(
     "En este espacio construiremos los gráficos operativos del depósito."
-)
-
-st.markdown("---")
-
-# =====================================================
-# TABLA OPERATIVA
-# =====================================================
-
-st.subheader("📋 Tabla Operativa")
-
-st.dataframe(
-    tabla_tareas,
-    use_container_width=True,
-    hide_index=True,
-    height=550
 )
 
 st.markdown("---")
