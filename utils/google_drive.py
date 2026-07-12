@@ -2,11 +2,11 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import streamlit as st
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-
 
 # ==========================================================
 # CONFIGURACION
@@ -18,15 +18,31 @@ FOLDER_ID = "1G60r5Z5dHsNlPr8mIRWWTG6ArT02wOJD"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
+# ==========================================================
+# CREDENCIALES
+# ==========================================================
+
+if RUTA_JSON.exists():
+
+    print("Usando credenciales locales")
+
+    credenciales = service_account.Credentials.from_service_account_file(
+        RUTA_JSON,
+        scopes=SCOPES
+    )
+
+else:
+
+    print("Usando credenciales de Streamlit Secrets")
+
+    credenciales = service_account.Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=SCOPES
+    )
 
 # ==========================================================
 # CONEXION
 # ==========================================================
-
-credenciales = service_account.Credentials.from_service_account_file(
-    RUTA_JSON,
-    scopes=SCOPES
-)
 
 service = build(
     "drive",
@@ -34,6 +50,9 @@ service = build(
     credentials=credenciales
 )
 
+# ==========================================================
+# BUSCAR ARCHIVO
+# ==========================================================
 
 def buscar_archivo(nombre_archivo):
 
@@ -50,18 +69,13 @@ def buscar_archivo(nombre_archivo):
 
     archivos = resultado.get("files", [])
 
-    print("\nArchivos encontrados:")
-    for a in archivos:
-        print(a)
-
     if not archivos:
         raise FileNotFoundError(f"No existe {nombre_archivo}")
 
     return archivos[0]["id"]
 
-
 # ==========================================================
-# DESCARGAR
+# DESCARGAR ARCHIVO
 # ==========================================================
 
 def descargar_archivo(file_id):
@@ -85,7 +99,6 @@ def descargar_archivo(file_id):
 
     return archivo
 
-
 # ==========================================================
 # LEER EXCEL
 # ==========================================================
@@ -97,7 +110,6 @@ def leer_excel(nombre):
     archivo = descargar_archivo(file_id)
 
     return pd.read_excel(archivo)
-
 
 # ==========================================================
 # LEER CSV
