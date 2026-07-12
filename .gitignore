@@ -1,43 +1,37 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 
 # Entornos virtuales
 .venv/
 venv/
-env/
 
 # VS Code
 .vscode/
 
-# Variables de entorno
-.env
-
 # Streamlit
-.streamlit/secrets.toml
+.streamlit/
+
+# Secrets
+config/google_drive.json
+config/secrets.toml
+
+# Logs
+*.log
 
 # Archivos temporales
-*.log
 *.tmp
+*.bak
 
 # Windows
 Thumbs.db
 Desktop.ini
 
-# Excel temporales
-~$*.xlsx
-~$*.xlsm
+# Mac
+.DS_Store
 
-# Pytest
-.pytest_cache/
 
-# Cache
-.cache/
-
-# Playwright
-playwright-report/
-test-results/
-
-config/google_drive.json
+# Python
+__pycache__/
+*.py[cod]
