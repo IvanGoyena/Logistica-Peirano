@@ -17,9 +17,9 @@ def construir_tabla_tareas(
     # PEDIDOS
     # ======================================================
 
-    tabla = tabla.merge(
+    try:
 
-        df_pedidos[
+        pedidos = df_pedidos[
             [
                 "PreparacionID",
                 "ClienteCodigo",
@@ -29,7 +29,18 @@ def construir_tabla_tareas(
                 "Estado",
                 "Fecha"
             ]
-        ],
+        ]
+
+    except Exception as e:
+
+        raise Exception(
+            f"ERROR PEDIDOS\n\n"
+            f"Columnas:\n{df_pedidos.columns.tolist()}\n\n{e}"
+        )
+
+    tabla = tabla.merge(
+
+        pedidos,
 
         left_on="PreparacionId",
         right_on="PreparacionID",
@@ -38,13 +49,13 @@ def construir_tabla_tareas(
 
     )
 
-    # ======================================================
+        # ======================================================
     # CLIENTES
     # ======================================================
 
-    tabla = tabla.merge(
+    try:
 
-        df_clientes[
+        clientes = df_clientes[
             [
                 "Codigo_Cliente",
                 "Zona",
@@ -53,7 +64,18 @@ def construir_tabla_tareas(
                 "Distrito",
                 "Entrega"
             ]
-        ],
+        ]
+
+    except Exception as e:
+
+        raise Exception(
+            f"ERROR CLIENTES\n\n"
+            f"Columnas:\n{df_clientes.columns.tolist()}\n\n{e}"
+        )
+
+    tabla = tabla.merge(
+
+        clientes,
 
         left_on="ClienteCodigo",
         right_on="Codigo_Cliente",
