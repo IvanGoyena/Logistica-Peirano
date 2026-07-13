@@ -2,9 +2,15 @@ from pathlib import Path
 import pandas as pd
 
 from utils.google_drive import (
+
     leer_excel,
+    leer_excel_cache,
+
     leer_csv,
+    leer_csv_cache,
+
     buscar_archivo
+
 )
 
 # =====================================================
@@ -31,7 +37,11 @@ def resolver_nombre(nombre):
 # LEER ARCHIVO
 # =====================================================
 
-def leer_archivo(carpeta, nombre):
+def leer_archivo(
+    carpeta,
+    nombre,
+    cache=False
+):
 
     try:
 
@@ -39,15 +49,33 @@ def leer_archivo(carpeta, nombre):
 
         extension = Path(nombre).suffix.lower()
 
-        print(f"Leyendo desde Google Drive: {nombre}")
-
         if extension == ".csv":
 
-            return leer_csv(nombre)
+            if cache:
+
+                print(f"Usando CACHE: {nombre}")
+
+                return leer_csv_cache(nombre)
+
+            else:
+
+                print(f"Leyendo desde Google Drive: {nombre}")
+
+                return leer_csv(nombre)
 
         elif extension in [".xlsx", ".xls", ".xlsm"]:
 
-            return leer_excel(nombre)
+            if cache:
+
+                print(f"Usando CACHE: {nombre}")
+
+                return leer_excel_cache(nombre)
+
+            else:
+
+                print(f"Leyendo desde Google Drive: {nombre}")
+
+                return leer_excel(nombre)
 
         else:
 

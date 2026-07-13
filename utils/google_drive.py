@@ -112,6 +112,20 @@ def leer_excel(nombre):
     return pd.read_excel(archivo)
 
 # ==========================================================
+# LEER EXCEL CACHE
+# ==========================================================
+
+@st.cache_data(ttl=86400)
+
+def leer_excel_cache(nombre):
+
+    file_id = buscar_archivo(nombre)
+
+    archivo = descargar_archivo(file_id)
+
+    return pd.read_excel(archivo)
+
+# ==========================================================
 # LEER CSV
 # ==========================================================
 
@@ -126,4 +140,28 @@ def leer_csv(nombre):
         sep=";",
         encoding="utf-8-sig",
         low_memory=False
+    )
+
+# ==========================================================
+# LEER CSV CACHE
+# ==========================================================
+
+@st.cache_data(ttl=86400)
+
+def leer_csv_cache(nombre):
+
+    file_id = buscar_archivo(nombre)
+
+    archivo = descargar_archivo(file_id)
+
+    return pd.read_csv(
+
+        archivo,
+
+        sep=";",
+
+        encoding="utf-8-sig",
+
+        low_memory=False
+
     )

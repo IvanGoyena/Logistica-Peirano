@@ -7,6 +7,10 @@ from utils.leer_datos import (
     fecha_archivo
 )
 
+from models.pedidos import (
+    construir_tabla_pedidos
+)
+
 from models.tareas import (
     construir_tabla_tareas,
     obtener_resumen_operativo,
@@ -31,28 +35,71 @@ st.set_page_config(
 # =====================================================
 
 df_tareas = leer_archivo(
-    CARPETA_TAREAS,
-    "Informe Tareas"
+    CARPETA_DATOS,
+    "Informe Tareas",
+    cache=False
 )
 
 df_pedidos = leer_archivo(
-    CARPETA_PEDIDOS,
-    "Pedidos DIGIP"
+    CARPETA_DATOS,
+    "Pedidos DIGIP",
+    cache=False
+)
+
+df_detalle = leer_archivo(
+    CARPETA_DATOS,
+    "Detalle Pendientes",
+    cache=False
 )
 
 df_clientes = leer_archivo(
-    CARPETA_CLIENTES,
-    "Maestro Clientes"
+    CARPETA_DATOS,
+    "Maestro Clientes",
+    cache=True
 )
+
+df_articulos = leer_archivo(
+    CARPETA_DATOS,
+    "Maestro Articulos",
+    cache=True
+)
+
+tabla_pedidos = construir_tabla_pedidos(
+
+    df_pedidos,
+    df_detalle,
+    df_articulos,
+    df_clientes
+
+)
+
+# =====================================================
+# KPIs PEDIDOS
+# =====================================================
+
+pedidos_pendientes = len(tabla_pedidos)
+
+unidades_pendientes = int(
+
+    tabla_pedidos["TotalUnidades"]
+
+    .fillna(0)
+
+    .sum()
+
+)
+
 
 # =====================================================
 # TABLA OPERATIVA
 # =====================================================
 
 tabla_tareas = construir_tabla_tareas(
+
     df_tareas,
     df_pedidos,
     df_clientes
+
 )
 
 tabla_operativa = obtener_tabla_operativa(
@@ -62,9 +109,95 @@ avance_despachos = obtener_avance_despachos(
     tabla_tareas
 )
 
+# =====================================================
+# UNIDADES POR PREPARACION
+# =====================================================
+
+unidades_preparacion = tabla_pedidos[
+
+    [
+
+        "PreparacionID",
+
+        "TotalUnidades"
+
+    ]
+
+].copy()
+
 resumen = obtener_resumen_operativo(
     tabla_tareas,
     df_pedidos
+)
+# =====================================================
+# UNIDADES CARROS
+# =====================================================
+
+unidades_preparacion = tabla_pedidos[
+
+    [
+
+        "PreparacionID",
+        "TotalUnidades"
+
+    ]
+
+].copy()
+
+tareas_unidades = tabla_tareas.merge(
+
+    unidades_preparacion,
+
+    left_on="Preparacion",
+
+    right_on="PreparacionID",
+
+    how="left"
+
+)
+
+# -----------------------------------------------------
+# CARROS EN CURSO
+# -----------------------------------------------------
+
+unidades_carros_curso = (
+
+    tareas_unidades[
+
+        tareas_unidades["Categoria"] == "En Curso"
+
+    ]
+
+    .drop_duplicates("Preparacion")
+
+    ["TotalUnidades"]
+
+    .fillna(0)
+
+    .sum()
+
+)
+
+# -----------------------------------------------------
+# CARROS FINALIZADOS
+# -----------------------------------------------------
+
+unidades_carros_finalizados = (
+
+    tareas_unidades[
+
+        tareas_unidades["Categoria"] == "Finalizado"
+
+    ]
+
+    .drop_duplicates("Preparacion")
+
+    ["TotalUnidades"]
+
+    .fillna(0)
+
+    .sum()
+
 )
 
 
@@ -90,27 +223,17 @@ col1, col2, col3 = st.columns(3)
 # PEDIDOS PENDIENTES
 # ---------------------------------------
 
-pedidos_pendientes = len(
-
-    df_pedidos[
-        df_pedidos["Estado"]
-        .fillna("")
-        .str.upper()
-        != "COMPLETO"
-    ]
-
-)
-
 with col1:
 
     st.metric(
 
-        "📦 Pedidos Pendientes",
+    "📦 Pedidos Pendientes",
 
-        pedidos_pendientes
+    pedidos_pendientes,
 
-    )
+    delta=f"{unidades_pendientes:,} Unidades".replace(",", ".")
 
+)
 # ---------------------------------------
 # CARROS EN CURSO
 # ---------------------------------------
@@ -119,12 +242,14 @@ with col2:
 
     st.metric(
 
-        "🛒 Carros en Curso",
+    "🛒 Carros en Curso",
 
-        resumen["CarrosEnCurso"]
+    resumen["CarrosEnCurso"],
 
-    )
+    delta=f"{int(unidades_carros_curso):,} Unidades".replace(",", ".")
 
+)
+    
 # ---------------------------------------
 # CARROS FINALIZADOS
 # ---------------------------------------
@@ -373,65 +498,6 @@ st.dataframe(
 
 )
 
-
-# =====================================================
-# ESTADO DEL SISTEMA
-# =====================================================
-
-st.subheader("⚙ Estado del Sistema")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-
-    st.success("Informe Tareas")
-
-    st.metric(
-        "Registros",
-        len(df_tareas)
-    )
-
-    st.caption(
-        fecha_archivo(
-            CARPETA_TAREAS,
-            "Informe Tareas"
-        )
-    )
-
-with col2:
-
-    st.success("Pedidos DIGIP")
-
-    st.metric(
-        "Registros",
-        len(df_pedidos)
-    )
-
-    st.caption(
-        fecha_archivo(
-            CARPETA_PEDIDOS,
-            "Pedidos DIGIP"
-        )
-    )
-
-with col3:
-
-    st.success("Maestro Clientes")
-
-    st.metric(
-        "Registros",
-        len(df_clientes)
-    )
-
-    st.caption(
-        fecha_archivo(
-            CARPETA_CLIENTES,
-            "Maestro Clientes"
-        )
-    )
-
-st.markdown("---")
-
 # =====================================================
 # BOTÓN
 # =====================================================
@@ -440,4 +506,8 @@ if st.button("🏠 Volver al Inicio"):
 
     st.switch_page("app.py")
 
-    
+
+
+
+
+

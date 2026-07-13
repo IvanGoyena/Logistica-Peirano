@@ -266,13 +266,16 @@ def construir_tabla_tareas(
     # ------------------------------------------------------
 
     tabla["Hora"] = tabla["FechaHora"].dt.strftime("%H:%M")
+    
 
     # ------------------------------------------------------
     # TABLA FINAL
     # ------------------------------------------------------
 
     tabla = tabla[
+
         [
+
             "Semaforo",
             "Orden",
             "Categoria",
@@ -287,11 +290,15 @@ def construir_tabla_tareas(
             "Usuario",
             "PreparacionEstado",
             "TipoPreparacion",
-            "Estado"
+            "Estado",
+
+
         ]
+
     ].copy()
 
     tabla.columns = [
+
         "Prioridad",
         "Orden",
         "Categoria",
@@ -306,7 +313,9 @@ def construir_tabla_tareas(
         "Usuario",
         "EstadoPreparacion",
         "TipoPreparacion",
-        "EstadoPedido"
+        "EstadoPedido",
+
+
     ]
 
     return tabla
@@ -328,27 +337,35 @@ def obtener_resumen_operativo(
 
     fecha_operativa = tabla["FechaHora"].dt.normalize().max()
 
-
     # ------------------------------------------------------
     # PEDIDOS PENDIENTES
-    # (No completos y no eliminados)
     # ------------------------------------------------------
 
-    resumen["PedidosPendientes"] = len(
+    resumen["PedidosPendientes"] = (
 
         df_pedidos[
 
-            ~df_pedidos["Estado"]
+            df_pedidos["Estado"]
+
             .fillna("")
+
             .str.upper()
+
             .isin(
+
                 [
-                    "COMPLETO",
-                    "ELIMINADO"
+
+                    "PENDIENTE",
+
+                    "PREPARACION"
+
                 ]
+
             )
 
-        ]
+        ]["PedidoId"]
+
+        .nunique()
 
     )
 
@@ -358,19 +375,19 @@ def obtener_resumen_operativo(
 
     resumen["CarrosEnCurso"] = (
 
-    tabla[
+        tabla[
 
-        (tabla["Categoria"] == "En Curso")
+            (tabla["Categoria"] == "En Curso")
 
-        &
+            &
 
-        (tabla["FechaHora"].dt.normalize() == fecha_operativa)
+            (tabla["FechaHora"].dt.normalize() == fecha_operativa)
 
-    ]["Carro"]
+        ]["Carro"]
 
-    .nunique()
+        .nunique()
 
-)
+    )
 
     # ------------------------------------------------------
     # CARROS FINALIZADOS
@@ -378,19 +395,19 @@ def obtener_resumen_operativo(
 
     resumen["CarrosFinalizados"] = (
 
-    tabla[
+        tabla[
 
-        (tabla["Categoria"] == "Finalizado")
+            (tabla["Categoria"] == "Finalizado")
 
-        &
+            &
 
-        (tabla["FechaHora"].dt.normalize() == fecha_operativa)
+            (tabla["FechaHora"].dt.normalize() == fecha_operativa)
 
-    ]["Carro"]
+        ]["Carro"]
 
-    .nunique()
+        .nunique()
 
-)
+    )
 
     return resumen
 
