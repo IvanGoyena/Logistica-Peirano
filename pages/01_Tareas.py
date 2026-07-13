@@ -8,7 +8,7 @@ from utils.leer_datos import (
 from models.tareas import (
     construir_tabla_tareas,
     obtener_resumen_operativo,
-    obtener_carros_en_curso
+    obtener_tabla_operativa
 )
 
 import streamlit as st
@@ -52,15 +52,16 @@ tabla_tareas = construir_tabla_tareas(
     df_clientes
 )
 
-carros_en_curso = obtener_carros_en_curso(
+tabla_operativa = obtener_tabla_operativa(
     tabla_tareas
 )
 
-# =====================================================
-# KPIs
-# =====================================================
+resumen = obtener_resumen_operativo(
+    tabla_tareas,
+    df_pedidos
+)
 
-# resumen = obtener_resumen_operativo(tabla_tareas)
+
 # =====================================================
 # CABECERA
 # =====================================================
@@ -79,58 +80,76 @@ st.subheader("📊 Resumen Operativo")
 
 col1, col2, col3 = st.columns(3)
 
+# ---------------------------------------
+# PEDIDOS PENDIENTES
+# ---------------------------------------
+
+pedidos_pendientes = len(
+
+    df_pedidos[
+        df_pedidos["Estado"]
+        .fillna("")
+        .str.upper()
+        != "COMPLETO"
+    ]
+
+)
+
 with col1:
-
-    st.metric(
-
-        "🛒 Carros en Curso",
-
-        carros_en_curso["Carro"].nunique()
-
-    )
-
-with col2:
 
     st.metric(
 
         "📦 Pedidos Pendientes",
 
-        "-"
+        pedidos_pendientes
 
     )
+
+# ---------------------------------------
+# CARROS EN CURSO
+# ---------------------------------------
+
+with col2:
+
+    st.metric(
+
+        "🛒 Carros en Curso",
+
+        resumen["CarrosEnCurso"]
+
+    )
+
+# ---------------------------------------
+# CARROS FINALIZADOS
+# ---------------------------------------
 
 with col3:
 
     st.metric(
 
-        "✅ Carros Cerrados",
+        "✅ Carros Finalizados",
 
-        "-"
+        resumen["CarrosFinalizados"]
 
     )
 
-st.markdown("---")
+st.subheader("📋 Operación en Curso")
 
-st.subheader("🛒 Validación - Carros en Curso")
-
-st.write(
-    f"Registros encontrados: {len(carros_en_curso)}"
+st.caption(
+    f"{len(tabla_operativa)} registros"
 )
 
 st.dataframe(
 
-    carros_en_curso,
+    tabla_operativa,
 
     use_container_width=True,
 
     hide_index=True,
 
-    height=300
+    height=600
 
 )
-st.subheader("Validación")
-
-st.dataframe(carros_en_curso)
 
 # =====================================================
 # INDICADORES

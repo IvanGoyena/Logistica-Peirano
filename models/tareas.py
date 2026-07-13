@@ -1,5 +1,10 @@
 import pandas as pd
 
+# ==========================================================
+# CONFIGURACIÓN
+# ==========================================================
+
+HORAS_TABLERO = 48
 
 # ==========================================================
 # TABLA OPERATIVA
@@ -11,32 +16,38 @@ def construir_tabla_tareas(
     df_clientes
 ):
 
+    # ------------------------------------------------------
+    # COPIA
+    # ------------------------------------------------------
+
     tabla = df_tareas.copy()
 
-    # ======================================================
+    # ------------------------------------------------------
+    # SOLO TAREAS DE PREPARACIÓN
+    # ------------------------------------------------------
+
+    tabla = tabla[
+        tabla["TareaTipo"]
+        .fillna("")
+        .str.upper()
+        .str.contains("PREPARACION")
+    ].copy()
+
+    # ------------------------------------------------------
     # PEDIDOS
-    # ======================================================
+    # ------------------------------------------------------
 
-    try:
-
-        pedidos = df_pedidos[
-            [
-                "PreparacionID",
-                "ClienteCodigo",
-                "ClienteDescripcion",
-                "PreparacionEstado",
-                "TipoPreparacion",
-                "Estado",
-                "Fecha"
-            ]
+    pedidos = df_pedidos[
+        [
+            "PreparacionID",
+            "ClienteCodigo",
+            "ClienteDescripcion",
+            "PreparacionEstado",
+            "TipoPreparacion",
+            "Estado",
+            "Fecha"
         ]
-
-    except Exception as e:
-
-        raise Exception(
-            f"ERROR PEDIDOS\n\n"
-            f"Columnas:\n{df_pedidos.columns.tolist()}\n\n{e}"
-        )
+    ].copy()
 
     tabla = tabla.merge(
 
@@ -49,29 +60,20 @@ def construir_tabla_tareas(
 
     )
 
-        # ======================================================
+    # ------------------------------------------------------
     # CLIENTES
-    # ======================================================
+    # ------------------------------------------------------
 
-    try:
-
-        clientes = df_clientes[
-            [
-                "Codigo_Cliente",
-                "Zona",
-                "Provincia",
-                "Localidad",
-                "Distrito",
-                "Entrega"
-            ]
+    clientes = df_clientes[
+        [
+            "Codigo_Cliente",
+            "Zona",
+            "Provincia",
+            "Localidad",
+            "Distrito",
+            "Entrega"
         ]
-
-    except Exception as e:
-
-        raise Exception(
-            f"ERROR CLIENTES\n\n"
-            f"Columnas:\n{df_clientes.columns.tolist()}\n\n{e}"
-        )
+    ].copy()
 
     tabla = tabla.merge(
 
@@ -84,9 +86,9 @@ def construir_tabla_tareas(
 
     )
 
-    # ======================================================
+    # ------------------------------------------------------
     # USUARIO
-    # ======================================================
+    # ------------------------------------------------------
 
     tabla["Usuario"] = (
 
@@ -98,162 +100,250 @@ def construir_tabla_tareas(
 
     ).str.strip()
 
-    # ======================================================
-    # CATEGORIA
-    # (provisoria)
-    # ======================================================
+        # ------------------------------------------------------
+    # FECHA Y HORA
+    # ------------------------------------------------------
+
+    tabla["FechaHora"] = (
+        pd.to_datetime(
+            tabla["FechaHoraEstado"],
+            errors="coerce"
+        )
+        - pd.Timedelta(hours=3)
+    )
+
+    # ------------------------------------------------------
+    # CATEGORÍA OPERATIVA
+    # ------------------------------------------------------
 
     tabla["Categoria"] = "Pendiente"
 
-    tabla.loc[
+    contenedor = (
         tabla["ContenedorNumero"]
+        .fillna("")
         .astype(str)
         .str.upper()
-        .str.contains("CARRO", na=False),
-        "Categoria"
-    ] = "Carro"
-
-    # ======================================================
-    # TIEMPO
-    # ======================================================
-
-    tabla["Hora"] = pd.to_datetime(
-        tabla["FechaHoraEstado"],
-        errors="coerce"
+        .str.strip()
     )
 
-    # ======================================================
+    # En Curso
+    tabla.loc[
+        contenedor.str.contains("CARRO", na=False),
+        "Categoria"
+    ] = "En Curso"
+
+    # Finalizado
+    tabla.loc[
+        (
+            (contenedor != "")
+            &
+            (~contenedor.str.contains("CARRO", na=False))
+            &
+            (
+                tabla["TareaEstado"]
+                .fillna("")
+                .str.upper()
+                .eq("FINALIZADA")
+            )
+        ),
+        "Categoria"
+    ] = "Finalizado"
+
+    # ------------------------------------------------------
+    # HORA (SOLO PARA MOSTRAR)
+    # ------------------------------------------------------
+
+    tabla["Hora"] = tabla["FechaHora"].dt.strftime("%H:%M")
+
+    # ------------------------------------------------------
     # TABLA FINAL
-    # ======================================================
+    # ------------------------------------------------------
 
     tabla = tabla[
-
         [
-
             "Categoria",
-
+            "FechaHora",
             "TareaEstado",
-
             "PreparacionId",
-
             "ClienteDescripcion",
-
-            "Zona",
-
-            "Localidad",
-
             "AreaDescripcion",
-
             "DespachoDescripcion",
-
             "Hora",
-
             "ContenedorNumero",
-
             "Usuario",
-
             "PreparacionEstado",
-
             "TipoPreparacion",
-
             "Estado"
-
         ]
-
-    ]
+    ].copy()
 
     tabla.columns = [
-
         "Categoria",
-
+        "FechaHora",
         "Estado",
-
         "Preparacion",
-
         "Cliente",
-
-        "Zona",
-
-        "Localidad",
-
         "Area",
-
         "Despacho",
-
         "Hora",
-
         "Carro",
-
         "Usuario",
-
         "EstadoPreparacion",
-
         "TipoPreparacion",
-
         "EstadoPedido"
-
     ]
 
     return tabla
-
 
 # ==========================================================
 # KPIs
 # ==========================================================
 
-def obtener_resumen_operativo(tabla):
+def obtener_resumen_operativo(
+    tabla,
+    df_pedidos
+):
 
     resumen = {}
 
+    # ------------------------------------------------------
+    # VENTANA DEL TABLERO
+    # ------------------------------------------------------
 
-# ==========================================================
-# CARROS EN CURSO
-# ==========================================================
+    limite = pd.Timestamp.now() - pd.Timedelta(hours=HORAS_TABLERO)
 
-def obtener_carros_en_curso(tabla):
+    # ------------------------------------------------------
+    # PEDIDOS PENDIENTES
+    # (No completos y no eliminados)
+    # ------------------------------------------------------
 
-    carros = tabla.copy()
+    resumen["PedidosPendientes"] = len(
 
-    # Solo contenedores que contienen CARRO
-    carros = carros[
-        carros["Carro"]
-        .astype(str)
-        .str.upper()
-        .str.contains("CARRO", na=False)
-    ]
+        df_pedidos[
 
-    # Quitar TipoPreparacion vacío
-    carros = carros[
-        carros["TipoPreparacion"]
-        .fillna("")
-        .str.strip()
-        != ""
-    ]
+            ~df_pedidos["Estado"]
+            .fillna("")
+            .str.upper()
+            .isin(
+                [
+                    "COMPLETO",
+                    "ELIMINADO"
+                ]
+            )
 
-    # Quitar pedidos completos
-    carros = carros[
-        carros["EstadoPedido"]
-        .fillna("")
-        .str.upper()
-        != "COMPLETO"
-    ]
-
-    # Columnas para la validación
-    carros = carros[
-        [
-            "Categoria",
-            "Estado",
-            "Preparacion",
-            "Cliente",
-            "Area",
-            "Despacho",
-            "Hora",
-            "Carro",
-            "Usuario",
-            "EstadoPreparacion",
-            "TipoPreparacion",
-            "EstadoPedido"
         ]
+
+    )
+
+    # ------------------------------------------------------
+    # CARROS EN CURSO
+    # ------------------------------------------------------
+
+    resumen["CarrosEnCurso"] = (
+
+        tabla[
+
+            (tabla["Categoria"] == "En Curso")
+
+            &
+
+            (tabla["FechaHora"] >= limite)
+
+        ]["Carro"]
+
+        .nunique()
+
+    )
+
+    # ------------------------------------------------------
+    # CARROS FINALIZADOS
+    # ------------------------------------------------------
+
+    resumen["CarrosFinalizados"] = (
+
+        tabla[
+
+            (tabla["Categoria"] == "Finalizado")
+
+            &
+
+            (tabla["FechaHora"] >= limite)
+
+        ]["Carro"]
+
+        .nunique()
+
+    )
+
+    return resumen
+
+# ==========================================================
+# TABLA OPERATIVA
+# ==========================================================
+
+def obtener_tabla_operativa(tabla):
+
+    operativa = tabla.copy()
+
+    limite = pd.Timestamp.now() - pd.Timedelta(hours=HORAS_TABLERO)
+
+    operativa = operativa[
+
+        operativa["FechaHora"] >= limite
+
+    ].copy()
+
+    operativa = operativa[
+
+        operativa["TipoPreparacion"]
+        .fillna("")
+        .str.upper()
+        == "PEDIDO"
+
+    ].copy()
+
+    categorias = [
+
+        "Pendiente",
+
+        "En Curso",
+
+        "Finalizado"
+
     ]
 
-    return carros
+    operativa["Categoria"] = pd.Categorical(
+
+        operativa["Categoria"],
+
+        categories=categorias,
+
+        ordered=True
+
+    )
+
+    operativa = operativa.sort_values(
+
+        [
+
+            "Categoria",
+
+            "FechaHora"
+
+        ]
+
+    )
+
+    operativa.reset_index(
+
+        drop=True,
+
+        inplace=True
+
+    )
+
+    return operativa
+
+# ==========================================================
+# FIN DEL MÓDULO TAREAS
+# ==========================================================
