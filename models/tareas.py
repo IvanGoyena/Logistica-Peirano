@@ -4,7 +4,7 @@ import pandas as pd
 # CONFIGURACIÓN
 # ==========================================================
 
-HORAS_TABLERO = 48
+DIAS_TABLERO = 1
 
 # ==========================================================
 # TABLA OPERATIVA
@@ -100,7 +100,7 @@ def construir_tabla_tareas(
 
     ).str.strip()
 
-        # ------------------------------------------------------
+    # ------------------------------------------------------
     # FECHA Y HORA
     # ------------------------------------------------------
 
@@ -148,6 +148,117 @@ def construir_tabla_tareas(
         ),
         "Categoria"
     ] = "Finalizado"
+    
+    
+    # ------------------------------------------------------
+    # SEMÁFORO OPERATIVO
+    # ------------------------------------------------------
+
+    tabla["Semaforo"] = "🟡"
+
+    # Carro cerrado pero todavía abierto en la operación
+    tabla.loc[
+        (tabla["Categoria"] == "En Curso")
+        &
+        (
+            tabla["Estado"]
+            .fillna("")
+            .str.upper()
+            == "FINALIZADA"
+        ),
+        "Semaforo"
+    ] = "🔴"
+
+    # Carro en proceso
+    tabla.loc[
+        (tabla["Categoria"] == "En Curso")
+        &
+        (
+            tabla["Estado"]
+            .fillna("")
+            .str.upper()
+            != "FINALIZADA"
+        ),
+        "Semaforo"
+    ] = "🟠"
+
+    # Carro completamente cerrado
+    tabla.loc[
+        tabla["Categoria"] == "Finalizado",
+        "Semaforo"
+    ] = "🟢"   
+
+    # ------------------------------------------------------
+    # ORDEN DE PRIORIDAD
+    # ------------------------------------------------------
+
+    tabla["Orden"] = 4
+
+    # 🔴 Resolver
+    tabla.loc[
+        (tabla["Categoria"] == "En Curso")
+        &
+        (
+            tabla["Estado"]
+            .fillna("")
+            .str.upper()
+            == "FINALIZADA"
+        ),
+        "Orden"
+    ] = 1
+
+    # 🟠 Trabajando
+    tabla.loc[
+        (tabla["Categoria"] == "En Curso")
+        &
+        (
+            tabla["Estado"]
+            .fillna("")
+            .str.upper()
+            != "FINALIZADA"
+        ),
+        "Orden"
+    ] = 2
+
+    # 🟡 Pendiente
+    tabla.loc[
+        tabla["Categoria"] == "Pendiente",
+        "Orden"
+    ] = 3
+
+    # 🟢 Finalizado
+    tabla.loc[
+        tabla["Categoria"] == "Finalizado",
+        "Orden"
+    ] = 4
+
+    # ------------------------------------------------------
+    # ICONO VISUAL DEL CARRO
+    # ------------------------------------------------------
+
+    # 🔴 Prioridad Alta
+    tabla.loc[
+        tabla["Semaforo"] == "🔴",
+        "ContenedorNumero"
+    ] = (
+        "🚨 "
+        + tabla.loc[
+            tabla["Semaforo"] == "🔴",
+            "ContenedorNumero"
+        ].astype(str)
+    )
+
+    # 🟠 En Trabajo
+    tabla.loc[
+        tabla["Semaforo"] == "🟠",
+        "ContenedorNumero"
+    ] = (
+        "🚧 "
+        + tabla.loc[
+            tabla["Semaforo"] == "🟠",
+            "ContenedorNumero"
+        ].astype(str)
+    )
 
     # ------------------------------------------------------
     # HORA (SOLO PARA MOSTRAR)
@@ -161,6 +272,8 @@ def construir_tabla_tareas(
 
     tabla = tabla[
         [
+            "Semaforo",
+            "Orden",
             "Categoria",
             "FechaHora",
             "TareaEstado",
@@ -178,6 +291,8 @@ def construir_tabla_tareas(
     ].copy()
 
     tabla.columns = [
+        "Prioridad",
+        "Orden",
         "Categoria",
         "FechaHora",
         "Estado",
@@ -207,10 +322,11 @@ def obtener_resumen_operativo(
     resumen = {}
 
     # ------------------------------------------------------
-    # VENTANA DEL TABLERO
+    # DÍA OPERATIVO
     # ------------------------------------------------------
 
-    limite = pd.Timestamp.now() - pd.Timedelta(hours=HORAS_TABLERO)
+    fecha_operativa = tabla["FechaHora"].dt.normalize().max()
+
 
     # ------------------------------------------------------
     # PEDIDOS PENDIENTES
@@ -241,19 +357,19 @@ def obtener_resumen_operativo(
 
     resumen["CarrosEnCurso"] = (
 
-        tabla[
+    tabla[
 
-            (tabla["Categoria"] == "En Curso")
+        (tabla["Categoria"] == "En Curso")
 
-            &
+        &
 
-            (tabla["FechaHora"] >= limite)
+        (tabla["FechaHora"].dt.normalize() == fecha_operativa)
 
-        ]["Carro"]
+    ]["Carro"]
 
-        .nunique()
+    .nunique()
 
-    )
+)
 
     # ------------------------------------------------------
     # CARROS FINALIZADOS
@@ -261,19 +377,19 @@ def obtener_resumen_operativo(
 
     resumen["CarrosFinalizados"] = (
 
-        tabla[
+    tabla[
 
-            (tabla["Categoria"] == "Finalizado")
+        (tabla["Categoria"] == "Finalizado")
 
-            &
+        &
 
-            (tabla["FechaHora"] >= limite)
+        (tabla["FechaHora"].dt.normalize() == fecha_operativa)
 
-        ]["Carro"]
+    ]["Carro"]
 
-        .nunique()
+    .nunique()
 
-    )
+)
 
     return resumen
 
@@ -285,13 +401,11 @@ def obtener_tabla_operativa(tabla):
 
     operativa = tabla.copy()
 
-    limite = pd.Timestamp.now() - pd.Timedelta(hours=HORAS_TABLERO)
+    fecha_operativa = operativa["FechaHora"].dt.normalize().max()
 
     operativa = operativa[
-
-        operativa["FechaHora"] >= limite
-
-    ].copy()
+    operativa["FechaHora"].dt.normalize() == fecha_operativa
+].copy()
 
     operativa = operativa[
 
@@ -324,15 +438,17 @@ def obtener_tabla_operativa(tabla):
 
     operativa = operativa.sort_values(
 
-        [
+    [
 
-            "Categoria",
+        "Orden",
 
-            "FechaHora"
+        "FechaHora"
 
-        ]
+    ],
 
-    )
+    ascending=[True, True]
+
+)
 
     operativa.reset_index(
 
@@ -341,7 +457,8 @@ def obtener_tabla_operativa(tabla):
         inplace=True
 
     )
-
+    operativa = operativa.drop(columns="Orden")
+    
     return operativa
 
 # ==========================================================

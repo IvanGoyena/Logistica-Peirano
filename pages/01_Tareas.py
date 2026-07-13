@@ -139,9 +139,28 @@ st.caption(
     f"{len(tabla_operativa)} registros"
 )
 
+
+def resaltar_carro(fila):
+
+    estilos = [""] * len(fila)
+
+    if fila["Prioridad"] == "🔴":
+
+        indice = fila.index.get_loc("Carro")
+
+        estilos[indice] = (
+            "background-color:#C62828;"
+            "color:white;"
+            "font-weight:bold;"
+        )
+
+    return estilos
+
 st.dataframe(
 
-    tabla_operativa,
+    tabla_operativa
+        .style
+        .apply(resaltar_carro, axis=1),
 
     use_container_width=True,
 
