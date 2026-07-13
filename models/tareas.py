@@ -1,5 +1,6 @@
 import pandas as pd
 
+
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
@@ -460,6 +461,142 @@ def obtener_tabla_operativa(tabla):
     operativa = operativa.drop(columns="Orden")
     
     return operativa
+
+
+# ==========================================================
+# AVANCE POR DESPACHO
+# ==========================================================
+
+def obtener_avance_despachos(tabla):
+
+    # ---------------------------------------
+    # FECHA OPERATIVA
+    # ---------------------------------------
+
+    fecha_operativa = tabla["FechaHora"].dt.normalize().max()
+
+    df = tabla[
+        tabla["FechaHora"].dt.normalize() == fecha_operativa
+    ].copy()
+
+    # ---------------------------------------
+    # SOLO OPERACIÓN VIVA
+    # ---------------------------------------
+
+    df = df[
+        df["Categoria"].isin([
+            "Pendiente",
+            "En Curso",
+            "Finalizado"
+        ])
+    ].copy()
+
+    # ---------------------------------------
+    # ELIMINAR DESPACHOS VACÍOS
+    # ---------------------------------------
+
+    df = df[
+        df["Despacho"]
+        .fillna("")
+        .str.strip()
+        != ""
+    ].copy()
+    # ---------------------------------------
+    # TOTAL DE PREPARACIONES
+    # (Representa la carga del despacho)
+    # ---------------------------------------
+
+    total = (
+
+        df
+
+        .groupby("Despacho")["Preparacion"]
+
+        .nunique()
+
+        .reset_index(name="TotalPreparaciones")
+
+    )
+
+    # ---------------------------------------
+    # PREPARACIONES FINALIZADAS
+    # ---------------------------------------
+
+    finalizados = (
+
+        df[
+            df["Categoria"] == "Finalizado"
+        ]
+
+        .groupby("Despacho")["Preparacion"]
+
+        .nunique()
+
+        .reset_index(name="PreparacionesFinalizadas")
+
+    )
+
+    # ---------------------------------------
+    # MERGE
+    # ---------------------------------------
+
+    avance = total.merge(
+
+        finalizados,
+
+        on="Despacho",
+
+        how="left"
+
+    )
+
+    avance["PreparacionesFinalizadas"] = (
+
+        avance["PreparacionesFinalizadas"]
+
+        .fillna(0)
+
+        .astype(int)
+
+    )
+
+    # ---------------------------------------
+    # %
+    # ---------------------------------------
+
+    avance["Avance"] = (
+
+        avance["PreparacionesFinalizadas"]
+
+        /
+
+        avance["TotalPreparaciones"]
+
+        * 100
+
+    ).round(0)
+
+    # ---------------------------------------
+    # SOLO DESPACHOS CON TRABAJO PENDIENTE
+    # ---------------------------------------
+
+    avance = avance[
+        avance["Avance"] < 100
+    ].copy()
+
+    # ---------------------------------------
+    # ORDEN
+    # ---------------------------------------
+
+    avance = avance.sort_values(
+
+        "Avance",
+
+        ascending=True
+
+    )
+
+    return avance
 
 # ==========================================================
 # FIN DEL MÓDULO TAREAS

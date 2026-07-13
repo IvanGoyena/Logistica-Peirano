@@ -1,5 +1,7 @@
 from config import *
 
+import plotly.graph_objects as go
+
 from utils.leer_datos import (
     leer_archivo,
     fecha_archivo
@@ -8,7 +10,8 @@ from utils.leer_datos import (
 from models.tareas import (
     construir_tabla_tareas,
     obtener_resumen_operativo,
-    obtener_tabla_operativa
+    obtener_tabla_operativa,
+    obtener_avance_despachos
 )
 
 import streamlit as st
@@ -53,6 +56,9 @@ tabla_tareas = construir_tabla_tareas(
 )
 
 tabla_operativa = obtener_tabla_operativa(
+    tabla_tareas
+)
+avance_despachos = obtener_avance_despachos(
     tabla_tareas
 )
 
@@ -132,6 +138,203 @@ with col3:
         resumen["CarrosFinalizados"]
 
     )
+# =====================================================
+# GRÁFICOS
+# =====================================================
+
+# ---------------------------------------
+# GRAFICO AVANCE DESPACHOS
+# ---------------------------------------
+
+st.subheader("📈 Indicadores Operativos")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
+    st.caption("📦 Avance de Despachos")
+
+    cols = st.columns(3)
+
+    for i, (_, fila) in enumerate(avance_despachos.iterrows()):
+
+        with cols[i % 3]:
+
+            avance = int(fila["Avance"])
+            cerrados = int(fila["PreparacionesFinalizadas"])
+            total = int(fila["TotalPreparaciones"])
+
+            if avance <= 30:
+                color = "#D32F2F"
+
+            elif avance <= 70:
+                color = "#F57C00"
+
+            else:
+                color = "#2E7D32"
+
+            fig = go.Figure()
+
+            fig.add_trace(
+
+                go.Pie(
+
+                    values=[
+
+                        avance,
+
+                        max(100 - avance, 0)
+
+                    ],
+
+                    hole=0.72,
+
+                    sort=False,
+
+                    direction="clockwise",
+
+                    textinfo="none",
+
+                    showlegend=False,
+
+                    marker=dict(
+
+                        colors=[
+
+                            color,
+
+                            "#3A3A3A"
+
+                        ],
+
+                        line=dict(
+
+                            color="#202020",
+
+                            width=2
+
+                        )
+
+                    )
+
+                )
+
+            )
+
+            fig.update_layout(
+
+                annotations=[
+
+                    dict(
+
+                        text=f"<b>{avance}%</b>",
+
+                        x=0.5,
+
+                        y=0.55,
+
+                        showarrow=False,
+
+                        font=dict(
+
+                            size=22,
+
+                            color="white"
+
+                        )
+
+                    ),
+
+                    dict(
+
+                        text=f"{cerrados} / {total}",
+
+                        x=0.5,
+
+                        y=0.36,
+
+                        showarrow=False,
+
+                        font=dict(
+
+                            size=12,
+
+                            color="#A0A0A0"
+
+                        )
+
+                    )
+
+                ],
+
+                title=dict(
+
+    text=f"<b>{fila['Despacho']}</b>",
+
+    x=0.5,
+
+    xanchor="center",
+
+    y=0.97,
+
+    yanchor="top",
+
+    font=dict(
+
+        size=12,
+
+        color="white"
+
+    )
+
+),
+
+                height=180,
+
+                margin=dict(
+
+                    l=5,
+
+                    r=5,
+
+                    t=35,
+
+                    b=5
+
+                ),
+
+                paper_bgcolor="rgba(0,0,0,0)",
+
+                plot_bgcolor="rgba(0,0,0,0)",
+
+                font=dict(color="white")
+
+            )
+
+            st.plotly_chart(
+
+                fig,
+
+                use_container_width=True,
+
+                config={
+
+                    "displayModeBar": False
+
+                }
+
+            )
+
+with col2:
+
+    st.info("Próximamente")
+
+with col3:
+
+    st.info("Próximamente")
+
+st.markdown("---")
+
 
 st.subheader("📋 Operación en Curso")
 
@@ -170,17 +373,6 @@ st.dataframe(
 
 )
 
-# =====================================================
-# INDICADORES
-# =====================================================
-
-st.subheader("📈 Indicadores")
-
-st.info(
-    "En este espacio construiremos los gráficos operativos del depósito."
-)
-
-st.markdown("---")
 
 # =====================================================
 # ESTADO DEL SISTEMA
