@@ -77,11 +77,22 @@ tabla_pedidos = construir_tabla_pedidos(
 # KPIs PEDIDOS
 # =====================================================
 
-pedidos_pendientes = len(tabla_pedidos)
+# Solo pedidos que todavía NO comenzaron
+pedidos_sin_preparacion = tabla_pedidos[
+
+    tabla_pedidos["PreparacionID"].isna()
+
+].copy()
+
+pedidos_pendientes = len(
+
+    pedidos_sin_preparacion
+
+)
 
 unidades_pendientes = int(
 
-    tabla_pedidos["TotalUnidades"]
+    pedidos_sin_preparacion["TotalUnidades"]
 
     .fillna(0)
 
@@ -108,6 +119,45 @@ tabla_operativa = obtener_tabla_operativa(
 avance_despachos = obtener_avance_despachos(
     tabla_tareas
 )
+
+
+# =====================================================
+# TABLA OPERATIVA ENRIQUECIDA
+# =====================================================
+
+tabla_operativa = tabla_operativa.merge(
+
+    tabla_pedidos[
+
+        [
+
+            "PreparacionID",
+
+            "TotalUnidades",
+
+            "TotalSKUs"
+
+        ]
+
+    ],
+
+    left_on="Preparacion",
+
+    right_on="PreparacionID",
+
+    how="left"
+
+)
+
+tabla_operativa = tabla_operativa.drop(
+
+    columns="PreparacionID",
+
+    errors="ignore"
+
+)
+
+
 
 # =====================================================
 # UNIDADES POR PREPARACION
@@ -154,6 +204,52 @@ tareas_unidades = tabla_tareas.merge(
 
     how="left"
 
+)
+tabla_operativa = tabla_operativa[
+
+    [
+
+        "Prioridad",
+
+        "Carro",
+
+        "Cliente",
+
+        "TotalUnidades",
+
+        "TotalSKUs",
+
+        "Despacho",
+
+        "Hora",
+
+        "Usuario",
+
+        "Estado",
+
+        "Categoria"
+
+    ]
+
+]
+
+tabla_operativa["TotalUnidades"] = (
+    tabla_operativa["TotalUnidades"]
+    .fillna(0)
+    .astype(int)
+)
+
+tabla_operativa["TotalSKUs"] = (
+    tabla_operativa["TotalSKUs"]
+    .fillna(0)
+    .astype(int)
+)
+
+tabla_operativa = tabla_operativa.rename(
+    columns={
+        "TotalUnidades": "Unidades",
+        "TotalSKUs": "SKUs"
+    }
 )
 
 # -----------------------------------------------------

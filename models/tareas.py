@@ -5,7 +5,7 @@ import pandas as pd
 # CONFIGURACIÓN
 # ==========================================================
 
-DIAS_TABLERO = 1
+DIAS_TABLERO = 2
 
 # ==========================================================
 # TABLA OPERATIVA
@@ -336,6 +336,8 @@ def obtener_resumen_operativo(
     # ------------------------------------------------------
 
     fecha_operativa = tabla["FechaHora"].dt.normalize().max()
+    fecha_inicio = fecha_operativa - pd.Timedelta(days=2)
+
 
     # ------------------------------------------------------
     # PEDIDOS PENDIENTES
@@ -356,7 +358,6 @@ def obtener_resumen_operativo(
                 [
 
                     "PENDIENTE",
-
                     "PREPARACION"
 
                 ]
@@ -381,7 +382,7 @@ def obtener_resumen_operativo(
 
             &
 
-            (tabla["FechaHora"].dt.normalize() == fecha_operativa)
+            (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
 
         ]["Carro"]
 
@@ -401,7 +402,7 @@ def obtener_resumen_operativo(
 
             &
 
-            (tabla["FechaHora"].dt.normalize() == fecha_operativa)
+            (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
 
         ]["Carro"]
 
@@ -420,9 +421,11 @@ def obtener_tabla_operativa(tabla):
     operativa = tabla.copy()
 
     fecha_operativa = operativa["FechaHora"].dt.normalize().max()
-
+    fecha_inicio = fecha_operativa - pd.Timedelta(days=2)
     operativa = operativa[
-    operativa["FechaHora"].dt.normalize() == fecha_operativa
+
+    operativa["FechaHora"].dt.normalize() >= fecha_inicio
+
 ].copy()
 
     operativa = operativa[
@@ -491,7 +494,7 @@ def obtener_avance_despachos(tabla):
     # ---------------------------------------
 
     fecha_operativa = tabla["FechaHora"].dt.normalize().max()
-
+    fecha_inicio = fecha_operativa - pd.Timedelta(days=2)
     df = tabla[
         tabla["FechaHora"].dt.normalize() == fecha_operativa
     ].copy()

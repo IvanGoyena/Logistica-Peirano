@@ -4,6 +4,10 @@ from utils.leer_datos import (
     leer_archivo
 )
 
+from models.detalle import (
+    construir_tabla_detalle
+)
+
 from models.pedidos import (
     construir_tabla_pedidos
 )
@@ -52,6 +56,7 @@ df_clientes = leer_archivo(
     cache=True
 )
 
+
 # =====================================================
 # TABLA
 # =====================================================
@@ -62,6 +67,13 @@ tabla = construir_tabla_pedidos(
     df_detalle,
     df_articulos,
     df_clientes
+
+)
+tabla_detalle = construir_tabla_detalle(
+
+    df_detalle,
+
+    df_articulos
 
 )
 
@@ -94,4 +106,26 @@ st.write(
     .size()
     .sort_values(ascending=False)
     .head(20)
+)
+
+st.markdown("---")
+
+st.subheader("📦 Detalle de Pedidos")
+
+st.caption(
+
+    f"{len(tabla_detalle):,} registros".replace(",", ".")
+
+)
+
+st.dataframe(
+
+    tabla_detalle,
+
+    width="stretch",
+
+    hide_index=True,
+
+    height=500
+
 )
