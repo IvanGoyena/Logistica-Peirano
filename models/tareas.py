@@ -515,10 +515,14 @@ def obtener_avance_despachos(tabla):
     # ---------------------------------------
 
     fecha_operativa = tabla["FechaHora"].dt.normalize().max()
+
     fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
+
     df = tabla[
-        tabla["FechaHora"].dt.normalize() == fecha_operativa
-    ].copy()
+
+    tabla["FechaHora"].dt.normalize() >= fecha_inicio
+
+].copy()
 
     # ---------------------------------------
     # SOLO OPERACIÓN VIVA
