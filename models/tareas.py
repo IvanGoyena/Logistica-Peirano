@@ -39,16 +39,19 @@ def construir_tabla_tareas(
     # ------------------------------------------------------
 
     pedidos = df_pedidos[
-        [
-            "PreparacionID",
-            "ClienteCodigo",
-            "ClienteDescripcion",
-            "PreparacionEstado",
-            "TipoPreparacion",
-            "Estado",
-            "Fecha"
-        ]
-    ].copy()
+    [
+        "PreparacionID",
+        "ClienteCodigo",
+        "ClienteDescripcion",
+        "PreparacionEstado",
+        "TipoPreparacion",
+        "Estado",
+        "Fecha",
+        "TotalUnidades",
+        "TotalSKUs",
+        "DetalleFamilias"
+    ]
+].copy()
 
     tabla = tabla.merge(
 
@@ -273,51 +276,52 @@ def construir_tabla_tareas(
     # ------------------------------------------------------
 
     tabla = tabla[
+    [
 
-        [
-
-            "Semaforo",
-            "Orden",
-            "Categoria",
-            "FechaHora",
-            "TareaEstado",
-            "PreparacionId",
-            "ClienteDescripcion",
-            "AreaDescripcion",
-            "DespachoDescripcion",
-            "Hora",
-            "ContenedorNumero",
-            "Usuario",
-            "PreparacionEstado",
-            "TipoPreparacion",
-            "Estado",
-
-
-        ]
-
-    ].copy()
-
-    tabla.columns = [
-
-        "Prioridad",
+        "Semaforo",
         "Orden",
         "Categoria",
         "FechaHora",
-        "Estado",
-        "Preparacion",
-        "Cliente",
-        "Area",
-        "Despacho",
+        "TareaEstado",
+        "PreparacionId",
+        "ClienteDescripcion",
+        "AreaDescripcion",
+        "DespachoDescripcion",
         "Hora",
-        "Carro",
+        "ContenedorNumero",
         "Usuario",
-        "EstadoPreparacion",
+        "PreparacionEstado",
         "TipoPreparacion",
-        "EstadoPedido",
-
+        "Estado",
+        "TotalUnidades",
+        "TotalSKUs",
+        "DetalleFamilias",
 
     ]
+].copy()
 
+    tabla.columns = [
+
+    "Prioridad",
+    "Orden",
+    "Categoria",
+    "FechaHora",
+    "Estado",
+    "Preparacion",
+    "Cliente",
+    "Area",
+    "Despacho",
+    "Hora",
+    "Carro",
+    "Usuario",
+    "EstadoPreparacion",
+    "TipoPreparacion",
+    "EstadoPedido",
+    "Unidades",
+    "SKUs",
+    "Familias"
+
+]
     return tabla
 
 # ==========================================================
@@ -744,6 +748,7 @@ def obtener_carros_criticos(
     ]
 
 ]
+    
 
     return tabla
 

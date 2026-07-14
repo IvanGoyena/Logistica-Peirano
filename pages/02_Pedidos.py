@@ -5,11 +5,12 @@ from utils.leer_datos import (
 )
 
 from models.detalle import (
-    construir_tabla_detalle
+    construir_tabla_detalle,
+    construir_resumen_pedidos
 )
 
 from models.pedidos import (
-    construir_tabla_pedidos
+    construir_tabla_pedidos,
 )
 
 import streamlit as st
@@ -46,7 +47,7 @@ df_detalle = leer_archivo(
 
 df_articulos = leer_archivo(
     CARPETA_DATOS,
-    "Maestro Articulos",
+    "Maestro Articulo",
     cache=True
 )
 
@@ -69,6 +70,8 @@ tabla = construir_tabla_pedidos(
     df_clientes
 
 )
+
+
 tabla_detalle = construir_tabla_detalle(
 
     df_detalle,
@@ -76,6 +79,14 @@ tabla_detalle = construir_tabla_detalle(
     df_articulos
 
 )
+
+resumen = construir_resumen_pedidos(
+
+    tabla_detalle
+
+)
+
+
 
 # =====================================================
 # VISUALIZACIÓN
@@ -101,26 +112,9 @@ st.dataframe(
 
 )
 
-st.write(
-    tabla.groupby("PreparacionID")
-    .size()
-    .sort_values(ascending=False)
-    .head(20)
-)
-
-st.markdown("---")
-
-st.subheader("📦 Detalle de Pedidos")
-
-st.caption(
-
-    f"{len(tabla_detalle):,} registros".replace(",", ".")
-
-)
-
 st.dataframe(
 
-    tabla_detalle,
+    resumen,
 
     width="stretch",
 
@@ -129,3 +123,4 @@ st.dataframe(
     height=500
 
 )
+

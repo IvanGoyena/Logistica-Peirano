@@ -1,6 +1,8 @@
-    # =====================================================
-    # PARTE 1
-    #======================================================
+# =====================================================
+# PARTE 1
+#======================================================
+import pandas as pd
+
 from config import *
 
 import streamlit as st
@@ -67,7 +69,7 @@ df_clientes = leer_archivo(
 
 df_articulos = leer_archivo(
     CARPETA_DATOS,
-    "Maestro Articulos",
+    "Maestro Articulo",
     cache=True
 )
 
@@ -95,7 +97,7 @@ tabla_tareas = construir_tabla_tareas(
 
     df_tareas,
 
-    df_pedidos,
+    tabla_pedidos,
 
     df_clientes
 
@@ -107,107 +109,25 @@ tabla_operativa = obtener_tabla_operativa(
 
 )
 
-# =====================================================
-# ENRIQUECER TABLA OPERATIVA
-# =====================================================
-
-tabla_operativa = tabla_operativa.merge(
-
-    tabla_pedidos[
-
-        [
-
-            "PreparacionID",
-
-            "TotalUnidades",
-
-            "TotalSKUs"
-
-        ]
-
-    ],
-
-    left_on="Preparacion",
-
-    right_on="PreparacionID",
-
-    how="left"
-
-)
-
-tabla_operativa.drop(
-
-    columns="PreparacionID",
-
-    inplace=True,
-
-    errors="ignore"
-
-)
-
-tabla_operativa["TotalUnidades"] = (
-
-    tabla_operativa["TotalUnidades"]
-
-    .fillna(0)
-
-    .astype(int)
-
-)
-
-tabla_operativa["TotalSKUs"] = (
-
-    tabla_operativa["TotalSKUs"]
-
-    .fillna(0)
-
-    .astype(int)
-
-)
-
-tabla_operativa.rename(
-
-    columns={
-
-        "TotalUnidades":"Unidades",
-
-        "TotalSKUs":"SKUs"
-
-    },
-
-    inplace=True
-
-)
 
 tabla_operativa = tabla_operativa[
-
     [
-
         "Prioridad",
-
         "Carro",
-
         "Cliente",
-
         "Unidades",
-
         "SKUs",
-
+        "Familias",
         "Despacho",
-
         "Hora",
-
         "Usuario",
-
         "Estado",
-
         "Categoria",
-
         "Preparacion"
-
+        
     ]
-
 ]
+
 
 # =====================================================
 # KPIs PEDIDOS
@@ -408,9 +328,7 @@ st.markdown("---")
 st.subheader("📈 Indicadores Operativos")
 
 col1, col2, col3 = st.columns(
-
-    [1.2,1.1,0.7]
-
+    [1.0, 1.3, 1.0]
 )
 
 # =====================================================
@@ -614,23 +532,167 @@ with col2:
 # =====================================================
 # RESERVADO
 # =====================================================
+# =====================================================
+# FAMILIAS EN OPERACIÓN
+# =====================================================
+
+familias = [
+
+    c
+    for c in [
+        "Accesorios",
+        "Bachas",
+        "Duchones",
+        "Flexibles",
+        "Grifería",
+        "Griferia",
+        "Grifería Lago",
+        "Griferia Lago",
+        "Pisos de ducha",
+        "Repuestos",
+        "Sanitarios",
+        "Varios",
+    ]
+    if c in tabla_pedidos.columns
+
+]
+
+# Preparaciones activas
+preparaciones_activas = tabla_tareas[
+    tabla_tareas["Categoria"].isin(
+        [
+            "Pendiente",
+            "En Curso"
+        ]
+    )
+]["Preparacion"].unique()
+
+# Total por familia
+familias_operativas = (
+
+    tabla_pedidos[
+        tabla_pedidos["PreparacionID"].isin(
+            preparaciones_activas
+        )
+    ][familias]
+
+    .sum()
+
+    .sort_values(
+        ascending=False
+    )
+
+)
+
+familias_operativas = familias_operativas[
+    familias_operativas > 0
+]
+
+# =====================================================
+# GRAFICO
+# =====================================================
 
 with col3:
 
-    st.caption("📊 Próximamente")
+    st.caption("📦 Familias en preparación")
 
-    st.info(
+    fig = go.Figure(
 
-        "Familias\n\n"
+        go.Pie(
 
-        "Volumetría\n\n"
+            labels=familias_operativas.index,
 
-        "Productividad"
+            values=familias_operativas.values,
+
+            hole=0.72,
+
+            textinfo="none",
+
+            sort=False,
+
+            marker=dict(
+                line=dict(
+                    color="#111111",
+                    width=2
+                )
+            )
+
+        )
 
     )
 
-st.markdown("---")
+    fig.update_layout(
 
+        height=430,
+
+        margin=dict(
+            l=5,
+            r=5,
+            t=20,
+            b=5
+        ),
+
+        annotations=[
+
+            dict(
+
+                text=(
+                    f"<b>{int(familias_operativas.sum()):,}</b>"
+                    "<br>"
+                    "<span style='font-size:16px'>Unidades</span>"
+                ).replace(",", "."),
+
+                x=0.50,
+                y=0.50,
+
+                showarrow=False,
+
+                font=dict(
+                    size=28,
+                    color="white"
+                )
+
+            )
+
+        ],
+
+        legend=dict(
+
+            orientation="v",
+
+            x=1.02,
+
+            y=0.95,
+
+            font=dict(
+
+                size=14,
+
+                color="white"
+
+            )
+
+        ),
+
+        paper_bgcolor="rgba(0,0,0,0)",
+
+        plot_bgcolor="rgba(0,0,0,0)",
+
+        font=dict(color="white")
+
+    )
+
+    st.plotly_chart(
+
+        fig,
+
+        use_container_width=True,
+
+        config={
+            "displayModeBar": False
+        }
+
+    )
 # =====================================================
 # TABLA OPERATIVA
 # =====================================================
@@ -649,30 +711,42 @@ st.caption(
 
 tabla_visual = tabla_operativa.copy()
 
+# =====================================================
+# FORMATOS VISUALES
+# =====================================================
+
+tabla_visual["Unidades"] = (
+    pd.to_numeric(
+        tabla_visual["Unidades"],
+        errors="coerce"
+    )
+    .fillna(0)
+    .astype(int)
+)
+
+tabla_visual["SKUs"] = (
+    pd.to_numeric(
+        tabla_visual["SKUs"],
+        errors="coerce"
+    )
+    .fillna(0)
+    .astype(int)
+)
+
+
 tabla_visual = tabla_visual[
-
     [
-
         "Prioridad",
-
         "Carro",
-
         "Cliente",
-
         "Unidades",
-
         "SKUs",
-
         "Despacho",
-
         "Hora",
-
         "Usuario",
-
-        "Estado"
-
+        "Estado",
+        "Familias"
     ]
-
 ]
 
 # -----------------------------------------------------
@@ -712,25 +786,19 @@ def resaltar_carro(fila):
     return estilos
 
 st.dataframe(
-
     tabla_visual
-
         .style
-
+        .format({
+            "Unidades": "{:.0f}",
+            "SKUs": "{:.0f}",
+        })
         .apply(
-
             resaltar_carro,
-
             axis=1
-
         ),
-
     use_container_width=True,
-
     hide_index=True,
-
     height=620
-
 )
 
 st.markdown("---")
