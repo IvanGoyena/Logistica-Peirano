@@ -356,7 +356,12 @@ with col3:
 
         "✅ Carros Finalizados",
 
-        resumen["CarrosFinalizados"]
+        resumen["CarrosFinalizados"],
+
+        delta=(
+            f'Hoy: {resumen["CarrosFinalizadosHoy"]} | '
+            f'Ayer: {resumen["CarrosFinalizadosAyer"]}'
+        )
 
     )
 # =====================================================

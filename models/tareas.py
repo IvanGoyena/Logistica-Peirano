@@ -370,48 +370,69 @@ def obtener_resumen_operativo(
 
     )
 
-    # ------------------------------------------------------
-    # CARROS EN CURSO
-    # ------------------------------------------------------
+# ------------------------------------------------------
+# CARROS EN CURSO
+# ------------------------------------------------------
 
     resumen["CarrosEnCurso"] = (
 
+    tabla[
+
+        (tabla["Categoria"] == "En Curso")
+
+        &
+
+        (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
+
+    ]["Carro"]
+
+    .nunique()
+
+)
+
+# ------------------------------------------------------
+# CARROS FINALIZADOS
+# ------------------------------------------------------
+
+    hoy = (
+
         tabla[
 
-            (tabla["Categoria"] == "En Curso")
+        (tabla["Categoria"] == "Finalizado")
 
-            &
+        &
 
-            (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
+        (tabla["FechaHora"].dt.normalize() == fecha_operativa)
 
-        ]["Carro"]
+    ]["Carro"]
 
-        .nunique()
+    .nunique()
 
-    )
+)
 
-    # ------------------------------------------------------
-    # CARROS FINALIZADOS
-    # ------------------------------------------------------
+    ayer = (
 
-    resumen["CarrosFinalizados"] = (
+    tabla[
 
-        tabla[
+        (tabla["Categoria"] == "Finalizado")
 
-            (tabla["Categoria"] == "Finalizado")
+        &
 
-            &
+        (tabla["FechaHora"].dt.normalize() == (fecha_operativa - pd.Timedelta(days=1)))
 
-            (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
+    ]["Carro"]
 
-        ]["Carro"]
+    .nunique()
 
-        .nunique()
+)
 
-    )
+    resumen["CarrosFinalizados"] = hoy + ayer
+
+    resumen["CarrosFinalizadosHoy"] = hoy
+
+    resumen["CarrosFinalizadosAyer"] = ayer
 
     return resumen
-
 # ==========================================================
 # TABLA OPERATIVA
 # ==========================================================
@@ -421,7 +442,7 @@ def obtener_tabla_operativa(tabla):
     operativa = tabla.copy()
 
     fecha_operativa = operativa["FechaHora"].dt.normalize().max()
-    fecha_inicio = fecha_operativa - pd.Timedelta(days=2)
+    fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
     operativa = operativa[
 
     operativa["FechaHora"].dt.normalize() >= fecha_inicio
@@ -494,7 +515,7 @@ def obtener_avance_despachos(tabla):
     # ---------------------------------------
 
     fecha_operativa = tabla["FechaHora"].dt.normalize().max()
-    fecha_inicio = fecha_operativa - pd.Timedelta(days=2)
+    fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
     df = tabla[
         tabla["FechaHora"].dt.normalize() == fecha_operativa
     ].copy()
