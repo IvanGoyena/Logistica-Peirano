@@ -643,6 +643,111 @@ def obtener_avance_despachos(tabla):
 
     return avance
 
+
+    # ---------------------------------------
+    # CARROS CRITICOS
+    # ---------------------------------------
+
+
+
+def obtener_carros_criticos(
+
+    tabla_operativa,
+    avance_despachos
+
+):
+    criticos = avance_despachos[
+
+    avance_despachos["Avance"] >= 50
+
+].copy()
+    
+    tabla = tabla_operativa.merge(
+
+    criticos[
+
+        [
+
+            "Despacho",
+
+            "Avance",
+
+            "TotalPreparaciones",
+
+            "PreparacionesFinalizadas"
+
+        ]
+
+    ],
+
+    on="Despacho",
+
+    how="inner"
+
+)
+
+    tabla = tabla[
+
+    tabla["Categoria"] == "En Curso"
+
+].copy()
+    
+    tabla["Faltan"] = (
+
+    tabla["TotalPreparaciones"]
+
+    -
+
+    tabla["PreparacionesFinalizadas"]
+
+)
+    
+    tabla = tabla.sort_values(
+
+    [
+
+        "Avance",
+
+        "Faltan",
+
+        "Hora"
+
+    ],
+
+    ascending=[
+
+        False,
+
+        True,
+
+        True
+
+    ]
+
+)
+    tabla = tabla[
+
+    [
+
+        "Despacho",
+
+        "Avance",
+
+        "Faltan",
+
+        "Carro",
+
+        "Cliente",
+
+        "Unidades",
+
+    ]
+
+]
+
+    return tabla
+
+
 # ==========================================================
 # FIN DEL MÓDULO TAREAS
 # ==========================================================

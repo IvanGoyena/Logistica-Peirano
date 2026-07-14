@@ -1,5 +1,9 @@
+    # =====================================================
+    # PARTE 1
+    #======================================================
 from config import *
 
+import streamlit as st
 import plotly.graph_objects as go
 
 from utils.leer_datos import (
@@ -13,21 +17,24 @@ from models.pedidos import (
 
 from models.tareas import (
     construir_tabla_tareas,
-    obtener_resumen_operativo,
     obtener_tabla_operativa,
-    obtener_avance_despachos
+    obtener_resumen_operativo,
+    obtener_avance_despachos,
+    obtener_carros_criticos
 )
-
-import streamlit as st
 
 # =====================================================
 # CONFIGURACIÓN
 # =====================================================
 
 st.set_page_config(
+
     page_title="Gestión de Tareas",
+
     page_icon="📋",
+
     layout="wide"
+
 )
 
 # =====================================================
@@ -64,65 +71,44 @@ df_articulos = leer_archivo(
     cache=True
 )
 
+# =====================================================
+# TABLA PEDIDOS
+# =====================================================
+
 tabla_pedidos = construir_tabla_pedidos(
 
     df_pedidos,
+
     df_detalle,
+
     df_articulos,
+
     df_clientes
 
 )
 
 # =====================================================
-# KPIs PEDIDOS
-# =====================================================
-
-# Solo pedidos que todavía NO comenzaron
-pedidos_sin_preparacion = tabla_pedidos[
-
-    tabla_pedidos["PreparacionID"].isna()
-
-].copy()
-
-pedidos_pendientes = len(
-
-    pedidos_sin_preparacion
-
-)
-
-unidades_pendientes = int(
-
-    pedidos_sin_preparacion["TotalUnidades"]
-
-    .fillna(0)
-
-    .sum()
-
-)
-
-
-# =====================================================
-# TABLA OPERATIVA
+# TABLA TAREAS
 # =====================================================
 
 tabla_tareas = construir_tabla_tareas(
 
     df_tareas,
+
     df_pedidos,
+
     df_clientes
 
 )
 
 tabla_operativa = obtener_tabla_operativa(
-    tabla_tareas
-)
-avance_despachos = obtener_avance_despachos(
-    tabla_tareas
-)
 
+    tabla_tareas
+
+)
 
 # =====================================================
-# TABLA OPERATIVA ENRIQUECIDA
+# ENRIQUECER TABLA OPERATIVA
 # =====================================================
 
 tabla_operativa = tabla_operativa.merge(
@@ -149,38 +135,108 @@ tabla_operativa = tabla_operativa.merge(
 
 )
 
-tabla_operativa = tabla_operativa.drop(
+tabla_operativa.drop(
 
     columns="PreparacionID",
+
+    inplace=True,
 
     errors="ignore"
 
 )
 
+tabla_operativa["TotalUnidades"] = (
 
+    tabla_operativa["TotalUnidades"]
 
-# =====================================================
-# UNIDADES POR PREPARACION
-# =====================================================
+    .fillna(0)
 
-unidades_preparacion = tabla_pedidos[
+    .astype(int)
 
-    [
-
-        "PreparacionID",
-
-        "TotalUnidades"
-
-    ]
-
-].copy()
-
-resumen = obtener_resumen_operativo(
-    tabla_tareas,
-    df_pedidos
 )
+
+tabla_operativa["TotalSKUs"] = (
+
+    tabla_operativa["TotalSKUs"]
+
+    .fillna(0)
+
+    .astype(int)
+
+)
+
+tabla_operativa.rename(
+
+    columns={
+
+        "TotalUnidades":"Unidades",
+
+        "TotalSKUs":"SKUs"
+
+    },
+
+    inplace=True
+
+)
+
+tabla_operativa = tabla_operativa[
+
+    [
+
+        "Prioridad",
+
+        "Carro",
+
+        "Cliente",
+
+        "Unidades",
+
+        "SKUs",
+
+        "Despacho",
+
+        "Hora",
+
+        "Usuario",
+
+        "Estado",
+
+        "Categoria",
+
+        "Preparacion"
+
+    ]
+
+]
+
 # =====================================================
-# UNIDADES CARROS
+# KPIs PEDIDOS
+# =====================================================
+
+pedidos_sin_preparacion = tabla_pedidos[
+
+    tabla_pedidos["PreparacionID"].isna()
+
+].copy()
+
+pedidos_pendientes = len(
+
+    pedidos_sin_preparacion
+
+)
+
+unidades_pendientes = int(
+
+    pedidos_sin_preparacion["TotalUnidades"]
+
+    .fillna(0)
+
+    .sum()
+
+)
+
+# =====================================================
+# KPIs CARROS
 # =====================================================
 
 unidades_preparacion = tabla_pedidos[
@@ -188,11 +244,12 @@ unidades_preparacion = tabla_pedidos[
     [
 
         "PreparacionID",
+
         "TotalUnidades"
 
     ]
 
-].copy()
+]
 
 tareas_unidades = tabla_tareas.merge(
 
@@ -205,62 +262,12 @@ tareas_unidades = tabla_tareas.merge(
     how="left"
 
 )
-tabla_operativa = tabla_operativa[
-
-    [
-
-        "Prioridad",
-
-        "Carro",
-
-        "Cliente",
-
-        "TotalUnidades",
-
-        "TotalSKUs",
-
-        "Despacho",
-
-        "Hora",
-
-        "Usuario",
-
-        "Estado",
-
-        "Categoria"
-
-    ]
-
-]
-
-tabla_operativa["TotalUnidades"] = (
-    tabla_operativa["TotalUnidades"]
-    .fillna(0)
-    .astype(int)
-)
-
-tabla_operativa["TotalSKUs"] = (
-    tabla_operativa["TotalSKUs"]
-    .fillna(0)
-    .astype(int)
-)
-
-tabla_operativa = tabla_operativa.rename(
-    columns={
-        "TotalUnidades": "Unidades",
-        "TotalSKUs": "SKUs"
-    }
-)
-
-# -----------------------------------------------------
-# CARROS EN CURSO
-# -----------------------------------------------------
 
 unidades_carros_curso = (
 
     tareas_unidades[
 
-        tareas_unidades["Categoria"] == "En Curso"
+        tareas_unidades["Categoria"]=="En Curso"
 
     ]
 
@@ -273,16 +280,12 @@ unidades_carros_curso = (
     .sum()
 
 )
-
-# -----------------------------------------------------
-# CARROS FINALIZADOS
-# -----------------------------------------------------
 
 unidades_carros_finalizados = (
 
     tareas_unidades[
 
-        tareas_unidades["Categoria"] == "Finalizado"
+        tareas_unidades["Categoria"]=="Finalizado"
 
     ]
 
@@ -296,9 +299,34 @@ unidades_carros_finalizados = (
 
 )
 
+# =====================================================
+# RESUMEN
+# =====================================================
+
+resumen = obtener_resumen_operativo(
+
+    tabla_tareas,
+
+    df_pedidos
+
+)
+
+avance_despachos = obtener_avance_despachos(
+
+    tabla_tareas
+
+)
+
+carros_criticos = obtener_carros_criticos(
+
+    tabla_operativa,
+
+    avance_despachos
+
+)
 
 # =====================================================
-# CABECERA
+# PARTE 2
 # =====================================================
 
 st.title("📋 Gestión de Tareas")
@@ -313,44 +341,45 @@ st.markdown("---")
 
 st.subheader("📊 Resumen Operativo")
 
-col1, col2, col3 = st.columns(3)
+kpi1, kpi2, kpi3 = st.columns(3)
 
-# ---------------------------------------
-# PEDIDOS PENDIENTES
-# ---------------------------------------
+# -----------------------------------------------------
+# PEDIDOS
+# -----------------------------------------------------
 
-with col1:
+with kpi1:
 
     st.metric(
 
-    "📦 Pedidos Pendientes",
+        "📦 Pedidos Pendientes",
 
-    pedidos_pendientes,
+        pedidos_pendientes,
 
-    delta=f"{unidades_pendientes:,} Unidades".replace(",", ".")
+        delta=f"{unidades_pendientes:,} Unidades".replace(",", ".")
 
-)
-# ---------------------------------------
+    )
+
+# -----------------------------------------------------
 # CARROS EN CURSO
-# ---------------------------------------
+# -----------------------------------------------------
 
-with col2:
+with kpi2:
 
     st.metric(
 
-    "🛒 Carros en Curso",
+        "🛒 Carros en Curso",
 
-    resumen["CarrosEnCurso"],
+        resumen["CarrosEnCurso"],
 
-    delta=f"{int(unidades_carros_curso):,} Unidades".replace(",", ".")
+        delta=f"{int(unidades_carros_curso):,} Unidades".replace(",", ".")
 
-)
-    
-# ---------------------------------------
+    )
+
+# -----------------------------------------------------
 # CARROS FINALIZADOS
-# ---------------------------------------
+# -----------------------------------------------------
 
-with col3:
+with kpi3:
 
     st.metric(
 
@@ -359,22 +388,34 @@ with col3:
         resumen["CarrosFinalizados"],
 
         delta=(
-            f'Hoy: {resumen["CarrosFinalizadosHoy"]} | '
+
+            f'Hoy: {resumen["CarrosFinalizadosHoy"]}'
+
+            f' | '
+
             f'Ayer: {resumen["CarrosFinalizadosAyer"]}'
+
         )
 
     )
-# =====================================================
-# GRÁFICOS
-# =====================================================
 
-# ---------------------------------------
-# GRAFICO AVANCE DESPACHOS
-# ---------------------------------------
+st.markdown("---")
+
+# =====================================================
+# INDICADORES
+# =====================================================
 
 st.subheader("📈 Indicadores Operativos")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns(
+
+    [1.2,1.1,0.7]
+
+)
+
+# =====================================================
+# AVANCE DESPACHOS
+# =====================================================
 
 with col1:
 
@@ -382,21 +423,38 @@ with col1:
 
     cols = st.columns(3)
 
-    for i, (_, fila) in enumerate(avance_despachos.iterrows()):
+    for i, (_, fila) in enumerate(
+
+        avance_despachos.iterrows()
+
+    ):
 
         with cols[i % 3]:
 
             avance = int(fila["Avance"])
-            cerrados = int(fila["PreparacionesFinalizadas"])
-            total = int(fila["TotalPreparaciones"])
+
+            cerrados = int(
+
+                fila["PreparacionesFinalizadas"]
+
+            )
+
+            total = int(
+
+                fila["TotalPreparaciones"]
+
+            )
 
             if avance <= 30:
+
                 color = "#D32F2F"
 
             elif avance <= 70:
+
                 color = "#F57C00"
 
             else:
+
                 color = "#2E7D32"
 
             fig = go.Figure()
@@ -409,15 +467,11 @@ with col1:
 
                         avance,
 
-                        max(100 - avance, 0)
+                        max(100-avance,0)
 
                     ],
 
-                    hole=0.72,
-
-                    sort=False,
-
-                    direction="clockwise",
+                    hole=.72,
 
                     textinfo="none",
 
@@ -431,15 +485,7 @@ with col1:
 
                             "#3A3A3A"
 
-                        ],
-
-                        line=dict(
-
-                            color="#202020",
-
-                            width=2
-
-                        )
+                        ]
 
                     )
 
@@ -455,9 +501,9 @@ with col1:
 
                         text=f"<b>{avance}%</b>",
 
-                        x=0.5,
+                        x=.5,
 
-                        y=0.55,
+                        y=.55,
 
                         showarrow=False,
 
@@ -473,11 +519,11 @@ with col1:
 
                     dict(
 
-                        text=f"{cerrados} / {total}",
+                        text=f"{cerrados}/{total}",
 
-                        x=0.5,
+                        x=.5,
 
-                        y=0.36,
+                        y=.36,
 
                         showarrow=False,
 
@@ -485,7 +531,7 @@ with col1:
 
                             size=12,
 
-                            color="#A0A0A0"
+                            color="#AAAAAA"
 
                         )
 
@@ -495,25 +541,19 @@ with col1:
 
                 title=dict(
 
-    text=f"<b>{fila['Despacho']}</b>",
+                    text=f"<b>{fila['Despacho']}</b>",
 
-    x=0.5,
+                    x=.5,
 
-    xanchor="center",
+                    font=dict(
 
-    y=0.97,
+                        size=12,
 
-    yanchor="top",
+                        color="white"
 
-    font=dict(
+                    )
 
-        size=12,
-
-        color="white"
-
-    )
-
-),
+                ),
 
                 height=180,
 
@@ -545,70 +585,168 @@ with col1:
 
                 config={
 
-                    "displayModeBar": False
+                    "displayModeBar":False
 
                 }
 
             )
 
+# =====================================================
+# CARROS CRÍTICOS
+# =====================================================
+
 with col2:
 
-    st.info("Próximamente")
+    st.caption("🚨 Carros que cierran despachos")
+
+    st.dataframe(
+
+        carros_criticos,
+
+        use_container_width=True,
+
+        hide_index=True,
+
+        height=430
+
+    )
+
+# =====================================================
+# RESERVADO
+# =====================================================
 
 with col3:
 
-    st.info("Próximamente")
+    st.caption("📊 Próximamente")
+
+    st.info(
+
+        "Familias\n\n"
+
+        "Volumetría\n\n"
+
+        "Productividad"
+
+    )
 
 st.markdown("---")
 
+# =====================================================
+# TABLA OPERATIVA
+# =====================================================
 
 st.subheader("📋 Operación en Curso")
 
 st.caption(
+
     f"{len(tabla_operativa)} registros"
+
 )
 
+# -----------------------------------------------------
+# TABLA
+# -----------------------------------------------------
+
+tabla_visual = tabla_operativa.copy()
+
+tabla_visual = tabla_visual[
+
+    [
+
+        "Prioridad",
+
+        "Carro",
+
+        "Cliente",
+
+        "Unidades",
+
+        "SKUs",
+
+        "Despacho",
+
+        "Hora",
+
+        "Usuario",
+
+        "Estado"
+
+    ]
+
+]
+
+# -----------------------------------------------------
+# ESTILOS
+# -----------------------------------------------------
 
 def resaltar_carro(fila):
 
     estilos = [""] * len(fila)
 
+    indice = fila.index.get_loc("Carro")
+
     if fila["Prioridad"] == "🔴":
 
-        indice = fila.index.get_loc("Carro")
+        estilos[indice] = (
+
+            "background-color:#C62828;"
+
+            "color:white;"
+
+            "font-weight:bold;"
+
+        )
+
+    elif fila["Prioridad"] == "🟠":
 
         estilos[indice] = (
-            "background-color:#C62828;"
+
+            "background-color:#EF6C00;"
+
             "color:white;"
+
             "font-weight:bold;"
+
         )
 
     return estilos
 
 st.dataframe(
 
-    tabla_operativa
+    tabla_visual
+
         .style
-        .apply(resaltar_carro, axis=1),
+
+        .apply(
+
+            resaltar_carro,
+
+            axis=1
+
+        ),
 
     use_container_width=True,
 
     hide_index=True,
 
-    height=600
+    height=620
 
 )
+
+st.markdown("---")
 
 # =====================================================
 # BOTÓN
 # =====================================================
 
-if st.button("🏠 Volver al Inicio"):
+if st.button(
 
-    st.switch_page("app.py")
+    "🏠 Volver al Inicio"
 
+):
 
+    st.switch_page(
 
+        "app.py"
 
-
-
+    )
