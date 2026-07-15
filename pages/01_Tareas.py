@@ -71,7 +71,7 @@ df_clientes = leer_archivo(
 df_articulos = leer_archivo(
     CARPETA_DATOS,
     "Maestro Articulo",
-    cache=True
+    cache=False 
 )
 
 # =====================================================
@@ -542,28 +542,32 @@ with col2:
 # RESERVADO
 # =====================================================
 # =====================================================
-# FAMILIAS EN OPERACIÓN
+# SECTORIZACIONES EN OPERACIÓN
 # =====================================================
 
-familias = [
-
+sectorizaciones = [
     c
     for c in [
-        "Accesorios",
+        "IMPORTADO",
+        "Importado",
+        "NACIONAL",
+        "Nacional",
+        "BACHAS",
         "Bachas",
-        "Duchones",
-        "Flexibles",
-        "Grifería",
-        "Griferia",
-        "Grifería Lago",
-        "Griferia Lago",
-        "Pisos de ducha",
-        "Repuestos",
+        "BLISTER",
+        "Blister",
+        "SANITARIOS",
         "Sanitarios",
+        "REPUESTOS",
+        "Repuestos",
+        "FLEXIBLES",
+        "Flexibles",
+        "ACCESORIOS",
+        "Accesorios",
+        "VARIOS",
         "Varios",
     ]
     if c in tabla_pedidos.columns
-
 ]
 
 # Preparaciones activas
@@ -583,7 +587,7 @@ familias_operativas = (
         tabla_pedidos["PreparacionID"].isin(
             preparaciones_activas
         )
-    ][familias]
+    ][sectorizaciones]
 
     .sum()
 
@@ -603,15 +607,21 @@ familias_operativas = familias_operativas[
 
 with col3:
 
-    st.caption("📦 Familias en preparación")
+    st.caption("📦 Sector en preparación")
 
     fig = go.Figure(
 
         go.Pie(
 
-            labels=familias_operativas.index,
+            labels=[
+    f"{sector} — {int(unidades):,} u.".replace(",", ".")
+    for sector, unidades in zip(
+        familias_operativas.index,
+        familias_operativas.values
+    )
+    ],
 
-            values=familias_operativas.values,
+    values=familias_operativas.values,
 
             hole=0.72,
 

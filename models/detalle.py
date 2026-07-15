@@ -305,40 +305,31 @@ def construir_resumen_pedidos(
     )
 
     # ------------------------------------------------------
-    # UNIDADES POR FAMILIA
-    # ------------------------------------------------------
+# UNIDADES POR SECTORIZACION
+# ------------------------------------------------------
 
     familias = (
-
-        tabla_detalle
-
-        .groupby(
-
-            [
-
-                "Pedido",
-
-                "Familia"
-
-            ],
-
-            as_index=False
-
-        )
-
-        .agg(
-
-            Unidades=(
-
-                "Cantidad",
-
-                "sum"
-
-            )
-
-        )
-
+    tabla_detalle
+    .groupby(
+        [
+            "Pedido",
+            "Sectorizacion"
+        ],
+        as_index=False
     )
+    .agg(
+        Unidades=(
+            "Cantidad",
+            "sum"
+        )
+    )
+)
+
+    familias = familias.rename(
+    columns={
+        "Sectorizacion": "Familia"
+    }
+)
 
     # ------------------------------------------------------
     # TEXTO FAMILIAS

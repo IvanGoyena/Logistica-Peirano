@@ -52,7 +52,7 @@ df_clientes = leer_archivo(
 df_articulos = leer_archivo(
     CARPETA_DATOS,
     "Maestro Articulo",
-    cache=True
+    cache=False
 )
 
 
