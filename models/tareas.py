@@ -735,10 +735,6 @@ def obtener_carros_criticos(
 
         "Despacho",
 
-        "Avance",
-
-        "Faltan",
-
         "Carro",
 
         "Cliente",
