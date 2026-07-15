@@ -22,7 +22,8 @@ from models.tareas import (
     obtener_tabla_operativa,
     obtener_resumen_operativo,
     obtener_avance_despachos,
-    obtener_carros_criticos
+    obtener_carros_criticos,
+    obtener_pendiente_pick
 )
 
 # =====================================================
@@ -245,6 +246,15 @@ carros_criticos = obtener_carros_criticos(
 
 )
 
+pendiente_pick = obtener_pendiente_pick(
+
+    tabla_tareas,
+
+    tabla_pedidos
+
+)
+
+
 # =====================================================
 # PARTE 2
 # =====================================================
@@ -261,7 +271,8 @@ st.markdown("---")
 
 st.subheader("📊 Resumen Operativo")
 
-kpi1, kpi2, kpi3 = st.columns(3)
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
 
 # -----------------------------------------------------
 # PEDIDOS
@@ -279,11 +290,29 @@ with kpi1:
 
     )
 
+
+
+# -----------------------------------------------------
+# PENDIENTE DE PICKEAR
+# -----------------------------------------------------
+
+with kpi2:
+
+    st.metric(
+
+        "📦 Pendiente de Pickear",
+
+        pendiente_pick["Preparaciones"],
+
+        delta=f"{pendiente_pick['Unidades']:,} Unidades".replace(",", ".")
+
+    )
+
 # -----------------------------------------------------
 # CARROS EN CURSO
 # -----------------------------------------------------
 
-with kpi2:
+with kpi3:
 
     st.metric(
 
@@ -299,7 +328,7 @@ with kpi2:
 # CARROS FINALIZADOS
 # -----------------------------------------------------
 
-with kpi3:
+with kpi4:
 
     st.metric(
 

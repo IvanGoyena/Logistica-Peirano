@@ -437,6 +437,67 @@ def obtener_resumen_operativo(
     resumen["CarrosFinalizadosAyer"] = ayer
 
     return resumen
+
+# ==========================================================
+# PENDIENTE DE PICKEAR
+# ==========================================================
+
+def obtener_pendiente_pick(
+    tabla_tareas,
+    tabla_pedidos
+):
+
+    # ---------------------------------------
+    # PREPARACIONES ACTIVAS EN LA OPERACIÓN
+    # ---------------------------------------
+
+    preparaciones_en_curso = set(
+
+        tabla_tareas[
+            tabla_tareas["Categoria"].isin(
+                [
+                    "En Curso",
+                    "Finalizado"
+                ]
+            )
+        ]["Preparacion"]
+
+        .dropna()
+
+        .unique()
+
+    )
+
+    # ---------------------------------------
+    # PREPARACIONES PENDIENTES DE INICIAR
+    # ---------------------------------------
+
+    pendientes = tabla_pedidos[
+
+        (~tabla_pedidos["PreparacionID"].isin(preparaciones_en_curso))
+
+        &
+
+        (tabla_pedidos["PreparacionID"].notna())
+
+    ].copy()
+
+    return {
+
+        "Preparaciones": pendientes["PreparacionID"].nunique(),
+
+        "Unidades": int(
+
+            pendientes["TotalUnidades"]
+
+            .fillna(0)
+
+            .sum()
+
+        )
+
+    }
+
 # ==========================================================
 # TABLA OPERATIVA
 # ==========================================================
