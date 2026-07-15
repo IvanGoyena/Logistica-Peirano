@@ -232,10 +232,8 @@ resumen = obtener_resumen_operativo(
 
 )
 
-avance_despachos = obtener_avance_despachos(
-
-    tabla_tareas
-
+avance_despachos, despachos_sin_iniciar = obtener_avance_despachos(
+    tabla_tareas,
 )
 
 carros_criticos = obtener_carros_criticos(
@@ -368,40 +366,46 @@ with col1:
 
     st.caption("📦 Avance de Despachos")
 
+    # -------------------------------------------------
+    # DESPACHOS SIN INICIAR
+    # -------------------------------------------------
+
+    if despachos_sin_iniciar:
+
+        st.caption(
+            f"🚛 Sin iniciar ({len(despachos_sin_iniciar)})"
+        )
+
+        st.markdown(
+            "<div style='font-size:12px;color:#BDBDBD;margin-bottom:10px'>"
+            + " • ".join(despachos_sin_iniciar)
+            + "</div>",
+            unsafe_allow_html=True
+        )
+
+    # -------------------------------------------------
+    # DONAS
+    # -------------------------------------------------
+
     cols = st.columns(3)
 
-    for i, (_, fila) in enumerate(
-
-        avance_despachos.iterrows()
-
-    ):
+    for i, (_, fila) in enumerate(avance_despachos.iterrows()):
 
         with cols[i % 3]:
 
             avance = int(fila["Avance"])
 
-            cerrados = int(
+            cerrados = int(fila["PreparacionesFinalizadas"])
 
-                fila["PreparacionesFinalizadas"]
-
-            )
-
-            total = int(
-
-                fila["TotalPreparaciones"]
-
-            )
+            total = int(fila["TotalPreparaciones"])
 
             if avance <= 30:
-
                 color = "#D32F2F"
 
             elif avance <= 70:
-
                 color = "#F57C00"
 
             else:
-
                 color = "#2E7D32"
 
             fig = go.Figure()
@@ -411,14 +415,11 @@ with col1:
                 go.Pie(
 
                     values=[
-
                         avance,
-
-                        max(100-avance,0)
-
+                        max(100 - avance, 0)
                     ],
 
-                    hole=.72,
+                    hole=0.72,
 
                     textinfo="none",
 
@@ -427,11 +428,8 @@ with col1:
                     marker=dict(
 
                         colors=[
-
                             color,
-
                             "#3A3A3A"
-
                         ]
 
                     )
@@ -442,24 +440,33 @@ with col1:
 
             fig.update_layout(
 
+                title=dict(
+
+                    text=f"<b>{fila['Despacho']}</b>",
+
+                    x=0.5,
+
+                    font=dict(
+                        size=12,
+                        color="white"
+                    )
+
+                ),
+
                 annotations=[
 
                     dict(
 
                         text=f"<b>{avance}%</b>",
 
-                        x=.5,
-
-                        y=.55,
+                        x=0.5,
+                        y=0.56,
 
                         showarrow=False,
 
                         font=dict(
-
                             size=22,
-
                             color="white"
-
                         )
 
                     ),
@@ -468,52 +475,27 @@ with col1:
 
                         text=f"{cerrados}/{total}",
 
-                        x=.5,
-
-                        y=.36,
+                        x=0.5,
+                        y=0.36,
 
                         showarrow=False,
 
                         font=dict(
-
                             size=12,
-
-                            color="#AAAAAA"
-
+                            color="#BDBDBD"
                         )
 
                     )
 
                 ],
 
-                title=dict(
-
-                    text=f"<b>{fila['Despacho']}</b>",
-
-                    x=.5,
-
-                    font=dict(
-
-                        size=12,
-
-                        color="white"
-
-                    )
-
-                ),
-
                 height=180,
 
                 margin=dict(
-
                     l=5,
-
                     r=5,
-
                     t=35,
-
                     b=5
-
                 ),
 
                 paper_bgcolor="rgba(0,0,0,0)",
@@ -531,9 +513,7 @@ with col1:
                 use_container_width=True,
 
                 config={
-
-                    "displayModeBar":False
-
+                    "displayModeBar": False
                 }
 
             )

@@ -154,87 +154,96 @@ def construir_tabla_tareas(
     ] = "Finalizado"
     
     
-    # ------------------------------------------------------
-    # SEMÁFORO OPERATIVO
-    # ------------------------------------------------------
+# ------------------------------------------------------
+# SEMÁFORO OPERATIVO
+# ------------------------------------------------------
 
     tabla["Semaforo"] = "🟡"
 
-    # Carro cerrado pero todavía abierto en la operación
+# CARRO terminado pero todavía pendiente de resolver
     tabla.loc[
-        (tabla["Categoria"] == "En Curso")
-        &
-        (
-            tabla["Estado"]
-            .fillna("")
-            .str.upper()
-            == "FINALIZADA"
-        ),
-        "Semaforo"
-    ] = "🔴"
+    (
+        tabla["Categoria"] == "En Curso"
+    )
+    &
+    (
+        tabla["TareaEstado"]
+        .fillna("")
+        .str.upper()
+        .eq("FINALIZADA")
+    ),
+    "Semaforo"
+] = "🔴"
 
-    # Carro en proceso
+# CARRO que todavía se está preparando
     tabla.loc[
-        (tabla["Categoria"] == "En Curso")
-        &
-        (
-            tabla["Estado"]
-            .fillna("")
-            .str.upper()
-            != "FINALIZADA"
-        ),
-        "Semaforo"
-    ] = "🟠"
+    (
+        tabla["Categoria"] == "En Curso"
+    )
+    &
+    (
+        tabla["TareaEstado"]
+        .fillna("")
+        .str.upper()
+        .ne("FINALIZADA")
+    ),
+    "Semaforo"
+] = "🟠"
 
-    # Carro completamente cerrado
+# Contenedor numérico completamente cerrado
     tabla.loc[
-        tabla["Categoria"] == "Finalizado",
-        "Semaforo"
-    ] = "🟢"   
+    tabla["Categoria"] == "Finalizado",
+    "Semaforo"
+] = "🟢"
 
-    # ------------------------------------------------------
-    # ORDEN DE PRIORIDAD
-    # ------------------------------------------------------
+
+# ------------------------------------------------------
+# ORDEN DE PRIORIDAD
+# ------------------------------------------------------
 
     tabla["Orden"] = 4
 
-    # 🔴 Resolver
+# 1 - CARRO terminado, pendiente de resolver
     tabla.loc[
-        (tabla["Categoria"] == "En Curso")
-        &
-        (
-            tabla["Estado"]
-            .fillna("")
-            .str.upper()
-            == "FINALIZADA"
-        ),
-        "Orden"
-    ] = 1
+    (
+        tabla["Categoria"] == "En Curso"
+    )
+    &
+    (
+        tabla["TareaEstado"]
+        .fillna("")
+        .str.upper()
+        .eq("FINALIZADA")
+    ),
+    "Orden"
+] = 1
 
-    # 🟠 Trabajando
+# 2 - CARRO trabajando
     tabla.loc[
-        (tabla["Categoria"] == "En Curso")
-        &
-        (
-            tabla["Estado"]
-            .fillna("")
-            .str.upper()
-            != "FINALIZADA"
-        ),
-        "Orden"
-    ] = 2
+    (
+        tabla["Categoria"] == "En Curso"
+    )
+    &
+    (
+        tabla["TareaEstado"]
+        .fillna("")
+        .str.upper()
+        .ne("FINALIZADA")
+    ),
+    "Orden"
+] = 2
 
-    # 🟡 Pendiente
+# 3 - Preparación que todavía no comenzó
     tabla.loc[
-        tabla["Categoria"] == "Pendiente",
-        "Orden"
-    ] = 3
+    tabla["Categoria"] == "Pendiente",
+    "Orden"
+] = 3
 
-    # 🟢 Finalizado
+# 4 - Contenedor numérico finalizado
     tabla.loc[
-        tabla["Categoria"] == "Finalizado",
-        "Orden"
-    ] = 4
+    tabla["Categoria"] == "Finalizado",
+    "Orden"
+] = 4
 
     # ------------------------------------------------------
     # ICONO VISUAL DEL CARRO
@@ -322,6 +331,9 @@ def construir_tabla_tareas(
     "Familias"
 
 ]
+    
+
+    
     return tabla
 
 # ==========================================================
@@ -579,26 +591,33 @@ def obtener_avance_despachos(tabla):
     # FECHA OPERATIVA
     # ---------------------------------------
 
-    fecha_operativa = tabla["FechaHora"].dt.normalize().max()
+    fecha_operativa = (
+        tabla["FechaHora"]
+        .dt.normalize()
+        .max()
+    )
 
-    fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
+    fecha_inicio = (
+        fecha_operativa
+        - pd.Timedelta(days=DIAS_TABLERO - 1)
+    )
 
     df = tabla[
-
-    tabla["FechaHora"].dt.normalize() >= fecha_inicio
-
-].copy()
+        tabla["FechaHora"].dt.normalize() >= fecha_inicio
+    ].copy()
 
     # ---------------------------------------
     # SOLO OPERACIÓN VIVA
     # ---------------------------------------
 
     df = df[
-        df["Categoria"].isin([
-            "Pendiente",
-            "En Curso",
-            "Finalizado"
-        ])
+        df["Categoria"].isin(
+            [
+                "Pendiente",
+                "En Curso",
+                "Finalizado",
+            ]
+        )
     ].copy()
 
     # ---------------------------------------
@@ -608,106 +627,108 @@ def obtener_avance_despachos(tabla):
     df = df[
         df["Despacho"]
         .fillna("")
+        .astype(str)
         .str.strip()
-        != ""
+        .ne("")
     ].copy()
+
     # ---------------------------------------
-    # TOTAL DE PREPARACIONES
-    # (Representa la carga del despacho)
+    # TOTAL DE PREPARACIONES DEL DESPACHO
     # ---------------------------------------
 
     total = (
-
         df
-
         .groupby("Despacho")["Preparacion"]
-
         .nunique()
-
-        .reset_index(name="TotalPreparaciones")
-
+        .reset_index(
+            name="TotalPreparaciones"
+        )
     )
 
     # ---------------------------------------
-    # PREPARACIONES FINALIZADAS
+    # PREPARACIONES CERRADAS
+    #
+    # Finalizado significa:
+    # contenedor numérico + tarea finalizada
     # ---------------------------------------
 
     finalizados = (
-
         df[
             df["Categoria"] == "Finalizado"
         ]
-
         .groupby("Despacho")["Preparacion"]
-
         .nunique()
-
-        .reset_index(name="PreparacionesFinalizadas")
-
+        .reset_index(
+            name="PreparacionesFinalizadas"
+        )
     )
 
     # ---------------------------------------
-    # MERGE
+    # UNIR RESULTADOS
     # ---------------------------------------
 
     avance = total.merge(
-
         finalizados,
-
         on="Despacho",
-
         how="left"
-
     )
 
     avance["PreparacionesFinalizadas"] = (
-
         avance["PreparacionesFinalizadas"]
-
         .fillna(0)
-
         .astype(int)
+    )
 
+    avance["TotalPreparaciones"] = (
+        avance["TotalPreparaciones"]
+        .fillna(0)
+        .astype(int)
     )
 
     # ---------------------------------------
-    # %
+    # PORCENTAJE
     # ---------------------------------------
 
     avance["Avance"] = (
-
         avance["PreparacionesFinalizadas"]
-
         /
-
         avance["TotalPreparaciones"]
-
         * 100
-
     ).round(0)
 
     # ---------------------------------------
-    # SOLO DESPACHOS CON TRABAJO PENDIENTE
+    # GUARDAR DESPACHOS SIN INICIAR
+    # Antes de quitarlos de las donas
+    # ---------------------------------------
+
+    despachos_sin_iniciar = (
+        avance[
+            avance["Avance"] == 0
+        ]["Despacho"]
+        .sort_values()
+        .tolist()
+    )
+
+    # ---------------------------------------
+    # SOLO DONAS DE DESPACHOS ACTIVOS
     # ---------------------------------------
 
     avance = avance[
-        avance["Avance"] < 100
+        (
+            avance["Avance"] > 0
+        )
+        &
+        (
+            avance["Avance"] < 100
+        )
     ].copy()
 
-    # ---------------------------------------
-    # ORDEN
-    # ---------------------------------------
-
     avance = avance.sort_values(
-
         "Avance",
-
         ascending=True
-
     )
 
-    return avance
-
+    return avance, despachos_sin_iniciar
 
     # ---------------------------------------
     # CARROS CRITICOS
