@@ -65,13 +65,13 @@ df_detalle = leer_archivo(
 df_articulos = leer_archivo(
     CARPETA_DATOS,
     "Maestro Articulo",
-    cache=False
+    cache=True
 )
 
 df_clientes = leer_archivo(
     CARPETA_DATOS,
     "Maestro Clientes",
-    cache=False
+    cache=True
 )
 
 df_pendientes_erp = leer_archivo(
@@ -89,13 +89,13 @@ df_transmisiones = leer_archivo(
 df_expresos = leer_archivo(
     CARPETA_DATOS,
     "Datos Expresos",
-    cache=False
+    cache=True
 )
 
 df_volumetria = leer_archivo(
     CARPETA_DATOS,
     "Maestro Volumetria",
-    cache=False
+    cache=True
 )
 
 

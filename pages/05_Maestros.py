@@ -177,7 +177,7 @@ df_articulos = leer_archivo(
 df_clientes = leer_archivo(
     CARPETA_DATOS,
     "Maestro Clientes",
-    cache=False
+    cache=True
 )
 
 df_expresos = leer_archivo(
@@ -189,7 +189,7 @@ df_expresos = leer_archivo(
 df_volumetria = leer_archivo(
     CARPETA_DATOS,
     "Maestro Volumetria",
-    cache=False
+    cache=True
 )
 
 # =====================================================
