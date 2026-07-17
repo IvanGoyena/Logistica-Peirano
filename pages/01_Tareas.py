@@ -65,7 +65,7 @@ df_detalle = leer_archivo(
 df_clientes = leer_archivo(
     CARPETA_DATOS,
     "Maestro Clientes",
-    cache=True
+    cache=False
 )
 
 df_articulos = leer_archivo(
@@ -74,6 +74,13 @@ df_articulos = leer_archivo(
     cache=False 
 )
 
+df_volumetria = leer_archivo(
+    CARPETA_DATOS,
+    "Maestro Volumetria",
+    cache=False
+)
+
+
 # =====================================================
 # TABLA PEDIDOS
 # =====================================================
@@ -81,12 +88,10 @@ df_articulos = leer_archivo(
 tabla_pedidos = construir_tabla_pedidos(
 
     df_pedidos,
-
     df_detalle,
-
     df_articulos,
-
-    df_clientes
+    df_clientes,
+    df_volumetria
 
 )
 

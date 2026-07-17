@@ -5,6 +5,7 @@ from models.detalle import (
     construir_tabla_detalle,
     construir_resumen_pedidos
 
+
 )
 
 # ==========================================================
@@ -15,7 +16,8 @@ def construir_tabla_pedidos(
     df_pedidos,
     df_detalle,
     df_articulos,
-    df_clientes
+    df_clientes,
+    df_volumetria
 ):
 
     # ==========================================================
@@ -44,7 +46,8 @@ def construir_tabla_pedidos(
 
     tabla_detalle = construir_tabla_detalle(
         df_detalle,
-        df_articulos
+        df_articulos,
+        df_volumetria
     )
 
     # ==========================================================
@@ -104,6 +107,12 @@ def construir_tabla_pedidos(
         .astype(int)
     )
 
+    tabla["TotalM3"] = (
+    tabla["TotalM3"]
+    .fillna(0)
+    .round(3)
+    )
+
     if "CantidadFamilias" in tabla.columns:
         tabla["CantidadFamilias"] = (
             tabla["CantidadFamilias"]
@@ -147,6 +156,7 @@ def construir_tabla_pedidos(
         "PreparacionID",
         "Importe",
         "TotalUnidades",
+        "TotalM3",
         "TotalSKUs",
         "CantidadFamilias",
         "DetalleFamilias"

@@ -1,5 +1,11 @@
 import pandas as pd
 
+
+from models.volumetria import (
+    construir_tabla_volumetria
+)
+
+
 # ==========================================================
 # TABLA DETALLE PEDIDOS
 # ==========================================================
@@ -7,7 +13,8 @@ import pandas as pd
 def construir_tabla_detalle(
 
     df_detalle,
-    df_articulos
+    df_articulos,
+    df_volumetria
 
 ):
 
@@ -16,6 +23,16 @@ def construir_tabla_detalle(
     # ------------------------------------------------------
 
     tabla = df_detalle.copy()
+
+
+    # ------------------------------------------------------
+    # MAESTRO VOLUMETRÍA
+    # ------------------------------------------------------
+
+    volumetria = construir_tabla_volumetria(
+        df_volumetria
+    )
+
 
     # ------------------------------------------------------
     # RENOMBRAR COLUMNAS
@@ -49,14 +66,14 @@ def construir_tabla_detalle(
 
     )
 
+
     tabla["ArticuloCodigo"] = (
-
         tabla["ArticuloCodigo"]
-
         .fillna("")
-
         .astype(str)
-
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\.0$", "", regex=True)
     )
 
     tabla["Cantidad"] = (
@@ -125,13 +142,12 @@ def construir_tabla_detalle(
     # ------------------------------------------------------
 
     articulos["COD_ART"] = (
-
         articulos["COD_ART"]
-
         .fillna("")
-
         .astype(str)
-
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\.0$", "", regex=True)
     )
 
     # ------------------------------------------------------
@@ -150,6 +166,15 @@ def construir_tabla_detalle(
 
     )
 
+    volumetria["CodigoArticulo"] = (
+        volumetria["CodigoArticulo"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
 
     # ------------------------------------------------------
     # RENOMBRAR COLUMNAS
@@ -166,6 +191,88 @@ def construir_tabla_detalle(
         }
 
     )
+
+
+    # ------------------------------------------------------
+    # PREPARAR MAESTRO VOLUMETRÍA
+    # ------------------------------------------------------
+
+    volumetria_merge = (
+        volumetria[
+            [
+                "CodigoArticulo",
+                "AltoMM",
+                "AnchoMM",
+                "ProfundoMM",
+                "PesoKg",
+                "VolumenM3",
+            ]
+        ]
+        .drop_duplicates(
+            subset=["CodigoArticulo"],
+            keep="first"
+        )
+        .copy()
+    )
+
+    # ------------------------------------------------------
+    # MERGE CON MAESTRO VOLUMETRÍA
+    # ------------------------------------------------------
+
+    tabla = tabla.merge(
+        volumetria_merge,
+        left_on="ArticuloCodigo",
+        right_on="CodigoArticulo",
+        how="left",
+        validate="many_to_one"
+    )
+
+    tabla = tabla.drop(
+        columns=["CodigoArticulo"],
+        errors="ignore"
+    )
+
+    # ------------------------------------------------------
+    # FORMATOS DE VOLUMETRÍA
+    # ------------------------------------------------------
+
+    columnas_volumetria = [
+        "AltoMM",
+        "AnchoMM",
+        "ProfundoMM",
+        "PesoKg",
+        "VolumenM3",
+    ]
+
+    for columna in columnas_volumetria:
+
+        tabla[columna] = (
+            pd.to_numeric(
+                tabla[columna],
+                errors="coerce"
+            )
+            .fillna(0)
+        )
+
+    # ------------------------------------------------------
+    # VOLUMEN TOTAL POR LÍNEA
+    # ------------------------------------------------------
+
+    tabla["VolumenLineaM3"] = (
+        tabla["Cantidad"]
+        * tabla["VolumenM3"]
+    )
+
+    tabla["VolumenM3"] = (
+        tabla["VolumenM3"]
+        .round(6)
+    )
+
+    tabla["VolumenLineaM3"] = (
+        tabla["VolumenLineaM3"]
+        .round(4)
+    )
+
 
     # ------------------------------------------------------
     # ELIMINAR COLUMNAS AUXILIARES
@@ -190,40 +297,30 @@ def construir_tabla_detalle(
     # ------------------------------------------------------
 
     tabla = tabla[
-
         [
-
             "Pedido",
-
             "ArticuloCodigo",
-
             "ArticuloDescripcion",
-
             "Cantidad",
-
             "Familia",
-
             "Familia2",
-
             "Marca",
-
             "Tipo",
-
             "Origen",
-
             "Gama",
-
             "Rubro",
-
             "Sector",
-
             "Sectorizacion",
-
-            "Terminacion"
-
+            "Terminacion",
+            "AltoMM",
+            "AnchoMM",
+            "ProfundoMM",
+            "PesoKg",
+            "VolumenM3",
+            "VolumenLineaM3",
         ]
-
     ].copy()
+
 
     # ------------------------------------------------------
     # ORDENAR REGISTROS
@@ -271,40 +368,34 @@ def construir_resumen_pedidos(
     # ------------------------------------------------------
 
     resumen = (
-
         resumen
-
         .groupby(
-
             "Pedido",
-
             as_index=False
-
         )
-
         .agg(
-
             TotalUnidades=(
-
                 "Cantidad",
-
                 "sum"
-
             ),
-
             TotalSKUs=(
-
                 "ArticuloCodigo",
-
                 "nunique"
-
+            ),
+            TotalM3=(
+                "VolumenLineaM3",
+                "sum"
             )
-
         )
-
     )
 
-    # ------------------------------------------------------
+    resumen["TotalM3"] = (
+        resumen["TotalM3"]
+        .fillna(0)
+        .round(3)
+    )
+
+# ------------------------------------------------------
 # UNIDADES POR SECTORIZACION
 # ------------------------------------------------------
 
