@@ -10,8 +10,6 @@ venv/
 # VS Code
 .vscode/
 
-# Streamlit
-.streamlit/
 
 # Secrets
 config/google_drive.json
