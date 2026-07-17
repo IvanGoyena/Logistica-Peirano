@@ -32,3 +32,6 @@ Desktop.ini
 # Python
 __pycache__/
 *.py[cod]
+
+# Credenciales
+.streamlit/secrets.toml
