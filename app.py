@@ -1,80 +1,214 @@
 import streamlit as st
 
+from utils.autenticacion import (
+    inicializar_sesion,
+    mostrar_login,
+    mostrar_usuario_sidebar,
+    tiene_rol,
+)
+
+
+# ==========================================================
+# CONFIGURACIÓN GENERAL
+# ==========================================================
+
 st.set_page_config(
     page_title="Sistema Logístico Peirano",
     page_icon="📦",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ======================================================
-# SIDEBAR
-# ======================================================
 
-st.sidebar.title("Sistema Logístico")
+# ==========================================================
+# INICIALIZAR SESIÓN
+# ==========================================================
 
-st.sidebar.success("Versión 1.0")
+inicializar_sesion()
 
-st.sidebar.markdown("---")
 
-st.sidebar.info("Proyecto de Automatización Logística")
+# ==========================================================
+# LOGIN
+# ==========================================================
 
-# ======================================================
-# PANTALLA PRINCIPAL
-# ======================================================
+if not st.session_state["autenticado"]:
+    mostrar_login()
+    st.stop()
 
-st.title("📦 Sistema Logístico Peirano")
 
-st.subheader("Centro de Control Operativo")
+# ==========================================================
+# INFORMACIÓN DEL USUARIO
+# ==========================================================
 
-st.markdown("---")
+mostrar_usuario_sidebar()
 
-st.write(
-"""
-Bienvenido al Sistema Logístico.
 
-Seleccione el módulo sobre el que desea trabajar.
-"""
+# ==========================================================
+# PÁGINA DE INICIO
+# ==========================================================
+
+def mostrar_inicio() -> None:
+
+    st.title("📦 Sistema Logístico Peirano")
+
+    st.subheader("Centro de Control Operativo")
+
+    st.divider()
+
+    st.success(
+        f"Bienvenido, "
+        f"{st.session_state['nombre_usuario']}."
+    )
+
+    st.write(
+        "Seleccioná el módulo sobre el que deseas trabajar "
+        "desde el menú lateral."
+    )
+
+    st.write(
+        f"**Rol asignado:** "
+        f"{st.session_state['rol'].capitalize()}"
+    )
+
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            label="Usuario",
+            value=st.session_state["usuario"],
+        )
+
+    with col2:
+        st.metric(
+            label="Rol",
+            value=st.session_state["rol"].capitalize(),
+        )
+
+    with col3:
+        st.metric(
+            label="Estado",
+            value="Conectado",
+        )
+
+    st.divider()
+
+    st.caption(
+        "Sistema desarrollado por Logística - Peirano"
+    )
+
+
+# ==========================================================
+# DEFINICIÓN DE PÁGINAS
+# ==========================================================
+
+pagina_inicio = st.Page(
+    mostrar_inicio,
+    title="Inicio",
+    icon="🏠",
+    default=True,
 )
 
-st.markdown("")
+pagina_tareas = st.Page(
+    "pages/01_Tareas.py",
+    title="Gestión de Tareas",
+    icon="📋",
+)
 
-col1, col2 = st.columns(2)
+pagina_pedidos = st.Page(
+    "pages/02_Pedidos.py",
+    title="Gestión de Pedidos",
+    icon="📦",
+)
 
-with col1:
+pagina_despachos = st.Page(
+    "pages/03_Despachos.py",
+    title="Gestión de Despachos",
+    icon="🚚",
+)
 
-    st.page_link(
-        "pages/01_Tareas.py",
-        label="📋 Gestión de Tareas",
-        icon="📋"
-    )
+pagina_stock = st.Page(
+    "pages/04_Stock.py",
+    title="Gestión de Stock",
+    icon="📊",
+)
 
-    st.page_link(
-        "pages/02_Pedidos.py",
-        label="📦 Gestión de Pedidos",
-        icon="📦"
-    )
+pagina_maestros = st.Page(
+    "pages/05_Maestros.py",
+    title="Maestros",
+    icon="⚙️",
+)
 
-    st.page_link(
-        "pages/03_Despachos.py",
-        label="🚚 Gestión de Despachos",
-        icon="🚚"
-    )
 
-with col2:
 
-    st.page_link(
-        "pages/04_Stock.py",
-        label="📊 Gestión de Stock",
-        icon="📊"
-    )
+# ==========================================================
+# MENÚ SEGÚN ROL
+# ==========================================================
 
-    st.page_link(
-        "pages/05_Maestros.py",
-        label="⚙ Maestros",
-        icon="⚙"
-    )
+paginas = {
+    "General": [
+        pagina_inicio,
+    ]
+}
 
-st.markdown("---")
 
-st.caption("Sistema desarrollado por Logística - Peirano")
+# ADMINISTRADOR
+if tiene_rol("admin"):
+
+    paginas["Operación"] = [
+        pagina_tareas,
+        pagina_pedidos,
+        pagina_despachos,
+        pagina_stock,
+    ]
+
+    paginas["Configuración"] = [
+        pagina_maestros,
+    ]
+
+
+# GERENCIA
+elif tiene_rol("gerencia"):
+
+    paginas["Operación"] = [
+        pagina_tareas,
+        pagina_pedidos,
+        pagina_despachos,
+        pagina_stock,
+    ]
+
+
+
+# LOGÍSTICA
+elif tiene_rol("logistica"):
+
+    paginas["Operación"] = [
+        pagina_tareas,
+        pagina_pedidos,
+        pagina_despachos,
+        pagina_stock,
+    ]
+
+    paginas["Configuración"] = [
+        pagina_maestros,
+    ]
+
+
+# SUPERVISOR
+elif tiene_rol("supervisor"):
+
+    paginas["Operación"] = [
+        pagina_tareas,
+        pagina_pedidos,
+        pagina_despachos,
+        pagina_stock,
+    ]
+
+
+# ==========================================================
+# EJECUTAR NAVEGACIÓN
+# ==========================================================
+
+navegacion = st.navigation(paginas)
+navegacion.run()

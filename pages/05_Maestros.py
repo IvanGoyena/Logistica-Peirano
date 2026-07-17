@@ -44,7 +44,22 @@ st.set_page_config(
 # FUNCIONES AUXILIARES
 # =====================================================
 
+@st.cache_data(max_entries=15)
 def dataframe_a_csv(df):
+    """
+    Convierte un DataFrame en CSV descargable,
+    compatible con Excel en español.
+    """
+
+    return (
+        df.to_csv(
+            index=False,
+            sep=";",
+            encoding="utf-8-sig"
+        )
+        .encode("utf-8-sig")
+    )
+
     """
     Convierte un DataFrame en CSV descargable,
     compatible con Excel en español.

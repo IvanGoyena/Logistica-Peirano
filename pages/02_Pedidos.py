@@ -1,3 +1,14 @@
+import streamlit as st
+
+from utils.autenticacion import requerir_roles
+
+
+requerir_roles(
+    "admin",
+    "gerencia"
+)
+
+
 from config import *
 
 from utils.leer_datos import (
@@ -29,7 +40,6 @@ from models.expresos import (
     construir_tabla_expresos
 )
 
-import streamlit as st
 import pandas as pd
 
 # =====================================================

@@ -35,3 +35,14 @@ Desktop.ini
 # Python
 __pycache__/
 *.py[cod]
+
+
+# Credenciales de Streamlit
+.streamlit/secrets.toml
+
+# Archivos sensibles
+.env
+
+# Python
+__pycache__/
+*.pyc

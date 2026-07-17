@@ -1,3 +1,18 @@
+import streamlit as st
+
+from utils.autenticacion import requerir_roles
+
+
+requerir_roles(
+    "admin",
+    "gerencia",
+    "logistica",
+    "supervisor",
+)
+
+
+
+
 # =====================================================
 # PARTE 1
 #======================================================
@@ -5,7 +20,6 @@ import pandas as pd
 
 from config import *
 
-import streamlit as st
 import plotly.graph_objects as go
 
 from utils.leer_datos import (
