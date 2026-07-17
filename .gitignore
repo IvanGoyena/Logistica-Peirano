@@ -13,7 +13,6 @@ venv/
 
 # Secrets
 config/google_drive.json
-config/secrets.toml
 
 # Logs
 *.log
