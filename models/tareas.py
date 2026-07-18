@@ -111,7 +111,8 @@ def construir_tabla_tareas(
     tabla["FechaHora"] = (
         pd.to_datetime(
             tabla["FechaHoraEstado"],
-            errors="coerce"
+            errors="coerce",
+            dayfirst=True
         )
         - pd.Timedelta(hours=3)
     )

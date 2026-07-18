@@ -186,7 +186,7 @@ def mostrar_usuario_sidebar(autenticador) -> None:
         autenticador.logout(
             button_name="Cerrar sesión",
             location="sidebar",
-            use_container_width=True,
+            use_container_width="stretch",
         )
 
         st.divider()

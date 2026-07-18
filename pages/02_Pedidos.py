@@ -623,7 +623,7 @@ with st.form(
 
             aplicar_filtros = st.form_submit_button(
               "🔎 Aplicar filtros",
-             use_container_width=True,
+             width="stretch",
               type="primary"
     )
 
@@ -631,7 +631,7 @@ with st.form(
 
             quitar_filtros = st.form_submit_button(
         "🧹 Quitar filtros",
-        use_container_width=True
+        width="stretch"
         )
 
 
@@ -898,7 +898,7 @@ st.download_button(
     data=csv_tabla_operativa,
     file_name="Tabla_Operativa_Pedidos.csv",
     mime="text/csv",
-    use_container_width=False
+    width="stretch"
 )
 
 
