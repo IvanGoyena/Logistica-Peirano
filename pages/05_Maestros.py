@@ -131,7 +131,7 @@ def mostrar_tarjeta_reporte(
         file_name=nombre_descarga,
         mime="text/csv",
         key=key_boton,
-        use_container_width=True
+        width="stretch"
     )
 
 
