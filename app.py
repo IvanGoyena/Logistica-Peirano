@@ -1,11 +1,40 @@
 import streamlit as st
 
 from utils.autenticacion import (
+    crear_autenticador,
     inicializar_sesion,
     mostrar_login,
+    sincronizar_usuario,
     mostrar_usuario_sidebar,
     tiene_rol,
 )
+
+
+st.set_page_config(
+    page_title="Sistema Logístico Peirano",
+    page_icon="📦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ==========================================================
+# AUTENTICACIÓN
+# ==========================================================
+
+inicializar_sesion()
+
+autenticador = crear_autenticador()
+
+mostrar_login(autenticador)
+
+
+if st.session_state.get("authentication_status") is not True:
+    st.stop()
+
+
+sincronizar_usuario()
+mostrar_usuario_sidebar(autenticador)
 
 
 # ==========================================================

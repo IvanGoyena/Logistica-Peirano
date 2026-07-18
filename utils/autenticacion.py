@@ -1,86 +1,70 @@
-import hmac
-
 import streamlit as st
+import streamlit_authenticator as stauth
 
 
 # ==========================================================
-# SESIÓN
+# CONSTRUCCIÓN DEL AUTENTICADOR
+# ==========================================================
+
+def crear_autenticador():
+    """
+    Construye el autenticador usando los usuarios definidos
+    en .streamlit/secrets.toml.
+    """
+
+    credenciales = {
+        "usernames": {}
+    }
+
+    for usuario, datos in st.secrets["usuarios"].items():
+
+        credenciales["usernames"][usuario] = {
+            "name": datos["nombre"],
+            "password": datos["password"],
+            "roles": [datos["rol"]],
+        }
+
+    autenticador = stauth.Authenticate(
+        credentials=credenciales,
+        cookie_name=st.secrets["cookie"]["name"],
+        cookie_key=st.secrets["cookie"]["key"],
+        cookie_expiry_days=float(
+            st.secrets["cookie"]["expiry_days"]
+        ),
+        auto_hash=True,
+    )
+
+    return autenticador
+
+
+# ==========================================================
+# INICIALIZACIÓN
 # ==========================================================
 
 def inicializar_sesion() -> None:
     """
-    Inicializa las variables utilizadas para mantener
-    el usuario autenticado.
+    Inicializa campos propios utilizados por la aplicación.
     """
 
-    valores_iniciales = {
-        "autenticado": False,
+    valores = {
         "usuario": None,
         "nombre_usuario": None,
         "rol": None,
     }
 
-    for clave, valor in valores_iniciales.items():
+    for clave, valor in valores.items():
         if clave not in st.session_state:
             st.session_state[clave] = valor
-
-
-# ==========================================================
-# VALIDACIÓN DE CREDENCIALES
-# ==========================================================
-
-def validar_usuario(
-    usuario: str,
-    password: str,
-) -> bool:
-    """
-    Valida las credenciales contra .streamlit/secrets.toml.
-    """
-
-    usuario = usuario.strip().lower()
-
-    try:
-        usuarios = st.secrets["usuarios"]
-    except KeyError:
-        st.error(
-            "No se encontró la sección [usuarios] "
-            "en .streamlit/secrets.toml."
-        )
-        return False
-
-    if usuario not in usuarios:
-        return False
-
-    datos_usuario = usuarios[usuario]
-
-    password_guardada = str(datos_usuario["password"])
-
-    password_valida = hmac.compare_digest(
-        password,
-        password_guardada,
-    )
-
-    if not password_valida:
-        return False
-
-    st.session_state["autenticado"] = True
-    st.session_state["usuario"] = usuario
-    st.session_state["nombre_usuario"] = datos_usuario["nombre"]
-    st.session_state["rol"] = datos_usuario["rol"]
-
-    return True
 
 
 # ==========================================================
 # LOGIN
 # ==========================================================
 
-def mostrar_login() -> None:
+def mostrar_login(autenticador) -> None:
     """
-    Muestra la pantalla de inicio de sesión.
+    Muestra el formulario y procesa el inicio de sesión.
     """
-
-    inicializar_sesion()
 
     st.title("📦 Sistema Logístico Peirano")
     st.subheader("Inicio de sesión")
@@ -89,36 +73,51 @@ def mostrar_login() -> None:
         "Ingresá tu usuario y contraseña para acceder al sistema."
     )
 
-    with st.form("formulario_login"):
+    autenticador.login(
+        location="main",
+        fields={
+            "Form name": "Acceso al sistema",
+            "Username": "Usuario",
+            "Password": "Contraseña",
+            "Login": "Ingresar",
+        },
+    )
 
-        usuario = st.text_input(
-            "Usuario",
-            placeholder="Ingresá tu usuario",
-        )
+    estado = st.session_state.get("authentication_status")
 
-        password = st.text_input(
-            "Contraseña",
-            type="password",
-            placeholder="Ingresá tu contraseña",
-        )
+    if estado is False:
+        st.error("Usuario o contraseña incorrectos.")
 
-        ingresar = st.form_submit_button(
-            "Ingresar",
-            type="primary",
-            use_container_width=True,
-        )
+    elif estado is None:
+        st.info("Ingresá tus credenciales.")
 
-    if ingresar:
 
-        if not usuario.strip() or not password:
-            st.warning("Completá el usuario y la contraseña.")
-            return
+# ==========================================================
+# SINCRONIZAR USUARIO Y ROL
+# ==========================================================
 
-        if validar_usuario(usuario, password):
-            st.rerun()
+def sincronizar_usuario() -> None:
+    """
+    Guarda en session_state el usuario, nombre y rol
+    entregados por streamlit-authenticator.
+    """
 
-        else:
-            st.error("Usuario o contraseña incorrectos.")
+    if st.session_state.get("authentication_status") is not True:
+        return
+
+    usuario = st.session_state.get("username")
+
+    if not usuario:
+        return
+
+    datos = st.secrets["usuarios"].get(usuario)
+
+    if datos is None:
+        return
+
+    st.session_state["usuario"] = usuario
+    st.session_state["nombre_usuario"] = datos["nombre"]
+    st.session_state["rol"] = datos["rol"]
 
 
 # ==========================================================
@@ -127,22 +126,19 @@ def mostrar_login() -> None:
 
 def requerir_login() -> None:
     """
-    Detiene la ejecución si el usuario no está autenticado.
+    Bloquea la ejecución si no existe una sesión válida.
     """
 
-    inicializar_sesion()
-
-    if not st.session_state["autenticado"]:
-        mostrar_login()
+    if st.session_state.get("authentication_status") is not True:
+        st.error("Tenés que iniciar sesión para acceder.")
         st.stop()
+
+    sincronizar_usuario()
 
 
 def requerir_roles(*roles_permitidos: str) -> None:
     """
-    Detiene la página si el rol actual no está autorizado.
-
-    Ejemplo:
-        requerir_roles("admin", "gerencia")
+    Permite el acceso únicamente a los roles indicados.
     """
 
     requerir_login()
@@ -153,49 +149,24 @@ def requerir_roles(*roles_permitidos: str) -> None:
         st.error(
             "⛔ No tenés permisos para acceder a este módulo."
         )
-
-        st.info(
-            f"Tu rol actual es: {rol_actual}"
-        )
-
         st.stop()
 
 
 def tiene_rol(*roles_permitidos: str) -> bool:
     """
-    Devuelve True si el usuario tiene alguno de los roles.
+    Indica si el usuario posee alguno de los roles solicitados.
     """
 
-    rol_actual = st.session_state.get("rol")
-
-    return rol_actual in roles_permitidos
+    return st.session_state.get("rol") in roles_permitidos
 
 
 # ==========================================================
-# CIERRE DE SESIÓN
+# SIDEBAR
 # ==========================================================
 
-def cerrar_sesion() -> None:
+def mostrar_usuario_sidebar(autenticador) -> None:
     """
-    Elimina los datos de sesión del usuario.
-    """
-
-    claves_sesion = [
-        "autenticado",
-        "usuario",
-        "nombre_usuario",
-        "rol",
-    ]
-
-    for clave in claves_sesion:
-        st.session_state.pop(clave, None)
-
-    st.rerun()
-
-
-def mostrar_usuario_sidebar() -> None:
-    """
-    Muestra el usuario, rol y botón para cerrar sesión.
+    Muestra los datos del usuario y el cierre de sesión.
     """
 
     requerir_login()
@@ -212,11 +183,10 @@ def mostrar_usuario_sidebar() -> None:
             f"Rol: {st.session_state['rol'].capitalize()}"
         )
 
-        if st.button(
-            "Cerrar sesión",
+        autenticador.logout(
+            button_name="Cerrar sesión",
+            location="sidebar",
             use_container_width=True,
-            key="boton_cerrar_sesion",
-        ):
-            cerrar_sesion()
+        )
 
         st.divider()
