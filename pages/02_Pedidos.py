@@ -460,16 +460,17 @@ st.markdown("---")
 
 
 # =====================================================
-# FILTROS
+# CONTENEDOR DE KPIs
+# Se crea acá para que aparezca arriba de los filtros
 # =====================================================
 
-st.subheader("🔎 Filtros")
+contenedor_kpis = st.container()
 
-filtro1, filtro2, filtro3, filtro4 = st.columns(4)
+st.markdown("---")
 
-# -----------------------------------------------------
-# ESTADO
-# -----------------------------------------------------
+# =====================================================
+# OPCIONES DISPONIBLES PARA LOS FILTROS
+# =====================================================
 
 opciones_estado = sorted(
     tabla["Estado"]
@@ -480,18 +481,6 @@ opciones_estado = sorted(
     .tolist()
 )
 
-with filtro1:
-
-    estados_seleccionados = st.multiselect(
-        "Estado",
-        options=opciones_estado,
-        default=[]
-    )
-
-# -----------------------------------------------------
-# ESTADO DE PREPARACIÓN
-# -----------------------------------------------------
-
 opciones_preparacion = sorted(
     tabla["PreparacionEstado"]
     .dropna()
@@ -500,18 +489,6 @@ opciones_preparacion = sorted(
     .unique()
     .tolist()
 )
-
-with filtro2:
-
-    preparaciones_seleccionadas = st.multiselect(
-        "Estado preparación",
-        options=opciones_preparacion,
-        default=[]
-    )
-
-# -----------------------------------------------------
-# PLANIFICACIÓN
-# -----------------------------------------------------
 
 opciones_planificacion = sorted(
     tabla["Planificacion"]
@@ -522,18 +499,6 @@ opciones_planificacion = sorted(
     .tolist()
 )
 
-with filtro3:
-
-    planificaciones_seleccionadas = st.multiselect(
-        "Planificación",
-        options=opciones_planificacion,
-        default=[]
-    )
-
-# -----------------------------------------------------
-# DESPACHO
-# -----------------------------------------------------
-
 opciones_despacho = sorted(
     tabla["DespachoDescripcion"]
     .dropna()
@@ -543,115 +508,257 @@ opciones_despacho = sorted(
     .tolist()
 )
 
-with filtro4:
-
-    despachos_seleccionados = st.multiselect(
-        "Despacho",
-        options=opciones_despacho,
-        default=[]
-    )
-
-    filtro5, filtro6 = st.columns([1, 2])
-
-# -----------------------------------------------------
-# FECHA
-# -----------------------------------------------------
-
 fecha_minima = tabla["Fecha"].min()
 fecha_maxima = tabla["Fecha"].max()
 
-with filtro5:
 
-    if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
+# =====================================================
+# ESTADO INICIAL DE LOS FILTROS
+# =====================================================
 
-        rango_fechas = st.date_input(
-            "Rango de fechas",
-            value=(
-                fecha_minima.date(),
-                fecha_maxima.date()
-            ),
-            min_value=fecha_minima.date(),
-            max_value=fecha_maxima.date()
+if "filtros_pedidos" not in st.session_state:
+
+    st.session_state["filtros_pedidos"] = {
+        "estados": [],
+        "preparaciones": [],
+        "planificaciones": [],
+        "despachos": [],
+        "fecha_desde": (
+            fecha_minima.date()
+            if pd.notna(fecha_minima)
+            else None
+        ),
+        "fecha_hasta": (
+            fecha_maxima.date()
+            if pd.notna(fecha_maxima)
+            else None
+        ),
+        "busqueda": ""
+    }
+
+
+filtros_aplicados = st.session_state["filtros_pedidos"]
+
+
+# =====================================================
+# FORMULARIO DE FILTROS
+# No recarga hasta presionar Aplicar filtros
+# =====================================================
+
+st.subheader("🔎 Filtros")
+
+with st.form(
+    key="formulario_filtros_pedidos",
+    clear_on_submit=False
+):
+
+    filtro1, filtro2, filtro3, filtro4 = st.columns(4)
+
+    with filtro1:
+
+        estados_form = st.multiselect(
+            "Estado",
+            options=opciones_estado,
+            default=filtros_aplicados["estados"]
         )
+
+    with filtro2:
+
+        preparaciones_form = st.multiselect(
+            "Estado preparación",
+            options=opciones_preparacion,
+            default=filtros_aplicados["preparaciones"]
+        )
+
+    with filtro3:
+
+        planificaciones_form = st.multiselect(
+            "Planificación",
+            options=opciones_planificacion,
+            default=filtros_aplicados["planificaciones"]
+        )
+
+    with filtro4:
+
+        despachos_form = st.multiselect(
+            "Despacho",
+            options=opciones_despacho,
+            default=filtros_aplicados["despachos"]
+        )
+
+    filtro5, filtro6 = st.columns([1, 2])
+
+    with filtro5:
+
+        if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
+
+            rango_fechas_form = st.date_input(
+                "Rango de fechas",
+                value=(
+                    filtros_aplicados["fecha_desde"],
+                    filtros_aplicados["fecha_hasta"]
+                ),
+                min_value=fecha_minima.date(),
+                max_value=fecha_maxima.date()
+            )
+
+        else:
+
+            rango_fechas_form = None
+
+    with filtro6:
+
+        busqueda_form = st.text_input(
+            "Buscar pedido o cliente",
+            value=filtros_aplicados["busqueda"],
+            placeholder=(
+                "Número de pedido, código "
+                "o nombre del cliente..."
+            )
+        )
+
+        boton1, boton2 = st.columns(2)
+
+        with boton1:
+
+            aplicar_filtros = st.form_submit_button(
+              "🔎 Aplicar filtros",
+             use_container_width=True,
+              type="primary"
+    )
+
+        with boton2:
+
+            quitar_filtros = st.form_submit_button(
+        "🧹 Quitar filtros",
+        use_container_width=True
+        )
+
+
+
+# =====================================================
+# GUARDAR O QUITAR FILTROS
+# =====================================================
+
+if quitar_filtros:
+
+    st.session_state["filtros_pedidos"] = {
+        "estados": [],
+        "preparaciones": [],
+        "planificaciones": [],
+        "despachos": [],
+        "fecha_desde": (
+            fecha_minima.date()
+            if pd.notna(fecha_minima)
+            else None
+        ),
+        "fecha_hasta": (
+            fecha_maxima.date()
+            if pd.notna(fecha_maxima)
+            else None
+        ),
+        "busqueda": ""
+    }
+
+    st.rerun()
+
+
+if aplicar_filtros:
+
+    if (
+        rango_fechas_form
+        and len(rango_fechas_form) == 2
+    ):
+
+        fecha_desde_form = rango_fechas_form[0]
+        fecha_hasta_form = rango_fechas_form[1]
 
     else:
 
-        rango_fechas = None
+        fecha_desde_form = None
+        fecha_hasta_form = None
 
-# -----------------------------------------------------
-# BÚSQUEDA
-# -----------------------------------------------------
+    st.session_state["filtros_pedidos"] = {
+        "estados": estados_form,
+        "preparaciones": preparaciones_form,
+        "planificaciones": planificaciones_form,
+        "despachos": despachos_form,
+        "fecha_desde": fecha_desde_form,
+        "fecha_hasta": fecha_hasta_form,
+        "busqueda": busqueda_form.strip()
+    }
 
-with filtro6:
+    filtros_aplicados = st.session_state[
+        "filtros_pedidos"
+    ]
 
-    texto_busqueda = st.text_input(
-        "Buscar pedido o cliente",
-        placeholder="Número de pedido, código o nombre del cliente..."
-    )
-
-    # =====================================================
-# APLICAR FILTROS
+# =====================================================
+# APLICAR LOS FILTROS GUARDADOS
 # =====================================================
 
 tabla_filtrada = tabla.copy()
 
-if estados_seleccionados:
+if filtros_aplicados["estados"]:
 
     tabla_filtrada = tabla_filtrada[
         tabla_filtrada["Estado"].isin(
-            estados_seleccionados
+            filtros_aplicados["estados"]
         )
     ]
 
-if preparaciones_seleccionadas:
+if filtros_aplicados["preparaciones"]:
 
     tabla_filtrada = tabla_filtrada[
         tabla_filtrada["PreparacionEstado"].isin(
-            preparaciones_seleccionadas
+            filtros_aplicados["preparaciones"]
         )
     ]
 
-if planificaciones_seleccionadas:
+if filtros_aplicados["planificaciones"]:
 
     tabla_filtrada = tabla_filtrada[
         tabla_filtrada["Planificacion"].isin(
-            planificaciones_seleccionadas
+            filtros_aplicados["planificaciones"]
         )
     ]
 
-if despachos_seleccionados:
+if filtros_aplicados["despachos"]:
 
     tabla_filtrada = tabla_filtrada[
         tabla_filtrada["DespachoDescripcion"].isin(
-            despachos_seleccionados
+            filtros_aplicados["despachos"]
         )
     ]
 
-if rango_fechas and len(rango_fechas) == 2:
+fecha_desde = filtros_aplicados["fecha_desde"]
+fecha_hasta = filtros_aplicados["fecha_hasta"]
 
-    fecha_desde = pd.Timestamp(
-        rango_fechas[0]
-    )
-
-    fecha_hasta = pd.Timestamp(
-        rango_fechas[1]
-    ) + pd.Timedelta(days=1)
+if fecha_desde is not None:
 
     tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["Fecha"].ge(fecha_desde)
-        &
-        tabla_filtrada["Fecha"].lt(fecha_hasta)
+        tabla_filtrada["Fecha"].ge(
+            pd.Timestamp(fecha_desde)
+        )
     ]
 
-if texto_busqueda.strip():
+if fecha_hasta is not None:
 
-    texto = texto_busqueda.strip()
+    tabla_filtrada = tabla_filtrada[
+        tabla_filtrada["Fecha"].lt(
+            pd.Timestamp(fecha_hasta)
+            + pd.Timedelta(days=1)
+        )
+    ]
+
+texto_busqueda = filtros_aplicados["busqueda"]
+
+if texto_busqueda:
 
     mascara_busqueda = (
         tabla_filtrada["Pedido"]
         .astype(str)
         .str.contains(
-            texto,
+            texto_busqueda,
             case=False,
             na=False
         )
@@ -659,7 +766,7 @@ if texto_busqueda.strip():
         tabla_filtrada["ClienteCodigo"]
         .astype(str)
         .str.contains(
-            texto,
+            texto_busqueda,
             case=False,
             na=False
         )
@@ -667,7 +774,7 @@ if texto_busqueda.strip():
         tabla_filtrada["ClienteDescripcion"]
         .astype(str)
         .str.contains(
-            texto,
+            texto_busqueda,
             case=False,
             na=False
         )
@@ -677,7 +784,8 @@ if texto_busqueda.strip():
         mascara_busqueda
     ]
 
-    # =====================================================
+
+# =====================================================
 # BASE ÚNICA PARA KPIs
 # =====================================================
 
@@ -720,53 +828,55 @@ pedidos_en_preparacion = int(
 
 
 # =====================================================
-# TARJETAS KPI
+# MOSTRAR KPIs ARRIBA DE LOS FILTROS
 # =====================================================
 
-st.subheader("📊 Resumen Operativo")
+with contenedor_kpis:
 
-kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    st.subheader("📊 Resumen Operativo")
 
-with kpi1:
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
-    st.metric(
-        "📦 Pedidos",
-        f"{total_pedidos:,}".replace(",", ".")
-    )
+    with kpi1:
 
-with kpi2:
+        st.metric(
+            "📦 Pedidos",
+            f"{total_pedidos:,}".replace(",", ".")
+        )
 
-    st.metric(
-        "🔢 Unidades",
-        f"{total_unidades:,}".replace(",", ".")
-    )
+    with kpi2:
 
-with kpi3:
+        st.metric(
+            "🔢 Unidades",
+            f"{total_unidades:,}".replace(",", ".")
+        )
 
-    st.metric(
-        "📐 Volumen total",
-        f"{total_volumetria:,.3f} m³"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-with kpi4:
+    with kpi3:
 
-    st.metric(
-        "🛒 Con preparación",
-        f"{pedidos_en_preparacion:,}".replace(",", ".")
-    )
+        st.metric(
+            "📐 Volumen total",
+            f"{total_volumetria:,.3f} m³"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
 
-with kpi5:
+    with kpi4:
 
-    st.metric(
-        "💰 Importe",
-        f"$ {total_importe:,.0f}"
-        .replace(",", ".")
-    )
+        st.metric(
+            "🛒 Con preparación",
+            f"{pedidos_en_preparacion:,}"
+            .replace(",", ".")
+        )
 
+    with kpi5:
 
-st.markdown("---")
+        st.metric(
+            "💰 Importe",
+            f"$ {total_importe:,.0f}"
+            .replace(",", ".")
+        )
+
 
 
 # =====================================================

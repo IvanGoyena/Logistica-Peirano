@@ -61,10 +61,11 @@ def inicializar_sesion() -> None:
 # LOGIN
 # ==========================================================
 
-def mostrar_login(autenticador) -> None:
-    """
-    Muestra el formulario y procesa el inicio de sesión.
-    """
+def mostrar_login(autenticador):
+
+    # Si ya inició sesión, no mostrar el formulario
+    if st.session_state.get("authentication_status") is True:
+        return
 
     st.title("📦 Sistema Logístico Peirano")
     st.subheader("Inicio de sesión")
@@ -90,7 +91,6 @@ def mostrar_login(autenticador) -> None:
 
     elif estado is None:
         st.info("Ingresá tus credenciales.")
-
 
 # ==========================================================
 # SINCRONIZAR USUARIO Y ROL
