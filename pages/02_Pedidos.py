@@ -40,6 +40,12 @@ from models.expresos import (
     construir_tabla_expresos
 )
 
+from models.planificacion import (
+    construir_resumen_clientes_planificacion,
+    asignar_camionetas,
+    asignar_camioneta_a_pedidos,
+)
+
 import pandas as pd
 
 # =====================================================
@@ -877,6 +883,348 @@ with contenedor_kpis:
             .replace(",", ".")
         )
 
+
+# =====================================================
+# PLANIFICACIÓN DE CAMIONETAS
+# =====================================================
+
+st.markdown("---")
+
+st.subheader("🚚 Planificación de Camionetas")
+
+st.caption(
+    "Asignación propuesta respetando planificación, "
+    "antigüedad y cliente completo."
+)
+
+
+# =====================================================
+# FORMULARIO DE CONFIGURACIÓN
+# =====================================================
+
+with st.form(
+    key="formulario_planificacion_camionetas",
+    clear_on_submit=False
+):
+
+    col_plan1, col_plan2, col_plan3 = st.columns(
+        [1, 1, 1]
+    )
+
+    with col_plan1:
+
+        capacidad_camioneta = st.number_input(
+            "Capacidad por camioneta (m³)",
+            min_value=0.1,
+            value=12.0,
+            step=0.5,
+            format="%.1f"
+        )
+
+    with col_plan2:
+
+        opciones_planificacion_camionetas = sorted(
+            tabla_filtrada["Planificacion"]
+            .dropna()
+            .astype(str)
+            .loc[
+                lambda serie:
+                serie.str.strip().ne("")
+            ]
+            .unique()
+            .tolist()
+        )
+
+        planificaciones_camionetas = st.multiselect(
+            "Planificaciones a procesar",
+            options=opciones_planificacion_camionetas,
+            default=opciones_planificacion_camionetas
+        )
+
+    with col_plan3:
+
+        incluir_preparados = st.checkbox(
+            "Incluir pedidos con preparación",
+            value=True
+        )
+
+    generar_planificacion = st.form_submit_button(
+        "🚚 Generar propuesta de camionetas",
+        type="primary",
+        use_container_width=True
+    )
+
+
+# =====================================================
+# GENERAR PLANIFICACIÓN
+# =====================================================
+
+if generar_planificacion:
+
+    base_planificacion = tabla_filtrada.copy()
+
+    if planificaciones_camionetas:
+
+        base_planificacion = base_planificacion[
+            base_planificacion["Planificacion"].isin(
+                planificaciones_camionetas
+            )
+        ].copy()
+
+    if not incluir_preparados:
+
+        base_planificacion = base_planificacion[
+            base_planificacion["PreparacionID"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+        ].copy()
+
+    resumen_clientes = (
+        construir_resumen_clientes_planificacion(
+            base_planificacion
+        )
+    )
+
+    asignacion_camionetas = asignar_camionetas(
+        resumen_clientes,
+        capacidad_camioneta
+    )
+
+    pedidos_planificados = asignar_camioneta_a_pedidos(
+        base_planificacion,
+        asignacion_camionetas
+    )
+
+    st.session_state[
+        "asignacion_camionetas"
+    ] = asignacion_camionetas
+
+    st.session_state[
+        "pedidos_planificados"
+    ] = pedidos_planificados
+
+    st.session_state[
+        "capacidad_camioneta"
+    ] = capacidad_camioneta
+
+
+# =====================================================
+# MOSTRAR RESULTADO GUARDADO
+# =====================================================
+
+if (
+    "asignacion_camionetas"
+    in st.session_state
+):
+
+    asignacion_camionetas = st.session_state[
+        "asignacion_camionetas"
+    ]
+
+    if asignacion_camionetas.empty:
+
+        st.warning(
+            "No existen pedidos disponibles para generar "
+            "la planificación."
+        )
+
+    else:
+
+        capacidad_utilizada = st.session_state.get(
+            "capacidad_camioneta",
+            0
+        )
+
+        resumen_camionetas = (
+            asignacion_camionetas[
+                [
+                    "Planificacion",
+                    "NumeroCamioneta",
+                    "Camioneta",
+                    "CapacidadM3",
+                    "VolumenCamionetaM3",
+                    "OcupacionCamionetaPct",
+                    "DisponibleM3",
+                    "ClientesCamioneta",
+                    "PedidosCamioneta",
+                    "UnidadesCamioneta",
+                    "EstadoCapacidad",
+                ]
+            ]
+            .drop_duplicates(
+                subset=[
+                    "Planificacion",
+                    "NumeroCamioneta",
+                ]
+            )
+            .sort_values(
+                by=[
+                    "Planificacion",
+                    "NumeroCamioneta",
+                ]
+            )
+        )
+
+        total_camionetas = len(
+            resumen_camionetas
+        )
+
+        total_clientes_planificados = (
+            asignacion_camionetas[
+                "ClienteCodigo"
+            ].nunique()
+        )
+
+        total_pedidos_planificados = int(
+            asignacion_camionetas[
+                "CantidadPedidos"
+            ].sum()
+        )
+
+        volumen_planificado = float(
+            asignacion_camionetas[
+                "TotalM3"
+            ].sum()
+        )
+
+        ocupacion_promedio = float(
+            resumen_camionetas[
+                "OcupacionCamionetaPct"
+            ].mean()
+        )
+
+        # -------------------------------------------------
+        # KPIs DE PLANIFICACIÓN
+        # -------------------------------------------------
+
+        plan_kpi1, plan_kpi2, plan_kpi3, plan_kpi4, plan_kpi5 = (
+            st.columns(5)
+        )
+
+        with plan_kpi1:
+
+            st.metric(
+                "🚚 Camionetas",
+                total_camionetas
+            )
+
+        with plan_kpi2:
+
+            st.metric(
+                "👥 Clientes",
+                total_clientes_planificados
+            )
+
+        with plan_kpi3:
+
+            st.metric(
+                "📦 Pedidos",
+                total_pedidos_planificados
+            )
+
+        with plan_kpi4:
+
+            st.metric(
+                "📐 Volumen",
+                f"{volumen_planificado:,.3f} m³"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            )
+
+        with plan_kpi5:
+
+            st.metric(
+                "📊 Ocupación promedio",
+                f"{ocupacion_promedio:.1f}%"
+            )
+
+        # -------------------------------------------------
+        # RESUMEN DE CAMIONETAS
+        # -------------------------------------------------
+
+        st.markdown("#### Resumen de cargas")
+
+        st.dataframe(
+            resumen_camionetas,
+            width="stretch",
+            hide_index=True,
+            column_config={
+
+                "CapacidadM3": st.column_config.NumberColumn(
+                    "Capacidad m³",
+                    format="%.2f"
+                ),
+
+                "VolumenCamionetaM3": (
+                    st.column_config.NumberColumn(
+                        "Volumen asignado",
+                        format="%.3f"
+                    )
+                ),
+
+                "OcupacionCamionetaPct": (
+                    st.column_config.ProgressColumn(
+                        "Ocupación",
+                        min_value=0,
+                        max_value=100,
+                        format="%.1f%%"
+                    )
+                ),
+
+                "DisponibleM3": st.column_config.NumberColumn(
+                    "Disponible m³",
+                    format="%.3f"
+                ),
+            }
+        )
+
+        # -------------------------------------------------
+        # DETALLE DE CLIENTES ASIGNADOS
+        # -------------------------------------------------
+
+        st.markdown("#### Detalle por cliente")
+
+        columnas_detalle_planificacion = [
+            "PrioridadCliente",
+            "Camioneta",
+            "FechaPrioridad",
+            "DiasPendiente",
+            "ClienteCodigo",
+            "ClienteDescripcion",
+            "CantidadPedidos",
+            "Pedidos",
+            "TotalUnidades",
+            "TotalM3",
+            "EstadoCapacidad",
+        ]
+
+        st.dataframe(
+            asignacion_camionetas[
+                columnas_detalle_planificacion
+            ],
+            width="stretch",
+            hide_index=True,
+            height=500,
+            column_config={
+
+                "FechaPrioridad": (
+                    st.column_config.DateColumn(
+                        "Pedido más antiguo",
+                        format="DD/MM/YYYY"
+                    )
+                ),
+
+                "TotalM3": (
+                    st.column_config.NumberColumn(
+                        "Volumen cliente",
+                        format="%.3f"
+                    )
+                ),
+            }
+        )
 
 
 # =====================================================

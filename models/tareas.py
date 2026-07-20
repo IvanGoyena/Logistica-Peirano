@@ -5,7 +5,7 @@ import pandas as pd
 # CONFIGURACIÓN
 # ==========================================================
 
-DIAS_TABLERO = 2
+DIAS_TABLERO = 3
 
 # ==========================================================
 # TABLA OPERATIVA
