@@ -1,5 +1,509 @@
 import pandas as pd
 
+from config_planificacion import (
+    ZONAS_PLANIFICACION,
+    CLIENTES_PRIORITARIOS,
+    PRIORIDAD_GENERAL,
+    GRUPOS_EXCLUIDOS,
+    obtener_planificacion_expreso,
+)
+
+# Código genérico usado por los pedidos enviados mediante expreso.
+CODIGO_DESPACHO_EXPRESOS = "05010001"
+
+
+# ==========================================================
+# NORMALIZACIÓN
+# ==========================================================
+
+def normalizar_codigo(valor) -> str:
+
+    if pd.isna(valor):
+        return ""
+
+    codigo = str(valor).strip()
+
+    if codigo.endswith(".0"):
+        codigo = codigo[:-2]
+
+    return codigo
+
+
+def codigo_comparable(valor) -> str:
+
+    codigo = normalizar_codigo(valor)
+
+    return codigo.lstrip("0") or "0"
+
+
+CODIGO_EXPRESO_COMPARABLE = codigo_comparable(
+    CODIGO_DESPACHO_EXPRESOS
+)
+
+
+INDICE_ZONAS_NORMALIZADO = {
+    codigo_comparable(codigo): {
+        **configuracion,
+        "codigo_original": str(codigo),
+    }
+    for codigo, configuracion
+    in ZONAS_PLANIFICACION.items()
+}
+
+
+# ==========================================================
+# CONFIGURACIÓN DE ZONAS Y PRIORIDADES
+# ==========================================================
+
+def es_codigo_expreso(codigo_despacho) -> bool:
+
+    return (
+        codigo_comparable(codigo_despacho)
+        == CODIGO_EXPRESO_COMPARABLE
+    )
+
+
+def obtener_configuracion_zona(
+    codigo_despacho
+) -> dict:
+
+    codigo_recibido = normalizar_codigo(
+        codigo_despacho
+    )
+
+    configuracion = ZONAS_PLANIFICACION.get(
+        codigo_recibido
+    )
+
+    codigo_configurado = codigo_recibido
+
+    if configuracion is None:
+
+        configuracion = INDICE_ZONAS_NORMALIZADO.get(
+            codigo_comparable(codigo_recibido)
+        )
+
+        if configuracion is not None:
+            codigo_configurado = configuracion[
+                "codigo_original"
+            ]
+
+    if configuracion is None:
+
+        return {
+            "CodigoDespachoNormalizado": codigo_recibido,
+            "CodigoDespachoConfigurado": "",
+            "ZonaDescripcion": "",
+            "GrupoDespacho": "",
+            "PlanificacionConfigurada": "",
+            "ZonaConfigurada": False,
+            "EsExpreso": es_codigo_expreso(
+                codigo_recibido
+            ),
+        }
+
+    return {
+        "CodigoDespachoNormalizado": codigo_recibido,
+        "CodigoDespachoConfigurado": codigo_configurado,
+        "ZonaDescripcion": configuracion.get(
+            "descripcion",
+            ""
+        ),
+        "GrupoDespacho": str(
+            configuracion.get(
+                "grupo",
+                ""
+            )
+        ).strip(),
+        "PlanificacionConfigurada": str(
+            configuracion.get(
+                "planificacion",
+                ""
+            )
+        ).strip(),
+        "ZonaConfigurada": True,
+        "EsExpreso": es_codigo_expreso(
+            codigo_recibido
+        ),
+    }
+
+
+def obtener_prioridad_cliente(
+    codigo_cliente
+) -> dict:
+
+    codigo = normalizar_codigo(
+        codigo_cliente
+    ).upper()
+
+    configuracion = CLIENTES_PRIORITARIOS.get(
+        codigo
+    )
+
+    if configuracion is None:
+
+        return {
+            "EsPrioritario": False,
+            "PrioridadConfigurada": PRIORIDAD_GENERAL,
+            "TipoEntregaPrioridad": "",
+            "ResponsablePrioridad": "",
+        }
+
+    return {
+        "EsPrioritario": True,
+        "PrioridadConfigurada": int(
+            configuracion.get(
+                "prioridad",
+                PRIORIDAD_GENERAL
+            )
+        ),
+        "TipoEntregaPrioridad": configuracion.get(
+            "tipo_entrega",
+            ""
+        ),
+        "ResponsablePrioridad": configuracion.get(
+            "responsable",
+            ""
+        ),
+    }
+
+
+# ==========================================================
+# ENRIQUECER PEDIDOS PARA PLANIFICACIÓN
+# ==========================================================
+
+def enriquecer_pedidos_planificacion(
+    df_pedidos: pd.DataFrame
+) -> pd.DataFrame:
+
+    tabla = df_pedidos.copy()
+
+    if tabla.empty:
+
+        columnas_salida_vacia = [
+            "CodigoDespachoNormalizado",
+            "CodigoDespachoConfigurado",
+            "ZonaDescripcion",
+            "GrupoDespacho",
+            "PlanificacionConfigurada",
+            "ZonaConfigurada",
+            "EsExpreso",
+            "ZonaExpreso",
+            "ZonaExpresoConfigurada",
+            "DiaEntregaConfigurado",
+            "CoincidePlanificacion",
+            "ClaveAgrupacion",
+            "EsPrioritario",
+            "PrioridadConfigurada",
+            "TipoEntregaPrioridad",
+            "ResponsablePrioridad",
+        ]
+
+        for columna in columnas_salida_vacia:
+
+            if columna not in tabla.columns:
+
+                if columna in {
+                    "ZonaConfigurada",
+                    "EsExpreso",
+                    "ZonaExpresoConfigurada",
+                    "CoincidePlanificacion",
+                    "EsPrioritario",
+                }:
+                    tabla[columna] = pd.Series(
+                        dtype="bool"
+                    )
+
+                elif columna == "PrioridadConfigurada":
+                    tabla[columna] = pd.Series(
+                        dtype="int64"
+                    )
+
+                else:
+                    tabla[columna] = pd.Series(
+                        dtype="object"
+                    )
+
+        return tabla
+
+    columnas_texto = [
+        "Pedido",
+        "ClienteCodigo",
+        "ClienteDescripcion",
+        "Planificacion",
+        "CodigoDespacho",
+    ]
+
+    for columna in columnas_texto:
+
+        tabla[columna] = (
+            tabla[columna]
+            .apply(normalizar_codigo)
+        )
+
+    tabla["ClienteCodigo"] = (
+        tabla["ClienteCodigo"]
+        .str.upper()
+    )
+
+    tabla["Planificacion"] = (
+        tabla["Planificacion"]
+        .str.upper()
+    )
+
+    columnas_configuracion_zona = [
+        "CodigoDespachoNormalizado",
+        "CodigoDespachoConfigurado",
+        "ZonaDescripcion",
+        "GrupoDespacho",
+        "PlanificacionConfigurada",
+        "ZonaConfigurada",
+        "EsExpreso",
+    ]
+
+    if tabla.empty:
+
+        configuracion_zonas = pd.DataFrame(
+            columns=columnas_configuracion_zona,
+            index=tabla.index,
+        )
+
+    else:
+
+        configuracion_zonas = (
+            tabla["CodigoDespacho"]
+            .apply(obtener_configuracion_zona)
+            .apply(pd.Series)
+            .reindex(
+                columns=columnas_configuracion_zona
+            )
+        )
+
+    tabla = pd.concat(
+        [
+            tabla.reset_index(drop=True),
+            configuracion_zonas.reset_index(drop=True),
+        ],
+        axis=1
+    )
+
+    tabla["EsExpreso"] = (
+        tabla["EsExpreso"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    tabla["ZonaConfigurada"] = (
+        tabla["ZonaConfigurada"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    # ------------------------------------------------------
+    # EXPRESOS
+    #
+    # REGLA PRINCIPAL:
+    # - Planificacion ya contiene el día de entrega del cliente.
+    # - ZonaExpreso / ZonaAgrupadorExpreso determina el grupo.
+    # - La configuración nunca reemplaza un día informado.
+    #
+    # Ejemplo:
+    # Planificacion = JUEVES
+    # ZonaExpreso = CABA SUR II
+    # Resultado = JUEVES | Grupo 1
+    # ------------------------------------------------------
+
+    mascara_expresos = tabla["EsExpreso"].fillna(False)
+
+    if "ZonaExpreso" in tabla.columns:
+
+        zona_expreso = (
+            tabla["ZonaExpreso"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+    elif "ZonaAgrupadorExpreso" in tabla.columns:
+
+        zona_expreso = (
+            tabla["ZonaAgrupadorExpreso"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+    else:
+
+        zona_expreso = pd.Series(
+            "",
+            index=tabla.index,
+            dtype="object",
+        )
+
+    columnas_configuracion_expreso = [
+        "ZonaExpresoNormalizada",
+        "PlanificacionExpreso",
+        "GrupoExpreso",
+        "CodigosDespachoExpreso",
+        "ZonaExpresoConfigurada",
+    ]
+
+    if tabla.empty:
+
+        configuracion_expresos = pd.DataFrame(
+            columns=columnas_configuracion_expreso,
+            index=tabla.index,
+        )
+
+    else:
+
+        configuracion_expresos = (
+            zona_expreso
+            .apply(obtener_planificacion_expreso)
+            .apply(pd.Series)
+            .reindex(
+                columns=columnas_configuracion_expreso
+            )
+        )
+
+    tabla["ZonaExpreso"] = (
+        configuracion_expresos[
+            "ZonaExpresoNormalizada"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    tabla["ZonaExpresoConfigurada"] = (
+        configuracion_expresos[
+            "ZonaExpresoConfigurada"
+        ]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    mascara_expresos_configurados = (
+        mascara_expresos
+        & tabla["ZonaExpresoConfigurada"]
+    )
+
+    # El grupo sí proviene de la zona configurada.
+    tabla.loc[
+        mascara_expresos_configurados,
+        "GrupoDespacho"
+    ] = configuracion_expresos.loc[
+        mascara_expresos_configurados,
+        "GrupoExpreso"
+    ].values
+
+    tabla.loc[
+        mascara_expresos_configurados,
+        "ZonaDescripcion"
+    ] = tabla.loc[
+        mascara_expresos_configurados,
+        "ZonaExpreso"
+    ]
+
+    # Planificacion conserva la agrupación operativa:
+    # CABA SUR, CABA SUR II, CABA NORTE, etc.
+    #
+    # El día configurado se guarda por separado para control,
+    # pero nunca reemplaza el nombre de la zona.
+    tabla["DiaEntregaConfigurado"] = ""
+
+    tabla.loc[
+        mascara_expresos_configurados,
+        "DiaEntregaConfigurado"
+    ] = configuracion_expresos.loc[
+        mascara_expresos_configurados,
+        "PlanificacionExpreso"
+    ].values
+
+    # Para validar los expresos, la planificación configurada
+    # coincide con la propia agrupación operativa.
+    tabla.loc[
+        mascara_expresos,
+        "PlanificacionConfigurada"
+    ] = tabla.loc[
+        mascara_expresos,
+        "Planificacion"
+    ]
+
+    tabla.loc[
+        mascara_expresos,
+        "ZonaConfigurada"
+    ] = True
+
+    # Las zonas todavía no configuradas no se eliminan.
+    # Quedan identificadas para poder agregarlas después.
+    mascara_expresos_sin_config = (
+        mascara_expresos
+        & ~tabla["ZonaExpresoConfigurada"]
+    )
+
+    tabla.loc[
+        mascara_expresos_sin_config,
+        "ZonaDescripcion"
+    ] = zona_expreso.loc[
+        mascara_expresos_sin_config
+    ]
+
+    tabla.loc[
+        mascara_expresos_sin_config,
+        "GrupoDespacho"
+    ] = "EXPRESO SIN CONFIG"
+
+    tabla["CoincidePlanificacion"] = (
+        tabla["Planificacion"].eq(
+            tabla["PlanificacionConfigurada"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+    )
+
+    planificacion_texto = (
+        tabla["Planificacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    grupo_despacho_texto = (
+        tabla["GrupoDespacho"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    tabla["ClaveAgrupacion"] = (
+        planificacion_texto
+        + " | Grupo "
+        + grupo_despacho_texto
+    )
+
+    prioridades = (
+        tabla["ClienteCodigo"]
+        .apply(obtener_prioridad_cliente)
+        .apply(pd.Series)
+    )
+
+    tabla = pd.concat(
+        [
+            tabla.reset_index(drop=True),
+            prioridades.reset_index(drop=True),
+        ],
+        axis=1
+    )
+
+    return tabla
+
 
 # ==========================================================
 # CONSTRUIR RESUMEN DE CLIENTES
@@ -15,6 +519,7 @@ def construir_resumen_clientes_planificacion(
         "ClienteCodigo",
         "ClienteDescripcion",
         "Planificacion",
+        "CodigoDespacho",
         "TotalUnidades",
         "TotalM3",
     ]
@@ -32,38 +537,8 @@ def construir_resumen_clientes_planificacion(
             f"{columnas_faltantes}"
         )
 
-    tabla = df_pedidos.copy()
-
-    # ------------------------------------------------------
-    # NORMALIZAR CAMPOS
-    # ------------------------------------------------------
-
-    tabla["Pedido"] = (
-        tabla["Pedido"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    tabla["ClienteCodigo"] = (
-        tabla["ClienteCodigo"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    tabla["ClienteDescripcion"] = (
-        tabla["ClienteDescripcion"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    tabla["Planificacion"] = (
-        tabla["Planificacion"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
+    tabla = enriquecer_pedidos_planificacion(
+        df_pedidos
     )
 
     tabla["Fecha"] = pd.to_datetime(
@@ -87,50 +562,38 @@ def construir_resumen_clientes_planificacion(
         .fillna(0)
     )
 
-    # ------------------------------------------------------
-    # SOLO PEDIDOS PLANIFICABLES
-    # ------------------------------------------------------
+    tabla = tabla.drop_duplicates(
+        subset=["Pedido"],
+        keep="first"
+    )
 
     tabla = tabla[
         tabla["Pedido"].ne("")
         & tabla["ClienteCodigo"].ne("")
         & tabla["Planificacion"].ne("")
         & tabla["Fecha"].notna()
+        & tabla["ZonaConfigurada"]
+        & tabla["GrupoDespacho"].notna()
+        & ~tabla["GrupoDespacho"].isin(
+            GRUPOS_EXCLUIDOS
+        )
     ].copy()
 
     if tabla.empty:
-
-        return pd.DataFrame(
-            columns=[
-                "Planificacion",
-                "ClienteCodigo",
-                "ClienteDescripcion",
-                "FechaPrioridad",
-                "CantidadPedidos",
-                "Pedidos",
-                "TotalUnidades",
-                "TotalM3",
-                "DiasPendiente",
-            ]
-        )
-
-    # Evitar duplicar pedidos
-    tabla = tabla.drop_duplicates(
-        subset=["Pedido"],
-        keep="first"
-    )
-
-    # ------------------------------------------------------
-    # AGRUPAR CLIENTES COMPLETOS
-    # ------------------------------------------------------
+        return pd.DataFrame()
 
     resumen = (
         tabla
         .groupby(
             [
                 "Planificacion",
+                "GrupoDespacho",
+                "ClaveAgrupacion",
                 "ClienteCodigo",
                 "ClienteDescripcion",
+                "EsPrioritario",
+                "PrioridadConfigurada",
+                "EsExpreso",
             ],
             as_index=False
         )
@@ -145,6 +608,26 @@ def construir_resumen_clientes_planificacion(
                     )
                 )
             ),
+            CodigosDespacho=(
+                "CodigoDespacho",
+                lambda serie: " | ".join(
+                    sorted(
+                        serie.astype(str).unique()
+                    )
+                )
+            ),
+            Zonas=(
+                "ZonaDescripcion",
+                lambda serie: " | ".join(
+                    sorted(
+                        {
+                            zona
+                            for zona in serie.astype(str)
+                            if zona.strip()
+                        }
+                    )
+                )
+            ),
             TotalUnidades=("TotalUnidades", "sum"),
             TotalM3=("TotalM3", "sum"),
         )
@@ -153,7 +636,8 @@ def construir_resumen_clientes_planificacion(
     hoy = pd.Timestamp.today().normalize()
 
     resumen["DiasPendiente"] = (
-        hoy - resumen["FechaPrioridad"].dt.normalize()
+        hoy
+        - resumen["FechaPrioridad"].dt.normalize()
     ).dt.days
 
     resumen["TotalUnidades"] = (
@@ -168,18 +652,21 @@ def construir_resumen_clientes_planificacion(
         .round(3)
     )
 
-    # ------------------------------------------------------
-    # PRIORIDAD
-    # Primero la planificación y luego el cliente más viejo
-    # ------------------------------------------------------
-
+    # Los clientes prioritarios conservan su prioridad.
+    # A igualdad de prioridad, se toma primero el más antiguo.
     resumen = resumen.sort_values(
         by=[
             "Planificacion",
+            "GrupoDespacho",
+            "EsPrioritario",
+            "PrioridadConfigurada",
             "FechaPrioridad",
             "TotalM3",
         ],
         ascending=[
+            True,
+            True,
+            False,
             True,
             True,
             False,
@@ -188,7 +675,12 @@ def construir_resumen_clientes_planificacion(
 
     resumen["PrioridadCliente"] = (
         resumen
-        .groupby("Planificacion")
+        .groupby(
+            [
+                "Planificacion",
+                "GrupoDespacho",
+            ]
+        )
         .cumcount()
         + 1
     )
@@ -197,8 +689,68 @@ def construir_resumen_clientes_planificacion(
 
 
 # ==========================================================
-# ASIGNAR CAMIONETAS
+# ASIGNACIÓN BEST FIT
 # ==========================================================
+
+def _buscar_mejor_vehiculo(
+    vehiculos: list,
+    volumen_cliente: float,
+    capacidad_m3: float,
+    grupos_permitidos: set | None = None
+):
+
+    candidatos = []
+
+    for vehiculo in vehiculos:
+
+        if grupos_permitidos is not None:
+            if vehiculo["GrupoVehiculo"] not in grupos_permitidos:
+                continue
+
+        nuevo_volumen = (
+            vehiculo["VolumenAcumuladoM3"]
+            + volumen_cliente
+        )
+
+        if nuevo_volumen <= capacidad_m3:
+
+            espacio_restante = (
+                capacidad_m3
+                - nuevo_volumen
+            )
+
+            candidatos.append(
+                (
+                    espacio_restante,
+                    vehiculo["NumeroCamioneta"],
+                    vehiculo,
+                )
+            )
+
+    if not candidatos:
+        return None
+
+    candidatos.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+        )
+    )
+
+    return candidatos[0][2]
+
+
+def _crear_vehiculo(
+    numero_camioneta: int,
+    grupo_vehiculo: str,
+) -> dict:
+
+    return {
+        "NumeroCamioneta": numero_camioneta,
+        "GrupoVehiculo": grupo_vehiculo,
+        "VolumenAcumuladoM3": 0.0,
+    }
+
 
 def asignar_camionetas(
     resumen_clientes: pd.DataFrame,
@@ -212,33 +764,147 @@ def asignar_camionetas(
         )
 
     if resumen_clientes.empty:
-
         return resumen_clientes.copy()
 
     tabla = resumen_clientes.copy()
-
     asignaciones = []
 
-    for planificacion, grupo in tabla.groupby(
+    for planificacion, bloque in tabla.groupby(
         "Planificacion",
         sort=False
     ):
 
-        grupo = grupo.sort_values(
+        vehiculos = []
+        siguiente_numero = 1
+
+        clientes_zona = bloque[
+            ~bloque["EsExpreso"]
+        ].copy()
+
+        clientes_expresos = bloque[
+            bloque["EsExpreso"]
+        ].copy()
+
+        # --------------------------------------------------
+        # 1. CLIENTES DE ZONA
+        # Cada grupo zonal se mantiene separado.
+        # El best fit busca espacios en todas las camionetas
+        # abiertas de ese mismo grupo.
+        # --------------------------------------------------
+
+        for grupo_despacho, grupo in clientes_zona.groupby(
+            "GrupoDespacho",
+            sort=False
+        ):
+
+            grupo = grupo.sort_values(
+                by=[
+                    "EsPrioritario",
+                    "PrioridadConfigurada",
+                    "FechaPrioridad",
+                    "TotalM3",
+                ],
+                ascending=[
+                    False,
+                    True,
+                    True,
+                    False,
+                ]
+            )
+
+            for _, fila in grupo.iterrows():
+
+                volumen_cliente = float(
+                    fila["TotalM3"]
+                )
+
+                cliente_excedido = (
+                    volumen_cliente > capacidad_m3
+                )
+
+                vehiculo = None
+
+                if not cliente_excedido:
+
+                    vehiculo = _buscar_mejor_vehiculo(
+                        vehiculos=vehiculos,
+                        volumen_cliente=volumen_cliente,
+                        capacidad_m3=capacidad_m3,
+                        grupos_permitidos={
+                            str(grupo_despacho)
+                        },
+                    )
+
+                if vehiculo is None:
+
+                    vehiculo = _crear_vehiculo(
+                        numero_camioneta=siguiente_numero,
+                        grupo_vehiculo=str(
+                            grupo_despacho
+                        ),
+                    )
+
+                    vehiculos.append(vehiculo)
+                    siguiente_numero += 1
+
+                vehiculo["VolumenAcumuladoM3"] += (
+                    volumen_cliente
+                )
+
+                asignacion = fila.to_dict()
+
+                asignacion.update({
+                    "NumeroCamioneta": vehiculo[
+                        "NumeroCamioneta"
+                    ],
+                    "GrupoVehiculo": vehiculo[
+                        "GrupoVehiculo"
+                    ],
+                    "Camioneta": (
+                        f"{planificacion} - "
+                        f"Camioneta "
+                        f"{vehiculo['NumeroCamioneta']}"
+                    ),
+                    "CapacidadM3": capacidad_m3,
+                    "VolumenClienteM3": volumen_cliente,
+                    "ClienteExcedeCapacidad": (
+                        cliente_excedido
+                    ),
+                    "OcupacionClientePct": round(
+                        volumen_cliente
+                        / capacidad_m3
+                        * 100,
+                        1
+                    ),
+                })
+
+                asignaciones.append(asignacion)
+
+        # --------------------------------------------------
+        # 2. CLIENTES EXPRESOS
+        #
+        # El expreso ya viene asociado a esta Planificacion.
+        # Se prueba contra TODAS las camionetas zonales de esa
+        # planificación, sin mezclar planificaciones distintas.
+        # Así completa huecos de grupos zonales existentes.
+        # --------------------------------------------------
+
+        clientes_expresos = clientes_expresos.sort_values(
             by=[
+                "EsPrioritario",
+                "PrioridadConfigurada",
                 "FechaPrioridad",
                 "TotalM3",
             ],
             ascending=[
+                False,
+                True,
                 True,
                 False,
             ]
         )
 
-        numero_camioneta = 1
-        volumen_acumulado = 0.0
-
-        for _, fila in grupo.iterrows():
+        for _, fila in clientes_expresos.iterrows():
 
             volumen_cliente = float(
                 fila["TotalM3"]
@@ -248,60 +914,58 @@ def asignar_camionetas(
                 volumen_cliente > capacidad_m3
             )
 
-            # --------------------------------------------------
-            # CLIENTE QUE SUPERA SOLO LA CAPACIDAD
-            # Se mantiene completo en una camioneta exclusiva
-            # --------------------------------------------------
+            vehiculo = None
 
-            if cliente_excedido:
+            if not cliente_excedido:
 
-                if volumen_acumulado > 0:
+                vehiculo = _buscar_mejor_vehiculo(
+                    vehiculos=vehiculos,
+                    volumen_cliente=volumen_cliente,
+                    capacidad_m3=capacidad_m3,
+                    grupos_permitidos={
+                        str(fila["GrupoDespacho"])
+                    },
+                )
 
-                    numero_camioneta += 1
-                    volumen_acumulado = 0.0
+            if vehiculo is None:
 
-                volumen_acumulado = volumen_cliente
+                vehiculo = _crear_vehiculo(
+                    numero_camioneta=siguiente_numero,
+                    grupo_vehiculo=str(
+                        fila["GrupoDespacho"]
+                    ),
+                )
 
-                numero_asignado = numero_camioneta
+                vehiculos.append(vehiculo)
+                siguiente_numero += 1
 
-                numero_camioneta += 1
-                volumen_acumulado = 0.0
-
-            else:
-
-                # ----------------------------------------------
-                # EL CLIENTE NO ENTRA EN LA CAMIONETA ACTUAL
-                # ----------------------------------------------
-
-                if (
-                    volumen_acumulado > 0
-                    and volumen_acumulado + volumen_cliente
-                    > capacidad_m3
-                ):
-
-                    numero_camioneta += 1
-                    volumen_acumulado = 0.0
-
-                volumen_acumulado += volumen_cliente
-                numero_asignado = numero_camioneta
-
-            porcentaje_ocupacion = (
-                volumen_cliente / capacidad_m3 * 100
+            vehiculo["VolumenAcumuladoM3"] += (
+                volumen_cliente
             )
 
             asignacion = fila.to_dict()
 
             asignacion.update({
-                "NumeroCamioneta": numero_asignado,
+                "NumeroCamioneta": vehiculo[
+                    "NumeroCamioneta"
+                ],
+                "GrupoVehiculo": vehiculo[
+                    "GrupoVehiculo"
+                ],
                 "Camioneta": (
                     f"{planificacion} - "
-                    f"Camioneta {numero_asignado}"
+                    f"Camioneta "
+                    f"{vehiculo['NumeroCamioneta']}"
                 ),
                 "CapacidadM3": capacidad_m3,
                 "VolumenClienteM3": volumen_cliente,
-                "ClienteExcedeCapacidad": cliente_excedido,
+                "ClienteExcedeCapacidad": (
+                    cliente_excedido
+                ),
                 "OcupacionClientePct": round(
-                    porcentaje_ocupacion,
+                    volumen_cliente
+                    / capacidad_m3
+                    * 100,
                     1
                 ),
             })
@@ -310,16 +974,16 @@ def asignar_camionetas(
 
     resultado = pd.DataFrame(asignaciones)
 
-    # ------------------------------------------------------
-    # VOLUMEN TOTAL DE CADA CAMIONETA
-    # ------------------------------------------------------
+    if resultado.empty:
+        return resultado
 
-    volumen_camioneta = (
+    resumen_vehiculos = (
         resultado
         .groupby(
             [
                 "Planificacion",
                 "NumeroCamioneta",
+                "GrupoVehiculo",
             ],
             as_index=False
         )
@@ -343,19 +1007,21 @@ def asignar_camionetas(
         )
     )
 
-    volumen_camioneta["OcupacionCamionetaPct"] = (
-        volumen_camioneta["VolumenCamionetaM3"]
+    resumen_vehiculos["CapacidadM3"] = capacidad_m3
+
+    resumen_vehiculos["OcupacionCamionetaPct"] = (
+        resumen_vehiculos["VolumenCamionetaM3"]
         / capacidad_m3
         * 100
     ).round(1)
 
-    volumen_camioneta["DisponibleM3"] = (
+    resumen_vehiculos["DisponibleM3"] = (
         capacidad_m3
-        - volumen_camioneta["VolumenCamionetaM3"]
+        - resumen_vehiculos["VolumenCamionetaM3"]
     ).round(3)
 
-    volumen_camioneta["EstadoCapacidad"] = (
-        volumen_camioneta["VolumenCamionetaM3"]
+    resumen_vehiculos["EstadoCapacidad"] = (
+        resumen_vehiculos["VolumenCamionetaM3"]
         .apply(
             lambda volumen:
             "🔴 Excedida"
@@ -373,20 +1039,37 @@ def asignar_camionetas(
     )
 
     resultado = resultado.merge(
-        volumen_camioneta,
+        resumen_vehiculos,
         on=[
             "Planificacion",
             "NumeroCamioneta",
+            "GrupoVehiculo",
         ],
         how="left",
-        validate="many_to_one"
+        validate="many_to_one",
+        suffixes=("", "_Resumen"),
     )
+
+    # El merge anterior conserva CapacidadM3 de la asignación.
+    if "CapacidadM3_Resumen" in resultado.columns:
+        resultado = resultado.drop(
+            columns=["CapacidadM3_Resumen"]
+        )
 
     resultado = resultado.sort_values(
         by=[
             "Planificacion",
             "NumeroCamioneta",
+            "EsPrioritario",
+            "PrioridadConfigurada",
             "FechaPrioridad",
+        ],
+        ascending=[
+            True,
+            True,
+            False,
+            True,
+            True,
         ]
     ).reset_index(drop=True)
 
@@ -394,7 +1077,7 @@ def asignar_camionetas(
 
 
 # ==========================================================
-# DEVOLVER CAMIONETA A CADA PEDIDO
+# DEVOLVER ASIGNACIÓN A CADA PEDIDO
 # ==========================================================
 
 def asignar_camioneta_a_pedidos(
@@ -411,13 +1094,19 @@ def asignar_camioneta_a_pedidos(
 
         return tabla
 
+    tabla_enriquecida = enriquecer_pedidos_planificacion(
+        tabla
+    )
+
     asignacion_merge = (
         asignacion_clientes[
             [
                 "Planificacion",
+                "GrupoDespacho",
                 "ClienteCodigo",
                 "Camioneta",
                 "NumeroCamioneta",
+                "GrupoVehiculo",
                 "VolumenCamionetaM3",
                 "OcupacionCamionetaPct",
                 "EstadoCapacidad",
@@ -426,6 +1115,7 @@ def asignar_camioneta_a_pedidos(
         .drop_duplicates(
             subset=[
                 "Planificacion",
+                "GrupoDespacho",
                 "ClienteCodigo",
             ],
             keep="first"
@@ -437,19 +1127,20 @@ def asignar_camioneta_a_pedidos(
         )
     )
 
-    tabla = tabla.merge(
+    tabla_enriquecida = tabla_enriquecida.merge(
         asignacion_merge,
         on=[
             "Planificacion",
+            "GrupoDespacho",
             "ClienteCodigo",
         ],
         how="left",
         validate="many_to_one"
     )
 
-    tabla["CamionetaPropuesta"] = (
-        tabla["CamionetaPropuesta"]
+    tabla_enriquecida["CamionetaPropuesta"] = (
+        tabla_enriquecida["CamionetaPropuesta"]
         .fillna("")
     )
 
-    return tabla
+    return tabla_enriquecida

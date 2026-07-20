@@ -46,7 +46,12 @@ from models.planificacion import (
     asignar_camioneta_a_pedidos,
 )
 
+from Automatizacion.ejecutar_agrupaciones import (
+    ejecutar_agrupacion,
+)
+
 import pandas as pd
+import re
 
 # =====================================================
 # CONFIGURACIÓN
@@ -63,56 +68,154 @@ st.set_page_config(
 )
 
 # =====================================================
-# CARGA
+# CARGA CONTROLADA DE DATOS
 # =====================================================
 
-df_pedidos = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos DIGIP",
-    cache=False
+@st.cache_data(
+    show_spinner="Cargando datos operativos..."
+)
+def cargar_datos_operativos():
+    """
+    Lee los archivos una sola vez y conserva los DataFrames
+    durante los reruns normales de Streamlit.
+
+    La caché se limpia únicamente desde el botón
+    'Actualizar datos'.
+    """
+
+    return {
+        "pedidos": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos DIGIP",
+            cache=False
+        ),
+        "detalle": leer_archivo(
+            CARPETA_DATOS,
+            "Detalle Pendientes",
+            cache=False
+        ),
+        "articulos": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Articulo",
+            cache=True
+        ),
+        "clientes": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Clientes",
+            cache=True
+        ),
+        "pendientes_erp": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos Pendientes",
+            cache=False
+        ),
+        "transmisiones": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos Transmicion",
+            cache=False
+        ),
+        "expresos": leer_archivo(
+            CARPETA_DATOS,
+            "Datos Expresos",
+            cache=True
+        ),
+        "volumetria": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Volumetria",
+            cache=True
+        ),
+    }
+
+
+# -----------------------------------------------------
+# BARRA DE ACTUALIZACIÓN
+# -----------------------------------------------------
+
+col_actualizacion_1, col_actualizacion_2 = st.columns(
+    [5, 1],
+    vertical_alignment="center"
 )
 
-df_detalle = leer_archivo(
-    CARPETA_DATOS,
-    "Detalle Pendientes",
-    cache=False
-)
+with col_actualizacion_1:
+    st.caption(
+        "Los datos se mantienen en memoria mientras filtrás, "
+        "planificás o ejecutás camionetas."
+    )
 
-df_articulos = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Articulo",
-    cache=True
-)
+with col_actualizacion_2:
+    actualizar_datos = st.button(
+        "🔄 Actualizar datos",
+        key="actualizar_datos_pedidos",
+        use_container_width=True,
+        help=(
+            "Vuelve a leer todos los archivos de origen "
+            "y elimina la planificación anterior."
+        )
+    )
 
-df_clientes = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Clientes",
-    cache=True
-)
 
-df_pendientes_erp = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos Pendientes",
-    cache=False
-)
+if actualizar_datos:
 
-df_transmisiones = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos Transmicion",
-    cache=False
-)
+    cargar_datos_operativos.clear()
 
-df_expresos = leer_archivo(
-    CARPETA_DATOS,
-    "Datos Expresos",
-    cache=True
-)
+    claves_planificacion = [
+        "asignacion_camionetas",
+        "pedidos_planificados",
+        "capacidad_camioneta",
+        "agrupadores_ocupados",
+        "agrupadores_a_crear",
+    ]
 
-df_volumetria = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Volumetria",
-    cache=True
-)
+    for clave in claves_planificacion:
+        st.session_state.pop(
+            clave,
+            None
+        )
+
+    claves_ejecucion = [
+        clave
+        for clave in st.session_state.keys()
+        if str(clave).startswith(
+            "resultado_digip_"
+        )
+    ]
+
+    for clave in claves_ejecucion:
+        st.session_state.pop(
+            clave,
+            None
+        )
+
+    # Limpiar filtros porque el rango de fechas puede cambiar
+    st.session_state.pop(
+        "filtros_pedidos",
+        None
+    )
+
+    st.toast(
+        "Datos actualizados correctamente.",
+        icon="✅"
+    )
+
+    st.rerun()
+
+
+datos_operativos = cargar_datos_operativos()
+
+# Se entregan copias para evitar que las transformaciones
+# posteriores modifiquen accidentalmente la caché.
+df_pedidos = datos_operativos["pedidos"].copy()
+df_detalle = datos_operativos["detalle"].copy()
+df_articulos = datos_operativos["articulos"].copy()
+df_clientes = datos_operativos["clientes"].copy()
+df_pendientes_erp = datos_operativos[
+    "pendientes_erp"
+].copy()
+df_transmisiones = datos_operativos[
+    "transmisiones"
+].copy()
+df_expresos = datos_operativos["expresos"].copy()
+df_volumetria = datos_operativos["volumetria"].copy()
 
 
 # =====================================================
@@ -310,14 +413,23 @@ for columna in columnas_planificacion:
 
 
 # =====================================================
-# COLUMNA FINAL DE PLANIFICACIÓN
+# REFERENCIAS FINALES DE PLANIFICACIÓN
+# =====================================================
+#
+# El día de entrega es siempre la referencia principal:
+# LUNES, MARTES, MIERCOLES, JUEVES, VIERNES, DIARIOS
+# o EXPRESOS.
+#
+# La zona del expreso se conserva en una columna separada
+# para determinar el grupo dentro de ese día.
 # =====================================================
 
-agrupador = (
+zona_expreso = (
     tabla["ZonaAgrupadorExpreso"]
     .fillna("")
     .astype(str)
     .str.strip()
+    .str.upper()
 )
 
 frecuencia_entrega = (
@@ -325,10 +437,21 @@ frecuencia_entrega = (
     .fillna("")
     .astype(str)
     .str.strip()
+    .str.upper()
 )
 
-tabla["Planificacion"] = agrupador.where(
-    agrupador.ne(""),
+tabla["DiaEntrega"] = frecuencia_entrega
+tabla["ZonaExpreso"] = zona_expreso
+
+# Agrupación operativa:
+# - Los pedidos con zona de expreso se agrupan por esa zona.
+# - Los pedidos normales se agrupan por su día de entrega.
+#
+# Esto permite conservar simultáneamente:
+# DiaEntrega = JUEVES
+# Planificacion = CABA SUR
+tabla["Planificacion"] = zona_expreso.where(
+    zona_expreso.ne(""),
     frecuencia_entrega
 )
 
@@ -348,6 +471,10 @@ columnas_texto = [
     "PreparacionEstado",
     "PreparacionID",
     "CodigoDespacho",
+    "FrecuenciaEntrega",
+    "DiaEntrega",
+    "ZonaAgrupadorExpreso",
+    "ZonaExpreso",
     "Planificacion",
     "DetalleFamilias",
 ]
@@ -424,6 +551,10 @@ columnas_finales = [
     "PreparacionID",
     "CodigoDespacho",
     "DespachoDescripcion",
+    "FrecuenciaEntrega",
+    "DiaEntrega",
+    "ZonaAgrupadorExpreso",
+    "ZonaExpreso",
     "Planificacion",
     "TotalUnidades",
     "TotalM3",
@@ -541,7 +672,37 @@ if "filtros_pedidos" not in st.session_state:
         ),
         "busqueda": ""
     }
+# Ajustar las fechas guardadas al rango actual de los datos
+if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
 
+    fecha_minima_actual = fecha_minima.date()
+    fecha_maxima_actual = fecha_maxima.date()
+
+    fecha_desde_guardada = st.session_state[
+        "filtros_pedidos"
+    ].get("fecha_desde")
+
+    fecha_hasta_guardada = st.session_state[
+        "filtros_pedidos"
+    ].get("fecha_hasta")
+
+    if (
+        fecha_desde_guardada is None
+        or fecha_desde_guardada < fecha_minima_actual
+        or fecha_desde_guardada > fecha_maxima_actual
+    ):
+        st.session_state[
+            "filtros_pedidos"
+        ]["fecha_desde"] = fecha_minima_actual
+
+    if (
+        fecha_hasta_guardada is None
+        or fecha_hasta_guardada > fecha_maxima_actual
+        or fecha_hasta_guardada < fecha_minima_actual
+    ):
+        st.session_state[
+            "filtros_pedidos"
+        ]["fecha_hasta"] = fecha_maxima_actual
 
 filtros_aplicados = st.session_state["filtros_pedidos"]
 
@@ -884,6 +1045,348 @@ with contenedor_kpis:
         )
 
 
+
+# =====================================================
+# AGRUPADORES REALES DE DIGIP
+# =====================================================
+
+AGRUPADORES_DIGIP = {
+    "LUNES": [
+        "CAMIONETA LUN 1",
+        "CAMIONETA LUN 2",
+        "CAMIONETA LUN 3",
+        "CAMIONETA LUN 4",
+    ],
+    "MARTES": [
+        "CAMIONETA MAR 1",
+        "CAMIONETA MAR 2",
+        "CAMIONETA MAR 3",
+    ],
+    "MIERCOLES": [
+        "CAMIONETA MIE 1",
+        "CAMIONETA MIE 2",
+        "CAMIONETA MIE 3",
+    ],
+    "JUEVES": [
+        "CAMIONETA JUE 1",
+        "CAMIONETA JUE 2",
+        "CAMIONETA JUE 3",
+    ],
+    "VIERNES": [
+        "CAMIONETA VIE 1",
+        "CAMIONETA VIE 2",
+        "CAMIONETA VIE 3",
+    ],
+    "DIARIOS": [
+        "CAMIONETA DIARIOS 1",
+    ],
+    "EXPRESOS": [
+        "CAMIONETA EXP 1",
+        "CAMIONETA EXP 2",
+        "CAMIONETA EXP 3",
+        "CAMIONETA EXP 4",
+        "CAMIONETA EXP 5",
+        "CAMIONETA EXP 6",
+    ],
+}
+
+
+PLANIFICACIONES_SEMANALES = {
+    "LUNES",
+    "MARTES",
+    "MIERCOLES",
+    "JUEVES",
+    "VIERNES",
+    "DIARIOS",
+}
+
+
+def normalizar_planificacion(
+    valor: object
+) -> str:
+    return (
+        str(valor)
+        .strip()
+        .upper()
+    )
+
+
+def obtener_pool_agrupador(
+    planificacion: object
+) -> str:
+    """
+    Las planificaciones semanales usan su propio pool.
+    Todas las demás planificaciones operativas se consideran
+    expresos: CABA SUR, CABA SUR II, CABA NORTE, etc.
+    """
+
+    planificacion_normalizada = (
+        normalizar_planificacion(
+            planificacion
+        )
+    )
+
+    if (
+        planificacion_normalizada
+        in PLANIFICACIONES_SEMANALES
+    ):
+        return planificacion_normalizada
+
+    return "EXPRESOS"
+
+
+def obtener_agrupadores_ocupados(
+    tabla_pedidos: pd.DataFrame
+) -> set[str]:
+    """
+    Considera ocupado un agrupador cuando existe al menos
+    un pedido con PreparacionID no vacío y su descripción
+    coincide con alguno de los agrupadores configurados.
+    """
+
+    columnas_requeridas = {
+        "PreparacionID",
+        "DespachoDescripcion",
+    }
+
+    if not columnas_requeridas.issubset(
+        tabla_pedidos.columns
+    ):
+        return set()
+
+    nombres_validos = {
+        nombre
+        for agrupadores in (
+            AGRUPADORES_DIGIP.values()
+        )
+        for nombre in agrupadores
+    }
+
+    preparacion_activa = (
+        tabla_pedidos["PreparacionID"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+
+    despachos = (
+        tabla_pedidos.loc[
+            preparacion_activa,
+            "DespachoDescripcion"
+        ]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    return {
+        despacho
+        for despacho in despachos.tolist()
+        if despacho in nombres_validos
+    }
+
+
+def asignar_agrupadores_disponibles(
+    asignacion: pd.DataFrame,
+    agrupadores_ocupados: set[str],
+) -> pd.DataFrame:
+    """
+    Asigna nombres reales de agrupadores DIGIP.
+
+    - LUNES usa CAMIONETA LUN N.
+    - MARTES usa CAMIONETA MAR N.
+    - etc.
+    - CABA SUR, CABA NORTE y demás zonas comparten
+      CAMIONETA EXP N.
+    """
+
+    if asignacion.empty:
+        return asignacion.copy()
+
+    resultado = asignacion.copy()
+
+    resultado["PoolAgrupador"] = (
+        resultado["Planificacion"]
+        .apply(obtener_pool_agrupador)
+    )
+
+    vehiculos_logicos = (
+        resultado[
+            [
+                "PoolAgrupador",
+                "Planificacion",
+                "NumeroCamioneta",
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values(
+            by=[
+                "PoolAgrupador",
+                "Planificacion",
+                "NumeroCamioneta",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+    asignaciones_reales = []
+
+    for pool, bloque in (
+        vehiculos_logicos.groupby(
+            "PoolAgrupador",
+            sort=False
+        )
+    ):
+        disponibles = [
+            nombre
+            for nombre in AGRUPADORES_DIGIP[
+                pool
+            ]
+            if nombre not in agrupadores_ocupados
+        ]
+
+        cantidad_necesaria = len(bloque)
+
+        cantidad_faltante = max(
+            cantidad_necesaria - len(disponibles),
+            0
+        )
+
+        agrupadores_nuevos = []
+
+        if cantidad_faltante > 0:
+
+            numeros_existentes = []
+
+            for nombre in AGRUPADORES_DIGIP[pool]:
+
+                coincidencia = re.search(
+                    r"(\d+)$",
+                    str(nombre).strip()
+                )
+
+                if coincidencia:
+                    numeros_existentes.append(
+                        int(coincidencia.group(1))
+                    )
+
+            siguiente_numero = (
+                max(numeros_existentes) + 1
+                if numeros_existentes
+                else 1
+            )
+
+            for numero in range(
+                siguiente_numero,
+                siguiente_numero
+                + cantidad_faltante
+            ):
+
+                if pool == "EXPRESOS":
+                    nombre_nuevo = (
+                        f"CAMIONETA EXP {numero}"
+                    )
+
+                elif pool == "LUNES":
+                    nombre_nuevo = (
+                        f"CAMIONETA LUN {numero}"
+                    )
+
+                elif pool == "MARTES":
+                    nombre_nuevo = (
+                        f"CAMIONETA MAR {numero}"
+                    )
+
+                elif pool == "MIERCOLES":
+                    nombre_nuevo = (
+                        f"CAMIONETA MIE {numero}"
+                    )
+
+                elif pool == "JUEVES":
+                    nombre_nuevo = (
+                        f"CAMIONETA JUE {numero}"
+                    )
+
+                elif pool == "VIERNES":
+                    nombre_nuevo = (
+                        f"CAMIONETA VIE {numero}"
+                    )
+
+                elif pool == "DIARIOS":
+                    nombre_nuevo = (
+                        f"CAMIONETA DIARIOS {numero}"
+                    )
+
+                else:
+                    nombre_nuevo = (
+                        f"CAMIONETA {pool} {numero}"
+                    )
+
+                agrupadores_nuevos.append(
+                    nombre_nuevo
+                )
+
+            disponibles.extend(
+                agrupadores_nuevos
+            )
+
+        bloque = bloque.copy()
+
+        bloque["DespachoDIGIP"] = (
+            disponibles[:cantidad_necesaria]
+        )
+
+        bloque["AgrupadorNuevo"] = (
+            bloque["DespachoDIGIP"].isin(
+                agrupadores_nuevos
+            )
+        )
+
+        asignaciones_reales.append(bloque)
+
+    mapa_agrupadores = pd.concat(
+        asignaciones_reales,
+        ignore_index=True
+    )
+
+    resultado = resultado.merge(
+        mapa_agrupadores,
+        on=[
+            "PoolAgrupador",
+            "Planificacion",
+            "NumeroCamioneta",
+        ],
+        how="left",
+        validate="many_to_one",
+    )
+
+    resultado[
+        "NumeroCamionetaLogica"
+    ] = resultado["NumeroCamioneta"]
+
+    # El número visible se extrae del nombre real.
+    resultado["NumeroCamioneta"] = (
+        resultado["DespachoDIGIP"]
+        .str.extract(
+            r"(\d+)$",
+            expand=False
+        )
+        .astype(int)
+    )
+
+    resultado["Camioneta"] = (
+        resultado["Planificacion"]
+        .astype(str)
+        .str.strip()
+        + " - "
+        + resultado["DespachoDIGIP"]
+    )
+
+    return resultado
+
+
 # =====================================================
 # PLANIFICACIÓN DE CAMIONETAS
 # =====================================================
@@ -987,10 +1490,57 @@ if generar_planificacion:
         )
     )
 
-    asignacion_camionetas = asignar_camionetas(
+    asignacion_logica = asignar_camionetas(
         resumen_clientes,
         capacidad_camioneta
     )
+
+    agrupadores_ocupados = (
+        obtener_agrupadores_ocupados(
+            tabla
+        )
+    )
+
+    try:
+
+        asignacion_camionetas = (
+            asignar_agrupadores_disponibles(
+                asignacion=asignacion_logica,
+                agrupadores_ocupados=(
+                    agrupadores_ocupados
+                ),
+            )
+        )
+
+    except ValueError as error:
+
+        st.error(str(error))
+        st.stop()
+
+    agrupadores_a_crear = []
+
+    if (
+        not asignacion_camionetas.empty
+        and "AgrupadorNuevo"
+        in asignacion_camionetas.columns
+    ):
+
+        agrupadores_a_crear = sorted(
+            asignacion_camionetas.loc[
+                asignacion_camionetas[
+                    "AgrupadorNuevo"
+                ],
+                "DespachoDIGIP"
+            ]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+
+    st.session_state[
+        "agrupadores_a_crear"
+    ] = agrupadores_a_crear
 
     pedidos_planificados = asignar_camioneta_a_pedidos(
         base_planificacion,
@@ -1008,6 +1558,75 @@ if generar_planificacion:
     st.session_state[
         "capacidad_camioneta"
     ] = capacidad_camioneta
+
+    st.session_state[
+        "agrupadores_ocupados"
+    ] = sorted(
+        agrupadores_ocupados
+    )
+
+
+# =====================================================
+# VALIDAR VERSIÓN DE LA PLANIFICACIÓN GUARDADA
+# =====================================================
+
+COLUMNAS_PLANIFICACION_ACTUAL = {
+    "DespachoDIGIP",
+    "PoolAgrupador",
+}
+
+asignacion_guardada = st.session_state.get(
+    "asignacion_camionetas"
+)
+
+if (
+    isinstance(
+        asignacion_guardada,
+        pd.DataFrame
+    )
+    and not asignacion_guardada.empty
+    and not COLUMNAS_PLANIFICACION_ACTUAL.issubset(
+        asignacion_guardada.columns
+    )
+):
+
+    # La propuesta fue creada con una versión anterior
+    # del módulo y no contiene los agrupadores reales.
+    claves_planificacion_anterior = [
+        "asignacion_camionetas",
+        "pedidos_planificados",
+        "capacidad_camioneta",
+        "agrupadores_ocupados",
+    ]
+
+    for clave in claves_planificacion_anterior:
+        st.session_state.pop(
+            clave,
+            None
+        )
+
+    claves_ejecucion_anterior = [
+        clave
+        for clave in list(
+            st.session_state.keys()
+        )
+        if str(clave).startswith(
+            "resultado_digip_"
+        )
+    ]
+
+    for clave in claves_ejecucion_anterior:
+        st.session_state.pop(
+            clave,
+            None
+        )
+
+    st.warning(
+        "La planificación guardada pertenecía a una versión "
+        "anterior. Fue eliminada para incorporar los nombres "
+        "reales de los agrupadores DIGIP. Generá nuevamente "
+        "la propuesta."
+    )
 
 
 # =====================================================
@@ -1032,6 +1651,23 @@ if (
 
     else:
 
+        agrupadores_a_crear = (
+            st.session_state.get(
+                "agrupadores_a_crear",
+                []
+            )
+        )
+
+        if agrupadores_a_crear:
+
+            st.warning(
+                "La propuesta utiliza agrupadores que todavía "
+                "no existen en DIGIP: "
+                + ", ".join(agrupadores_a_crear)
+                + ". Podés continuar con la planificación y "
+                "crearlos antes de ejecutar."
+            )
+
         capacidad_utilizada = st.session_state.get(
             "capacidad_camioneta",
             0
@@ -1043,6 +1679,8 @@ if (
                     "Planificacion",
                     "NumeroCamioneta",
                     "Camioneta",
+                    "DespachoDIGIP",
+                    "PoolAgrupador",
                     "CapacidadM3",
                     "VolumenCamionetaM3",
                     "OcupacionCamionetaPct",
@@ -1094,6 +1732,100 @@ if (
                 "OcupacionCamionetaPct"
             ].mean()
         )
+
+        # -------------------------------------------------
+        # DISPONIBILIDAD DE AGRUPADORES
+        # -------------------------------------------------
+
+        agrupadores_ocupados_guardados = set(
+            st.session_state.get(
+                "agrupadores_ocupados",
+                []
+            )
+        )
+
+        agrupadores_asignados = sorted(
+            resumen_camionetas[
+                "DespachoDIGIP"
+            ]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+
+        todos_los_agrupadores = [
+            nombre
+            for lista in AGRUPADORES_DIGIP.values()
+            for nombre in lista
+        ]
+
+        agrupadores_libres_restantes = [
+            nombre
+            for nombre in todos_los_agrupadores
+            if (
+                nombre
+                not in agrupadores_ocupados_guardados
+                and nombre
+                not in set(
+                    agrupadores_asignados
+                )
+            )
+        ]
+
+        with st.expander(
+            "🚦 Disponibilidad de agrupadores DIGIP",
+            expanded=False
+        ):
+
+            disp_col1, disp_col2, disp_col3 = (
+                st.columns(3)
+            )
+
+            with disp_col1:
+                st.metric(
+                    "Ocupados",
+                    len(
+                        agrupadores_ocupados_guardados
+                    )
+                )
+
+                st.caption(
+                    ", ".join(
+                        sorted(
+                            agrupadores_ocupados_guardados
+                        )
+                    )
+                    or "Ninguno"
+                )
+
+            with disp_col2:
+                st.metric(
+                    "Asignados a la propuesta",
+                    len(agrupadores_asignados)
+                )
+
+                st.caption(
+                    ", ".join(
+                        agrupadores_asignados
+                    )
+                    or "Ninguno"
+                )
+
+            with disp_col3:
+                st.metric(
+                    "Libres restantes",
+                    len(
+                        agrupadores_libres_restantes
+                    )
+                )
+
+                st.caption(
+                    ", ".join(
+                        agrupadores_libres_restantes
+                    )
+                    or "Ninguno"
+                )
 
         # -------------------------------------------------
         # KPIs DE PLANIFICACIÓN
@@ -1153,9 +1885,11 @@ if (
             hide_index=True,
             column_config={
 
-                "CapacidadM3": st.column_config.NumberColumn(
-                    "Capacidad m³",
-                    format="%.2f"
+                "CapacidadM3": (
+                    st.column_config.NumberColumn(
+                        "Capacidad m³",
+                        format="%.2f"
+                    )
                 ),
 
                 "VolumenCamionetaM3": (
@@ -1174,12 +1908,407 @@ if (
                     )
                 ),
 
-                "DisponibleM3": st.column_config.NumberColumn(
-                    "Disponible m³",
-                    format="%.3f"
+                "DisponibleM3": (
+                    st.column_config.NumberColumn(
+                        "Disponible m³",
+                        format="%.3f"
+                    )
                 ),
             }
         )
+
+        # -------------------------------------------------
+        # EJECUCIÓN DIGIP
+        # -------------------------------------------------
+
+        st.markdown("#### 🚀 Ejecución DIGIP")
+
+        st.caption(
+            "Revisá el resumen y ejecutá únicamente la "
+            "camioneta que quieras crear en DIGIP."
+        )
+
+        pedidos_planificados = st.session_state.get(
+            "pedidos_planificados",
+            pd.DataFrame()
+        )
+
+        # Estilo compacto del panel
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stHorizontalBlock"] {
+                gap: 0.65rem;
+            }
+
+            div[data-testid="stButton"] > button {
+                min-height: 2.15rem;
+                padding-top: 0.25rem;
+                padding-bottom: 0.25rem;
+            }
+
+            div[data-testid="stAlert"] {
+                padding-top: 0.45rem;
+                padding-bottom: 0.45rem;
+                min-height: 2.15rem;
+            }
+
+            .digip-fila {
+                padding: 0.18rem 0;
+                line-height: 1.15;
+            }
+
+            .digip-nombre {
+                font-weight: 600;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .digip-numero {
+                text-align: center;
+                font-weight: 600;
+            }
+
+            .digip-volumen {
+                text-align: right;
+                white-space: nowrap;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Encabezados
+        encabezado_1, encabezado_2, encabezado_3, \
+            encabezado_4, encabezado_5 = st.columns(
+                [3.2, 0.75, 1.05, 1.35, 1.15],
+                vertical_alignment="center"
+            )
+
+        with encabezado_1:
+            st.caption("**Camioneta**")
+
+        with encabezado_2:
+            st.caption("**Pedidos**")
+
+        with encabezado_3:
+            st.caption("**Volumen**")
+
+        with encabezado_4:
+            st.caption("**Estado DIGIP**")
+
+        with encabezado_5:
+            st.caption("**Acción**")
+
+        st.divider()
+
+        for _, fila_camioneta in resumen_camionetas.iterrows():
+
+            planificacion_fila = str(
+                fila_camioneta["Planificacion"]
+            ).strip()
+
+            numero_camioneta = int(
+                fila_camioneta["NumeroCamioneta"]
+            )
+
+            nombre_camioneta = str(
+                fila_camioneta["Camioneta"]
+            ).strip()
+
+            volumen_camioneta = float(
+                fila_camioneta["VolumenCamionetaM3"]
+            )
+
+            clave_ejecucion = (
+                f"{planificacion_fila}_"
+                f"{numero_camioneta}"
+            )
+
+            pedidos_camioneta = (
+                pedidos_planificados[
+                    (
+                        pedidos_planificados[
+                            "Planificacion"
+                        ].astype(str).str.strip()
+                        == planificacion_fila
+                    )
+                    &
+                    (
+                        pd.to_numeric(
+                            pedidos_planificados[
+                                "NumeroCamioneta"
+                            ],
+                            errors="coerce"
+                        )
+                        == numero_camioneta
+                    )
+                ]
+                .copy()
+            )
+
+            lista_pedidos = (
+                pedidos_camioneta["Pedido"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.replace(
+                    r"\.0$",
+                    "",
+                    regex=True
+                )
+                .loc[lambda serie: serie.ne("")]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            codigos_despacho = (
+                pedidos_camioneta["CodigoDespacho"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.replace(
+                    r"\.0$",
+                    "",
+                    regex=True
+                )
+                .loc[lambda serie: serie.ne("")]
+                .drop_duplicates()
+                .tolist()
+            )
+
+            codigo_despacho = (
+                codigos_despacho[0]
+                if codigos_despacho
+                else ""
+            )
+
+            despacho_digip = str(
+                fila_camioneta[
+                    "DespachoDIGIP"
+                ]
+            ).strip()
+
+            ejecucion_valida = bool(
+                lista_pedidos
+            )
+
+            estado_guardado = st.session_state.get(
+                f"resultado_digip_{clave_ejecucion}"
+            )
+
+            fila_1, fila_2, fila_3, fila_4, fila_5 = (
+                st.columns(
+                    [3.2, 0.75, 1.05, 1.35, 1.15],
+                    vertical_alignment="center"
+                )
+            )
+
+            with fila_1:
+                st.markdown(
+                    (
+                        '<div class="digip-fila digip-nombre">'
+                        f'🚚 {nombre_camioneta}'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True
+                )
+
+            with fila_2:
+                st.markdown(
+                    (
+                        '<div class="digip-fila digip-numero">'
+                        f'{len(lista_pedidos)}'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True
+                )
+
+            with fila_3:
+                volumen_formateado = (
+                    f"{volumen_camioneta:,.3f} m³"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                )
+
+                st.markdown(
+                    (
+                        '<div class="digip-fila digip-volumen">'
+                        f'{volumen_formateado}'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True
+                )
+
+            with fila_4:
+
+                if len(codigos_despacho) > 1:
+
+                    st.info(
+                        f"{len(codigos_despacho)} códigos",
+                        icon="ℹ️"
+                    )
+
+                    st.caption(
+                        "Códigos encontrados: "
+                        + ", ".join(codigos_despacho)
+                    )
+
+                elif not codigo_despacho:
+                    st.warning(
+                        "Sin código",
+                        icon="⚠️"
+                    )
+
+                elif estado_guardado:
+
+                    if bool(
+                        estado_guardado.get(
+                            "exito",
+                            False
+                        )
+                    ):
+                        st.success(
+                            "Ejecutada",
+                            icon="✅"
+                        )
+                    else:
+                        st.error(
+                            "Error",
+                            icon="❌"
+                        )
+
+                else:
+                    st.info(
+                        "Pendiente",
+                        icon="⏳"
+                    )
+
+            with fila_5:
+
+                texto_boton = (
+                    "🔄 Reintentar"
+                    if (
+                        estado_guardado
+                        and not bool(
+                            estado_guardado.get(
+                                "exito",
+                                False
+                            )
+                        )
+                    )
+                    else (
+                        "✅ Ejecutada"
+                        if (
+                            estado_guardado
+                            and bool(
+                                estado_guardado.get(
+                                    "exito",
+                                    False
+                                )
+                            )
+                        )
+                        else "🚀 Ejecutar"
+                    )
+                )
+
+                ejecutar = st.button(
+                    texto_boton,
+                    key=(
+                        f"ejecutar_digip_"
+                        f"{clave_ejecucion}"
+                    ),
+                    use_container_width=True,
+                    type="primary",
+                    disabled=bool(
+                        (not ejecucion_valida)
+                        or (
+                            bool(estado_guardado)
+                            and bool(
+                                estado_guardado.get(
+                                    "exito",
+                                    False
+                                )
+                            )
+                        )
+                    )
+                )
+
+            if estado_guardado and not bool(
+                estado_guardado.get(
+                    "exito",
+                    False
+                )
+            ):
+                with st.expander(
+                    f"Ver error de {nombre_camioneta}"
+                ):
+                    st.error(
+                        estado_guardado.get(
+                            "mensaje",
+                            "Error sin detalle."
+                        )
+                    )
+
+            if ejecutar:
+
+                mensajes_proceso = st.empty()
+
+                def actualizar_estado(
+                    etapa,
+                    mensaje
+                ):
+                    mensajes_proceso.info(mensaje)
+
+                with st.spinner(
+                    f"Ejecutando {nombre_camioneta} "
+                    "en DIGIP..."
+                ):
+
+                    resultado_digip = ejecutar_agrupacion(
+                        {
+                            "codigo_despacho": (
+                                codigo_despacho
+                            ),
+                            "despacho": despacho_digip,
+                            "pedidos": lista_pedidos,
+                            "identificador": (
+                                nombre_camioneta
+                            ),
+                        },
+                        headless=False,
+                        callback=actualizar_estado,
+                    )
+
+                st.session_state[
+                    f"resultado_digip_"
+                    f"{clave_ejecucion}"
+                ] = resultado_digip.como_dict()
+
+                mensajes_proceso.empty()
+
+                if resultado_digip.exito:
+
+                    st.success(
+                        f"{nombre_camioneta} creada "
+                        "correctamente en DIGIP."
+                    )
+
+                    st.rerun()
+
+                else:
+
+                    st.error(
+                        "No se pudo crear la agrupación: "
+                        f"{resultado_digip.mensaje}"
+                    )
+
+            st.markdown(
+                "<hr style='margin:0.35rem 0;'>",
+                unsafe_allow_html=True
+            )
 
         # -------------------------------------------------
         # DETALLE DE CLIENTES ASIGNADOS

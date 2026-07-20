@@ -7,3 +7,11 @@ from pathlib import Path
 CARPETA_DATOS = Path(
     r"G:\Mi unidad\Sistema_Logistico_Peirano\data"
 )
+
+URL = "https://app.digipwms.com"
+
+USUARIO = "igoyena"
+
+PASSWORD = "0802"
+
+HEADLESS = False

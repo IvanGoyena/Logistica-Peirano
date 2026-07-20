@@ -574,9 +574,7 @@ def modulo_tareas():
             with cols[i % 3]:
 
                 avance = int(fila["Avance"])
-
                 cerrados = int(fila["PreparacionesFinalizadas"])
-
                 total = int(fila["TotalPreparaciones"])
 
                 if avance <= 30:
@@ -591,82 +589,72 @@ def modulo_tareas():
                 fig = go.Figure()
 
                 fig.add_trace(
-
                     go.Pie(
-
                         values=[
                             avance,
                             max(100 - avance, 0)
                         ],
-
                         hole=0.72,
-
                         textinfo="none",
-
                         showlegend=False,
-
                         marker=dict(
-
                             colors=[
                                 color,
                                 "#3A3A3A"
                             ]
-
                         )
-
                     )
-
                 )
 
                 fig.update_layout(
 
-                    title=dict(
-
-                        text=f"<b>{fila['Despacho']}</b>",
-
-                        x=0.5,
-
-                        font=dict(
-                            size=12,
-                            color="white"
-                        )
-
-                    ),
-
                     annotations=[
 
+                        # Título centrado
                         dict(
+                            text=f"<b>{fila['Despacho']}</b>",
+                            x=0.5,
+                            y=1.08,
+                            xref="paper",
+                            yref="paper",
+                            xanchor="center",
+                            yanchor="bottom",
+                            showarrow=False,
+                            font=dict(
+                                size=12,
+                                color="white"
+                            )
+                        ),
 
+                        # Porcentaje
+                        dict(
                             text=f"<b>{avance}%</b>",
-
                             x=0.5,
                             y=0.56,
-
+                            xref="paper",
+                            yref="paper",
+                            xanchor="center",
                             showarrow=False,
-
                             font=dict(
                                 size=22,
                                 color="white"
                             )
-
                         ),
 
+                        # Preparaciones
                         dict(
-
                             text=f"{cerrados}/{total}",
-
                             x=0.5,
                             y=0.36,
-
+                            xref="paper",
+                            yref="paper",
+                            xanchor="center",
                             showarrow=False,
-
                             font=dict(
                                 size=12,
                                 color="#BDBDBD"
                             )
-
                         )
-
                     ],
 
                     height=180,
@@ -674,30 +662,22 @@ def modulo_tareas():
                     margin=dict(
                         l=5,
                         r=5,
-                        t=35,
+                        t=45,
                         b=5
                     ),
 
                     paper_bgcolor="rgba(0,0,0,0)",
-
                     plot_bgcolor="rgba(0,0,0,0)",
-
                     font=dict(color="white")
-
                 )
 
                 st.plotly_chart(
-
                     fig,
-
                     width="stretch",
-
                     config={
                         "displayModeBar": False
                     }
-
                 )
-
 
     # =====================================================
     # CARROS CRÍTICOS
