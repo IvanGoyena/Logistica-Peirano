@@ -1,3 +1,20 @@
+"""
+Motor de planificación logística.
+
+Regla definitiva para pedidos con código de expreso:
+
+1. Si la planificación contiene un día de LUNES a VIERNES,
+   el pedido entra en la planificación semanal correspondiente.
+2. En ese caso EsExpreso queda en False y el destino expreso
+   no participa de la agrupación.
+3. Si no existe un día semanal y el código es expreso,
+   se utiliza el destino expreso: CABA SUR, CABA SUR II,
+   CABA NORTE, etc.
+"""
+
+import re
+import unicodedata
+
 import pandas as pd
 
 from config_planificacion import (
@@ -39,6 +56,77 @@ def codigo_comparable(valor) -> str:
 CODIGO_EXPRESO_COMPARABLE = codigo_comparable(
     CODIGO_DESPACHO_EXPRESOS
 )
+
+# Los pedidos cargados con el código genérico de expreso,
+# pero con un día semanal de entrega, deben planificarse
+# como reparto normal y no como EXPRESOS.
+DIAS_ENTREGA_SEMANAL = {
+    "LUNES",
+    "MARTES",
+    "MIERCOLES",
+    "JUEVES",
+    "VIERNES",
+}
+
+
+def normalizar_texto_sin_acentos(valor) -> str:
+
+    texto = normalizar_codigo(valor).upper()
+
+    return "".join(
+        caracter
+        for caracter in unicodedata.normalize(
+            "NFD",
+            texto
+        )
+        if unicodedata.category(caracter) != "Mn"
+    )
+
+
+def extraer_dia_entrega(valor) -> str:
+    """
+    Convierte valores como:
+
+    - Jueves
+    - 4 - Jueves
+    - 4 - Jueves | Grupo 1
+
+    en:
+
+    - JUEVES
+    """
+
+    texto = normalizar_texto_sin_acentos(valor)
+
+    coincidencia = re.search(
+        r"\\b(LUNES|MARTES|MIERCOLES|JUEVES|VIERNES)\\b",
+        texto,
+    )
+
+    if coincidencia is None:
+        return ""
+
+    return coincidencia.group(1)
+
+
+def extraer_grupo_entrega(valor) -> str:
+    """
+    Extrae el grupo desde valores como:
+
+    4 - Jueves | Grupo 1
+    """
+
+    texto = normalizar_texto_sin_acentos(valor)
+
+    coincidencia = re.search(
+        r"GRUPO\\s*[-:]?\\s*([A-Z0-9]+)",
+        texto,
+    )
+
+    if coincidencia is None:
+        return "1"
+
+    return coincidencia.group(1)
 
 
 INDICE_ZONAS_NORMALIZADO = {
@@ -313,7 +401,107 @@ def enriquecer_pedidos_planificacion(
     # Resultado = JUEVES | Grupo 1
     # ------------------------------------------------------
 
-    mascara_expresos = tabla["EsExpreso"].fillna(False)
+    # ------------------------------------------------------
+    # CLASIFICACIÓN DEFINITIVA DE EXPRESOS
+    # ------------------------------------------------------
+    #
+    # No alcanza con mirar el código de despacho.
+    # Algunos clientes tienen el código genérico de expreso,
+    # pero poseen un día semanal de entrega.
+    #
+    # Esos pedidos deben entrar en la planificación normal:
+    # LUNES, MARTES, MIÉRCOLES, JUEVES o VIERNES.
+    # ------------------------------------------------------
+
+    planificacion_original = (
+        tabla["Planificacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    dia_entrega_semanal = (
+        planificacion_original
+        .apply(extraer_dia_entrega)
+    )
+
+    grupo_entrega_semanal = (
+        planificacion_original
+        .apply(extraer_grupo_entrega)
+    )
+
+    mascara_codigo_expreso = (
+        tabla["EsExpreso"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    mascara_entrega_semanal = (
+        dia_entrega_semanal.ne("")
+    )
+
+    mascara_expresos_semanales = (
+        mascara_codigo_expreso
+        & mascara_entrega_semanal
+    )
+
+    # Continúan como expresos solamente aquellos pedidos
+    # cuyo código es expreso y no poseen día semanal.
+    mascara_expresos = (
+        mascara_codigo_expreso
+        & ~mascara_entrega_semanal
+    )
+
+    tabla["EsExpreso"] = mascara_expresos
+
+    # ------------------------------------------------------
+    # INTEGRACIÓN REAL A LA PLANIFICACIÓN SEMANAL
+    # ------------------------------------------------------
+    #
+    # Ejemplo:
+    # 4 - Jueves | Grupo 1
+    #
+    # se convierte en:
+    # Planificacion = JUEVES
+    # GrupoDespacho = 1
+    # EsExpreso = False
+    # ------------------------------------------------------
+
+    tabla.loc[
+        mascara_expresos_semanales,
+        "Planificacion"
+    ] = dia_entrega_semanal.loc[
+        mascara_expresos_semanales
+    ]
+
+    tabla.loc[
+        mascara_expresos_semanales,
+        "PlanificacionConfigurada"
+    ] = dia_entrega_semanal.loc[
+        mascara_expresos_semanales
+    ]
+
+    tabla.loc[
+        mascara_expresos_semanales,
+        "GrupoDespacho"
+    ] = grupo_entrega_semanal.loc[
+        mascara_expresos_semanales
+    ]
+
+    tabla.loc[
+        mascara_expresos_semanales,
+        "ZonaConfigurada"
+    ] = True
+
+    tabla.loc[
+        mascara_expresos_semanales,
+        "ZonaDescripcion"
+    ] = (
+        "ENTREGA SEMANAL "
+        + dia_entrega_semanal.loc[
+            mascara_expresos_semanales
+        ]
+    )
 
     if "ZonaExpreso" in tabla.columns:
 

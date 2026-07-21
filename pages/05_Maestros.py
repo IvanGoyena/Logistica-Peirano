@@ -1,5 +1,14 @@
 from config import *
 
+
+from utils.autenticacion import requerir_roles
+
+
+requerir_roles(
+    "admin",
+    "gerencia",
+)
+
 from utils.leer_datos import (
     leer_archivo,
     fecha_archivo
@@ -23,6 +32,11 @@ from models.clientes import (
 
 from models.volumetria import (
     construir_tabla_volumetria
+)
+
+from models.metricas import (
+    leer_historico_controles,
+    leer_historico_preparaciones,
 )
 
 import streamlit as st
@@ -207,6 +221,19 @@ df_volumetria = leer_archivo(
     cache=True
 )
 
+
+# -----------------------------------------------------
+# HISTÓRICOS DE MÉTRICAS
+# -----------------------------------------------------
+
+df_historico_control = leer_historico_controles(
+    CARPETA_DATOS
+)
+
+df_historico_preparacion = leer_historico_preparaciones(
+    CARPETA_DATOS
+)
+
 # =====================================================
 # CONSTRUCCIÓN DE TABLAS LIMPIAS
 # =====================================================
@@ -317,6 +344,24 @@ reportes = [
     "fuente": "Maestro Volumetria",
     "descarga": "Maestro_Volumetria_Limpio.csv",
     "key": "descarga_maestro_volumetria",
+    },
+
+    {
+        "titulo": "Histórico Control",
+        "icono": "✅",
+        "dataframe": df_historico_control,
+        "fuente": "Control",
+        "descarga": "Historico_Control_Crudo.csv",
+        "key": "descarga_historico_control",
+    },
+
+    {
+        "titulo": "Histórico Preparación",
+        "icono": "📦",
+        "dataframe": df_historico_preparacion,
+        "fuente": "Preparacion",
+        "descarga": "Historico_Preparacion_Crudo.csv",
+        "key": "descarga_historico_preparacion",
     },
 ]
 
@@ -531,6 +576,44 @@ with col8:
     )
 
     st.markdown("---")
+
+
+# =====================================================
+# HISTÓRICOS DE MÉTRICAS
+# =====================================================
+
+st.subheader("📈 Históricos de Métricas")
+
+st.caption(
+    "Reportes mensuales crudos utilizados para construir "
+    "la base analítica de Control y Preparación."
+)
+
+col_hist1, col_hist2 = st.columns(2)
+
+with col_hist1:
+
+    mostrar_tarjeta_reporte(
+        titulo="Histórico Control",
+        icono="✅",
+        dataframe=df_historico_control,
+        nombre_archivo_fuente="Control",
+        nombre_descarga="Historico_Control_Crudo.csv",
+        key_boton="boton_historico_control",
+    )
+
+with col_hist2:
+
+    mostrar_tarjeta_reporte(
+        titulo="Histórico Preparación",
+        icono="📦",
+        dataframe=df_historico_preparacion,
+        nombre_archivo_fuente="Preparacion",
+        nombre_descarga="Historico_Preparacion_Crudo.csv",
+        key_boton="boton_historico_preparacion",
+    )
+
+st.markdown("---")
 
 
 # =====================================================

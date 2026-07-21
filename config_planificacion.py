@@ -312,12 +312,12 @@ ZONAS_PLANIFICACION = {
     },
     "02010003": {
         "descripcion": 'VILLA MADERO',
-        "grupo": 'NO',
+        "grupo": '1',
         "planificacion": 'MIERCOLES',
     },
     "02010009": {
         "descripcion": 'SAN JUSTO',
-        "grupo": 'NO',
+        "grupo": '2',
         "planificacion": 'MIERCOLES',
     },
     "04010002": {

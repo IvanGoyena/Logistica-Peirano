@@ -38,25 +38,6 @@ mostrar_usuario_sidebar(autenticador)
 
 
 # ==========================================================
-# CONFIGURACIÓN GENERAL
-# ==========================================================
-
-st.set_page_config(
-    page_title="Sistema Logístico Peirano",
-    page_icon="📦",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ==========================================================
-# INICIALIZAR SESIÓN
-# ==========================================================
-
-inicializar_sesion()
-
-
-# ==========================================================
 # ==========================================================
 # PÁGINA DE INICIO
 # ==========================================================
@@ -154,6 +135,17 @@ pagina_maestros = st.Page(
     icon="⚙️",
 )
 
+pagina_metricas = st.Page(
+    "pages/06_Metricas.py",
+    title="Métricas",
+    icon="📈",
+)
+
+pagina_auditoria = st.Page(
+    "pages/07_Auditoria_ETL.py",
+    title="Auditoría ETL",
+    icon="🧪",
+)
 
 
 # ==========================================================
@@ -177,8 +169,13 @@ if tiene_rol("admin"):
         pagina_stock,
     ]
 
+    paginas["Análisis"] = [
+        pagina_metricas,
+    ]
+
     paginas["Configuración"] = [
         pagina_maestros,
+        pagina_auditoria,
     ]
 
 
@@ -192,6 +189,9 @@ elif tiene_rol("gerencia"):
         pagina_stock,
     ]
 
+    paginas["Análisis"] = [
+        pagina_metricas,
+    ]
 
 
 # LOGÍSTICA
@@ -199,7 +199,6 @@ elif tiene_rol("logistica"):
 
     paginas["Operación"] = [
         pagina_tareas,
-        pagina_pedidos,
         pagina_despachos,
         pagina_stock,
     ]
@@ -214,7 +213,6 @@ elif tiene_rol("supervisor"):
 
     paginas["Operación"] = [
         pagina_tareas,
-        pagina_pedidos,
         pagina_despachos,
         pagina_stock,
     ]

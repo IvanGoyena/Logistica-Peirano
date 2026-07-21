@@ -104,6 +104,7 @@ def cargar_datos_operativos():
             "Maestro Clientes",
             cache=True
         ),
+        
         "pendientes_erp": leer_archivo(
             CARPETA_DATOS,
             "Pedidos Pendientes",
@@ -146,7 +147,7 @@ with col_actualizacion_2:
     actualizar_datos = st.button(
         "🔄 Actualizar datos",
         key="actualizar_datos_pedidos",
-        use_container_width=True,
+        width="stretch",
         help=(
             "Vuelve a leer todos los archivos de origen "
             "y elimina la planificación anterior."
@@ -443,16 +444,43 @@ frecuencia_entrega = (
 tabla["DiaEntrega"] = frecuencia_entrega
 tabla["ZonaExpreso"] = zona_expreso
 
-# Agrupación operativa:
-# - Los pedidos con zona de expreso se agrupan por esa zona.
-# - Los pedidos normales se agrupan por su día de entrega.
+# =====================================================
+# REGLA DEFINITIVA DE PLANIFICACIÓN
+# =====================================================
 #
-# Esto permite conservar simultáneamente:
-# DiaEntrega = JUEVES
-# Planificacion = CABA SUR
-tabla["Planificacion"] = zona_expreso.where(
-    zona_expreso.ne(""),
-    frecuencia_entrega
+# La frecuencia de entrega semanal tiene prioridad.
+#
+# Ejemplo:
+# FrecuenciaEntrega = JUEVES
+# CodigoExpreso = 05010001
+# ZonaExpreso = CABA SUR
+#
+# Resultado:
+# Planificacion = JUEVES
+#
+# Solo cuando el pedido NO tiene un día semanal asignado
+# se utiliza la zona del expreso como planificación.
+# =====================================================
+
+dias_entrega_semanal = {
+    "LUNES",
+    "MARTES",
+    "MIERCOLES",
+    "MIÉRCOLES",
+    "JUEVES",
+    "VIERNES",
+}
+
+es_entrega_semanal = frecuencia_entrega.isin(
+    dias_entrega_semanal
+)
+
+tabla["Planificacion"] = frecuencia_entrega.where(
+    es_entrega_semanal,
+    zona_expreso.where(
+        zona_expreso.ne(""),
+        frecuencia_entrega
+    )
 )
 
 # =====================================================
@@ -1454,7 +1482,7 @@ with st.form(
     generar_planificacion = st.form_submit_button(
         "🚚 Generar propuesta de camionetas",
         type="primary",
-        use_container_width=True
+        width="stretch"
     )
 
 
@@ -2220,7 +2248,7 @@ if (
                         f"ejecutar_digip_"
                         f"{clave_ejecucion}"
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     type="primary",
                     disabled=bool(
                         (not ejecucion_valida)
