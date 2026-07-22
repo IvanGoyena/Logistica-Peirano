@@ -157,7 +157,7 @@ def agregar_variables_temporales(
 
     resultado["Mes"] = (
         resultado["FechaInicio"]
-        .dt.month_name(locale="Spanish")
+        .dt.month_name(locale="es_ES.UTF-8")
         .str.upper()
     )
 
