@@ -2,18 +2,29 @@ from pathlib import Path
 
 
 # ==========================================================
-# CARPETA BASE DEL PROYECTO
+# ENTORNO Y CARPETAS
 # ==========================================================
 
-BASE_DIR = Path(__file__).resolve().parent
+CARPETA_DATOS_LOCAL = Path(
+    r"G:\Mi unidad\Sistema_Logistico_Peirano\data"
+)
+
+CARPETA_DATOS_NUBE = Path(
+    "/tmp/sistema_logistico_peirano/data"
+)
+
+ES_STREAMLIT_CLOUD = not CARPETA_DATOS_LOCAL.exists()
+
+CARPETA_DATOS = (
+    CARPETA_DATOS_NUBE
+    if ES_STREAMLIT_CLOUD
+    else CARPETA_DATOS_LOCAL
+)
 
 
 # ==========================================================
-# CARPETA DE DATOS
+# WMS
 # ==========================================================
-
-CARPETA_DATOS = BASE_DIR / "data"
-
 
 URL = "https://app.digipwms.com"
 

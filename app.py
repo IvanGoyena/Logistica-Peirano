@@ -1,5 +1,14 @@
 import streamlit as st
 
+from config import (
+    CARPETA_DATOS,
+    ES_STREAMLIT_CLOUD,
+)
+
+from utils.google_drive import (
+    sincronizar_carpeta_drive,
+)
+
 from utils.autenticacion import (
     crear_autenticador,
     inicializar_sesion,
@@ -35,6 +44,34 @@ if st.session_state.get("authentication_status") is not True:
 
 sincronizar_usuario()
 mostrar_usuario_sidebar(autenticador)
+
+
+# ==========================================================
+# SINCRONIZACIÓN DE DATOS EN STREAMLIT CLOUD
+# ==========================================================
+
+if ES_STREAMLIT_CLOUD:
+
+    try:
+
+        with st.spinner(
+            "Sincronizando datos desde Google Drive..."
+        ):
+
+            sincronizar_carpeta_drive(
+                carpeta_destino=CARPETA_DATOS,
+            )
+
+    except Exception as error:
+
+        st.error(
+            "No se pudieron sincronizar los datos "
+            "desde Google Drive."
+        )
+
+        st.exception(error)
+
+        st.stop()
 
 
 # ==========================================================
