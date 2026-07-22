@@ -136,6 +136,22 @@ def convertir_numero(
     )
 
 
+MAPA_MESES = {
+    1: "ENERO",
+    2: "FEBRERO",
+    3: "MARZO",
+    4: "ABRIL",
+    5: "MAYO",
+    6: "JUNIO",
+    7: "JULIO",
+    8: "AGOSTO",
+    9: "SEPTIEMBRE",
+    10: "OCTUBRE",
+    11: "NOVIEMBRE",
+    12: "DICIEMBRE",
+}
+
+
 def agregar_variables_temporales(
     dataframe: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -157,10 +173,9 @@ def agregar_variables_temporales(
 
     resultado["Mes"] = (
         resultado["FechaInicio"]
-        .dt.month_name(locale="es_ES.UTF-8")
-        .str.upper()
+        .dt.month
+        .map(MAPA_MESES)
     )
-
     mapa_dias = {
         0: "LUNES",
         1: "MARTES",
