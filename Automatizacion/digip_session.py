@@ -20,14 +20,14 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from config import URL, USUARIO, PASSWORD, HEADLESS
+from config import HEADLESS, PASSWORD, URL, USUARIO
 
 
 # ==========================================================
 # CONFIGURACIÓN
 # ==========================================================
 
-URL_LOGIN = URL.rstrip("/")
+URL_LOGIN = str(URL).rstrip("/")
 URL_HOME = f"{URL_LOGIN}/home"
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,22 +45,28 @@ TIMEOUT_MS = 30_000
 # ==========================================================
 
 def crear_carpetas() -> None:
+    """Crea las carpetas de trabajo de la automatización."""
     for carpeta in (SESSION_DIR, LOG_DIR, CAPTURAS_DIR):
         carpeta.mkdir(parents=True, exist_ok=True)
 
 
 def registrar_log(mensaje: str) -> None:
+    """Guarda el mensaje en archivo y también lo muestra en consola."""
     crear_carpetas()
 
     fecha = datetime.now()
     archivo_log = LOG_DIR / f"{fecha:%Y-%m-%d}.log"
-
     linea = f"[{fecha:%Y-%m-%d %H:%M:%S}] {mensaje}\n"
 
-    with archivo_log.open("a", encoding="utf-8") as archivo:
-        archivo.write(linea)
+    try:
+        with archivo_log.open("a", encoding="utf-8") as archivo:
+            archivo.write(linea)
+    except Exception:
+        # En caso de que el filesystem temporal no permita escribir,
+        # el proceso continúa y el mensaje queda al menos en consola.
+        pass
 
-    print(mensaje)
+    print(mensaje, flush=True)
 
 
 # ==========================================================
@@ -69,11 +75,11 @@ def registrar_log(mensaje: str) -> None:
 
 class DigipSession:
     """
-    Administra Playwright, navegador, contexto, sesión y login de DIGIP.
+    Administra Playwright, Chromium, contexto, sesión y login de DIGIP.
 
-    Uso recomendado:
+    Ejemplo:
 
-        with DigipSession(headless=False) as sesion:
+        with DigipSession(headless=True) as sesion:
             page = sesion.page
 
             if page is None:
@@ -87,8 +93,8 @@ class DigipSession:
         headless: bool = HEADLESS,
         timeout_ms: int = TIMEOUT_MS,
     ) -> None:
-        self.headless = headless
-        self.timeout_ms = timeout_ms
+        self.headless = bool(headless)
+        self.timeout_ms = int(timeout_ms)
 
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
@@ -99,7 +105,12 @@ class DigipSession:
         self.iniciar()
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type,
+        exc_value,
+        traceback,
+    ) -> None:
         if exc_value is not None:
             self.guardar_captura_error("error_digip")
 
@@ -107,21 +118,95 @@ class DigipSession:
 
     def iniciar(self) -> Page:
         """
-        Inicia Playwright y devuelve una página autenticada en DIGIP.
+        Inicia Playwright, abre Chromium y devuelve una página
+        autenticada en DIGIP.
         """
-
         crear_carpetas()
-
         registrar_log("Iniciando sesión DIGIP...")
 
-        self.playwright = sync_playwright().start()
+        try:
+            self.playwright = sync_playwright().start()
+
+            ruta_chromium = (
+                shutil.which("chromium")
+                or shutil.which("chromium-browser")
+                or shutil.which("google-chrome")
+                or shutil.which("google-chrome-stable")
+            )
+
+            argumentos_navegador = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--no-first-run",
+            ]
+
+            opciones_launch = {
+                "headless": self.headless,
+                "args": argumentos_navegador,
+            }
+
+            if ruta_chromium:
+                opciones_launch["executable_path"] = ruta_chromium
+                registrar_log(
+                    f"Chromium del sistema encontrado: {ruta_chromium}"
+                )
+            else:
+                registrar_log(
+                    "No se encontró Chromium del sistema. "
+                    "Se intentará usar el navegador instalado por Playwright."
+                )
+
+            self.browser = self.playwright.chromium.launch(
+                **opciones_launch
+            )
+
+            registrar_log("Navegador iniciado correctamente.")
+
+            self.context = self._crear_contexto()
+            self.context.set_default_timeout(self.timeout_ms)
+            self.context.set_default_navigation_timeout(self.timeout_ms)
+
+            self.page = self.context.new_page()
+
+            registrar_log("Página de navegador creada.")
+
+            if not self._sesion_actual_valida():
+                registrar_log(
+                    "La sesión guardada no es válida. "
+                    "Se realizará login."
+                )
+                self._hacer_login()
+            else:
+                registrar_log(
+                    "Sesión DIGIP reutilizada correctamente."
+                )
+
+            if self.page is None:
+                raise RuntimeError(
+                    "No se pudo crear la página de DIGIP."
+                )
+
+            return self.page
+
+        except Exception as error:
+            registrar_log(
+                f"Error iniciando la sesión DIGIP: {error}"
+            )
+            self.guardar_captura_error("error_inicio_digip")
+            self.cerrar()
+            raise
 
     def _crear_contexto(self) -> BrowserContext:
         """
-        Crea un contexto compatible con ejecución local
-        y Streamlit Community Cloud.
+        Crea un contexto compatible con Windows y
+        Streamlit Community Cloud.
         """
-
         if self.browser is None:
             raise RuntimeError(
                 "El navegador todavía no fue iniciado."
@@ -140,7 +225,7 @@ class DigipSession:
         if SESSION_FILE.exists():
             try:
                 registrar_log(
-                    f"Intentando reutilizar sesión guardada: "
+                    "Intentando reutilizar sesión guardada: "
                     f"{SESSION_FILE}"
                 )
 
@@ -152,60 +237,18 @@ class DigipSession:
             except Exception as error:
                 registrar_log(
                     "No se pudo reutilizar la sesión guardada. "
-                    f"Se hará login nuevamente. Error: {error}"
+                    f"Se creará un contexto nuevo. Error: {error}"
                 )
 
         return self.browser.new_context(
             **opciones_contexto
         )
 
-        self.context = self._crear_contexto()
-        self.context.set_default_timeout(self.timeout_ms)
-
-        self.page = self.context.new_page()
-
-        if not self._sesion_actual_valida():
-            registrar_log("La sesión guardada no es válida. Se realizará login.")
-            self._hacer_login()
-        else:
-            registrar_log("Sesión DIGIP reutilizada correctamente.")
-
-        if self.page is None:
-            raise RuntimeError("No se pudo crear la página de DIGIP.")
-
-        return self.page
-
-    def _crear_contexto(self) -> BrowserContext:
-        """
-        Crea el contexto reutilizando storage_state si existe.
-        """
-
-        if self.browser is None:
-            raise RuntimeError("El navegador todavía no fue iniciado.")
-
-        if SESSION_FILE.exists():
-            try:
-                registrar_log(
-                    f"Intentando reutilizar sesión guardada: {SESSION_FILE}"
-                )
-
-                return self.browser.new_context(
-                    storage_state=str(SESSION_FILE)
-                )
-
-            except Exception as error:
-                registrar_log(
-                    "No se pudo reutilizar la sesión guardada. "
-                    f"Se creará un contexto nuevo. Error: {error}"
-                )
-
-        return self.browser.new_context()
-
     def _sesion_actual_valida(self) -> bool:
         """
-        Comprueba si la sesión actual permite entrar al HOME sin volver al login.
+        Comprueba si el contexto actual permite entrar al HOME
+        sin volver al login.
         """
-
         if self.page is None:
             return False
 
@@ -238,7 +281,10 @@ class DigipSession:
 
             for indicador in indicadores:
                 try:
-                    if indicador.count() > 0 and indicador.first.is_visible():
+                    if (
+                        indicador.count() > 0
+                        and indicador.first.is_visible()
+                    ):
                         return True
                 except Exception:
                     continue
@@ -246,7 +292,9 @@ class DigipSession:
             return False
 
         except PlaywrightTimeoutError:
-            registrar_log("Timeout validando la sesión actual.")
+            registrar_log(
+                "Timeout validando la sesión actual."
+            )
             return False
 
         except Exception as error:
@@ -256,11 +304,7 @@ class DigipSession:
             return False
 
     def _hacer_login(self) -> None:
-        """
-        Realiza el login usando el mismo flujo que ya fue probado
-        correctamente en login_digip.py.
-        """
-
+        """Realiza el login automático en DIGIP."""
         if self.page is None or self.context is None:
             raise RuntimeError(
                 "No se pudo iniciar el contexto de navegación."
@@ -271,7 +315,7 @@ class DigipSession:
 
         if not usuario or not clave:
             raise ValueError(
-                "Faltan USUARIO o PASSWORD en config.py."
+                "Faltan USUARIO o PASSWORD en la configuración."
             )
 
         registrar_log("Abriendo pantalla de login DIGIP.")
@@ -282,7 +326,6 @@ class DigipSession:
             timeout=self.timeout_ms,
         )
 
-        # Este wait estaba en el login original que funcionaba.
         try:
             self.page.wait_for_load_state(
                 "networkidle",
@@ -322,7 +365,6 @@ class DigipSession:
 
         registrar_log("Contraseña completada.")
 
-        # Se usa exactamente el selector del login que ya funcionaba.
         boton_ingresar = self.page.get_by_role(
             "button",
             name="INGRESAR",
@@ -352,7 +394,6 @@ class DigipSession:
                 "se validará la pantalla actual."
             )
 
-        # Validación mediante un elemento de la pantalla principal.
         indicador_home = self.page.get_by_role(
             "link",
             name="Ir a Preparaciones",
@@ -363,6 +404,7 @@ class DigipSession:
                 state="visible",
                 timeout=self.timeout_ms,
             )
+
         except PlaywrightTimeoutError as error:
             self.guardar_captura_error(
                 "login_no_ingreso"
@@ -377,22 +419,27 @@ class DigipSession:
             f"Login correcto. URL actual: {self.page.url}"
         )
 
-        self.context.storage_state(
-            path=str(SESSION_FILE)
-        )
+        try:
+            self.context.storage_state(
+                path=str(SESSION_FILE)
+            )
 
-        registrar_log(
-            f"Sesión DIGIP guardada correctamente: {SESSION_FILE}"
-        )
+            registrar_log(
+                "Sesión DIGIP guardada correctamente: "
+                f"{SESSION_FILE}"
+            )
+
+        except Exception as error:
+            registrar_log(
+                "El login fue correcto, pero no se pudo guardar "
+                f"la sesión. Error: {error}"
+            )
 
     def guardar_captura_error(
         self,
         prefijo: str = "error",
     ) -> Optional[Path]:
-        """
-        Guarda una captura de pantalla cuando ocurre un error.
-        """
-
+        """Guarda una captura de pantalla cuando ocurre un error."""
         if self.page is None:
             return None
 
@@ -402,7 +449,9 @@ class DigipSession:
             "%Y-%m-%d_%H-%M-%S"
         )
 
-        ruta = CAPTURAS_DIR / f"{prefijo}_{marca_tiempo}.png"
+        ruta = CAPTURAS_DIR / (
+            f"{prefijo}_{marca_tiempo}.png"
+        )
 
         try:
             self.page.screenshot(
@@ -425,10 +474,7 @@ class DigipSession:
             return None
 
     def guardar_sesion(self) -> None:
-        """
-        Permite guardar manualmente la sesión luego de cambios importantes.
-        """
-
+        """Guarda manualmente el storage_state actual."""
         if self.context is None:
             raise RuntimeError(
                 "No hay un contexto activo para guardar."
@@ -441,14 +487,12 @@ class DigipSession:
         )
 
         registrar_log(
-            f"Sesión actualizada correctamente: {SESSION_FILE}"
+            "Sesión actualizada correctamente: "
+            f"{SESSION_FILE}"
         )
 
     def eliminar_sesion_guardada(self) -> None:
-        """
-        Elimina el archivo de sesión para forzar un login nuevo.
-        """
-
+        """Elimina el archivo de sesión para forzar un login nuevo."""
         if SESSION_FILE.exists():
             SESSION_FILE.unlink()
 
@@ -457,10 +501,7 @@ class DigipSession:
             )
 
     def cerrar(self) -> None:
-        """
-        Cierra página, contexto, navegador y Playwright.
-        """
-
+        """Cierra página, contexto, navegador y Playwright."""
         if self.page is not None:
             try:
                 self.page.close()
@@ -494,7 +535,7 @@ class DigipSession:
 
 
 # ==========================================================
-# ATAJOS
+# ATAJO SIN WITH
 # ==========================================================
 
 def obtener_page(
@@ -504,10 +545,10 @@ def obtener_page(
     """
     Inicia la sesión sin usar `with`.
 
-    Importante:
-    quien use esta función debe ejecutar `sesion.cerrar()` al terminar.
+    Quien use esta función debe ejecutar:
+        sesion.cerrar()
+    al terminar.
     """
-
     sesion = DigipSession(
         headless=headless,
         timeout_ms=timeout_ms,
@@ -538,10 +579,6 @@ def main() -> None:
         print("SESIÓN DIGIP LISTA")
         print(f"URL actual: {page.url}")
         print("=" * 60)
-
-        input(
-            "Presioná ENTER para cerrar el navegador..."
-        )
 
 
 if __name__ == "__main__":
