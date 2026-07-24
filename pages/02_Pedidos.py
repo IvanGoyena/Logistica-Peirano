@@ -58,8 +58,9 @@ from models.planificacion import (
     asignar_camioneta_a_pedidos,
 )
 
-from Automatizacion.ejecutar_agrupaciones import (
-    ejecutar_agrupacion,
+from utils.cola_agrupaciones import (
+    crear_orden_agrupacion,
+    obtener_orden,
 )
 
 import pandas as pd
@@ -2943,9 +2944,90 @@ if (
                 lista_pedidos
             )
 
-            estado_guardado = st.session_state.get(
+            clave_resultado_actual = (
                 f"resultado_digip_{clave_ejecucion}"
             )
+
+            estado_guardado = st.session_state.get(
+                clave_resultado_actual
+            )
+
+            # Antes de dibujar la fila, sincroniza el estado
+            # guardado con la orden real de Google Sheets.
+            if (
+                estado_guardado
+                and estado_guardado.get("orden_id")
+            ):
+
+                orden_sincronizada = obtener_orden(
+                    estado_guardado["orden_id"]
+                )
+
+                if orden_sincronizada:
+
+                    estado_worker = str(
+                        orden_sincronizada.get(
+                            "Estado",
+                            "",
+                        )
+                    ).strip().upper()
+
+                    mensaje_worker = str(
+                        orden_sincronizada.get(
+                            "Mensaje",
+                            "",
+                        )
+                    ).strip()
+
+                    etapa_worker = str(
+                        orden_sincronizada.get(
+                            "Etapa",
+                            "",
+                        )
+                    ).strip()
+
+                    if estado_worker == "COMPLETADA":
+
+                        estado_guardado = {
+                            "exito": True,
+                            "pendiente": False,
+                            "orden_id": orden_sincronizada.get(
+                                "OrdenID"
+                            ),
+                            "mensaje": mensaje_worker,
+                            "etapa": etapa_worker,
+                            "estado_worker": estado_worker,
+                        }
+
+                    elif estado_worker == "ERROR":
+
+                        estado_guardado = {
+                            "exito": False,
+                            "pendiente": False,
+                            "orden_id": orden_sincronizada.get(
+                                "OrdenID"
+                            ),
+                            "mensaje": mensaje_worker,
+                            "etapa": etapa_worker,
+                            "estado_worker": estado_worker,
+                        }
+
+                    else:
+
+                        estado_guardado = {
+                            "exito": False,
+                            "pendiente": True,
+                            "orden_id": orden_sincronizada.get(
+                                "OrdenID"
+                            ),
+                            "mensaje": mensaje_worker,
+                            "etapa": etapa_worker,
+                            "estado_worker": estado_worker,
+                        }
+
+                    st.session_state[
+                        clave_resultado_actual
+                    ] = estado_guardado
 
             fila_1, fila_2, fila_3, fila_4, fila_5 = (
                 st.columns(
@@ -3023,6 +3105,18 @@ if (
                             "Ejecutada",
                             icon="✅"
                         )
+
+                    elif bool(
+                        estado_guardado.get(
+                            "pendiente",
+                            False
+                        )
+                    ):
+                        st.info(
+                            "En proceso",
+                            icon="⚙️"
+                        )
+
                     else:
                         st.error(
                             "Error",
@@ -3044,6 +3138,12 @@ if (
                         and not bool(
                             estado_guardado.get(
                                 "exito",
+                                False
+                            )
+                        )
+                        and not bool(
+                            estado_guardado.get(
+                                "pendiente",
                                 False
                             )
                         )
@@ -3085,10 +3185,19 @@ if (
                     )
                 )
 
-            if estado_guardado and not bool(
-                estado_guardado.get(
-                    "exito",
-                    False
+            if (
+                estado_guardado
+                and not bool(
+                    estado_guardado.get(
+                        "exito",
+                        False
+                    )
+                )
+                and not bool(
+                    estado_guardado.get(
+                        "pendiente",
+                        False
+                    )
                 )
             ):
 
@@ -3118,188 +3227,136 @@ if (
 
             if ejecutar:
 
-                import traceback
-
                 clave_resultado = (
                     f"resultado_digip_{clave_ejecucion}"
                 )
 
-                estado_visual = st.status(
-                    f"Iniciando {nombre_camioneta}...",
-                    expanded=True,
+                usuario_ejecucion = (
+                    st.session_state.get("usuario")
+                    or st.session_state.get("nombre_usuario")
+                    or "Usuario app"
                 )
-
-                def actualizar_estado(
-                    etapa,
-                    mensaje
-                ):
-                    estado_visual.write(
-                        f"**{str(etapa).upper()}** — {mensaje}"
-                    )
 
                 try:
 
-                    estado_visual.write(
-                        "✅ La aplicación recibió la orden."
-                    )
-
-                    estado_visual.write(
-                        "🌐 Iniciando navegador y sesión DIGIP..."
-                    )
-
-                    resultado_digip = ejecutar_agrupacion(
-                        {
-                            "codigo_despacho": codigo_despacho,
-                            "codigos_despacho": codigos_despacho,
-                            "usar_filtro_codigo_despacho": (
-                                usar_filtro_codigo_despacho
-                            ),
-                            "despacho": despacho_digip,
-                            "pedidos": lista_pedidos,
-                            "identificador": nombre_camioneta,
-                        },
-                        headless=True,
-                        callback=actualizar_estado,
-                    )
-
-                    resultado_guardado = (
-                        resultado_digip.como_dict()
+                    orden_id = crear_orden_agrupacion(
+                        camioneta=despacho_digip,
+                        codigo_despacho=codigo_despacho,
+                        codigos_despacho=codigos_despacho,
+                        usar_filtro_codigo_despacho=(
+                            usar_filtro_codigo_despacho
+                        ),
+                        pedidos=lista_pedidos,
+                        usuario=usuario_ejecucion,
                     )
 
                     st.session_state[
                         clave_resultado
-                    ] = resultado_guardado
+                    ] = {
+                        "exito": False,
+                        "pendiente": True,
+                        "orden_id": orden_id,
+                        "mensaje": (
+                            "Orden enviada al worker de la PC."
+                        ),
+                    }
 
-                    if resultado_digip.exito:
+                    st.success(
+                        f"Orden {orden_id} enviada al worker."
+                    )
 
-                        estado_visual.update(
-                            label=(
-                                f"{nombre_camioneta} creada "
-                                "correctamente"
-                            ),
-                            state="complete",
-                            expanded=True,
-                        )
+                    st.rerun()
 
-                        estado_visual.write(
-                            "✅ DIGIP confirmó la agrupación."
-                        )
+                except Exception as error:
+
+                    st.session_state[
+                        clave_resultado
+                    ] = {
+                        "exito": False,
+                        "pendiente": False,
+                        "mensaje": str(error),
+                    }
+
+                    st.error(
+                        "No se pudo enviar la orden al worker: "
+                        f"{error}"
+                    )
+
+            estado_cola = st.session_state.get(
+                f"resultado_digip_{clave_ejecucion}"
+            )
+
+            if estado_cola and estado_cola.get("orden_id"):
+
+                orden_actual = obtener_orden(
+                    estado_cola["orden_id"]
+                )
+
+                if orden_actual:
+
+                    estado_orden = str(
+                        orden_actual.get("Estado", "")
+                    ).strip().upper()
+
+                    mensaje_orden = str(
+                        orden_actual.get("Mensaje", "")
+                    ).strip()
+
+                    etapa_orden = str(
+                        orden_actual.get("Etapa", "")
+                    ).strip()
+
+                    if estado_orden == "COMPLETADA":
+
+                        st.session_state[
+                            f"resultado_digip_{clave_ejecucion}"
+                        ] = {
+                            "exito": True,
+                            "pendiente": False,
+                            "orden_id": orden_actual.get("OrdenID"),
+                            "mensaje": mensaje_orden,
+                        }
 
                         st.success(
-                            f"{nombre_camioneta} creada "
-                            "correctamente en DIGIP."
+                            f"✅ {nombre_camioneta}: "
+                            f"{mensaje_orden}"
+                        )
+
+                    elif estado_orden == "ERROR":
+
+                        st.error(
+                            f"❌ {nombre_camioneta}: "
+                            f"{mensaje_orden}"
+                        )
+
+                    elif estado_orden == "EN_PROCESO":
+
+                        st.info(
+                            f"⚙️ {nombre_camioneta} en proceso — "
+                            f"{etapa_orden}: {mensaje_orden}"
                         )
 
                     else:
 
-                        estado_visual.update(
-                            label=(
-                                f"No se pudo crear "
-                                f"{nombre_camioneta}"
+                        st.warning(
+                            f"🕒 {nombre_camioneta} pendiente "
+                            "de ser tomada por el worker."
+                        )
+
+                    if estado_orden not in {
+                        "COMPLETADA",
+                        "ERROR",
+                        "CANCELADA",
+                    }:
+
+                        if st.button(
+                            "🔄 Consultar estado",
+                            key=(
+                                "consultar_worker_"
+                                f"{clave_ejecucion}"
                             ),
-                            state="error",
-                            expanded=True,
-                        )
-
-                        estado_visual.write(
-                            "❌ DIGIP devolvió un resultado "
-                            "sin éxito."
-                        )
-
-                        st.error(
-                            "No se pudo crear la agrupación: "
-                            f"{resultado_digip.mensaje}"
-                        )
-
-                except Exception as error:
-
-                    detalle_error = traceback.format_exc()
-
-                    error_guardado = {
-                        "exito": False,
-                        "mensaje": str(error),
-                        "detalle": detalle_error,
-                    }
-
-                    st.session_state[
-                        clave_resultado
-                    ] = error_guardado
-
-                    estado_visual.update(
-                        label=(
-                            f"Error ejecutando "
-                            f"{nombre_camioneta}"
-                        ),
-                        state="error",
-                        expanded=True,
-                    )
-
-                    estado_visual.write(
-                        f"❌ {type(error).__name__}: {error}"
-                    )
-
-                    st.error(
-                        f"Error ejecutando DIGIP: {error}"
-                    )
-
-                    with st.expander(
-                        "Ver detalle técnico del error",
-                        expanded=True,
-                    ):
-                        st.code(
-                            detalle_error,
-                            language="text",
-                        )
-
-            st.markdown(
-                "<hr style='margin:0.35rem 0;'>",
-                unsafe_allow_html=True
-            )
-
-        # -------------------------------------------------
-        # DETALLE DE CLIENTES ASIGNADOS
-        # -------------------------------------------------
-
-        st.markdown("#### Detalle por cliente")
-
-        columnas_detalle_planificacion = [
-            "PrioridadCliente",
-            "Camioneta",
-            "FechaPrioridad",
-            "DiasPendiente",
-            "ClienteCodigo",
-            "ClienteDescripcion",
-            "CantidadPedidos",
-            "Pedidos",
-            "TotalUnidades",
-            "TotalM3",
-            "EstadoCapacidad",
-        ]
-
-        st.dataframe(
-            asignacion_camionetas[
-                columnas_detalle_planificacion
-            ],
-            width="stretch",
-            hide_index=True,
-            height=500,
-            column_config={
-
-                "FechaPrioridad": (
-                    st.column_config.DateColumn(
-                        "Pedido más antiguo",
-                        format="DD/MM/YYYY"
-                    )
-                ),
-
-                "TotalM3": (
-                    st.column_config.NumberColumn(
-                        "Volumen cliente",
-                        format="%.3f"
-                    )
-                ),
-            }
-        )
+                        ):
+                            st.rerun()
 
 
 # =====================================================

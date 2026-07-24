@@ -59,11 +59,11 @@ URL = obtener_secreto(
 )
 
 USUARIO = obtener_secreto(
-    "igoyena"
+    "USUARIO"
 )
 
 PASSWORD = obtener_secreto(
-    "0802"
+    "PASSWORD"
 )
 
 HEADLESS = True
