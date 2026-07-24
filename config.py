@@ -1,4 +1,10 @@
 from pathlib import Path
+import os
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 
 # ==========================================================
@@ -23,13 +29,41 @@ CARPETA_DATOS = (
 
 
 # ==========================================================
+# CONFIGURACIÓN SEGURA
+# ==========================================================
+
+def obtener_secreto(
+    nombre: str,
+    valor_local: str = "",
+) -> str:
+
+    if st is not None:
+        try:
+            if nombre in st.secrets:
+                return str(st.secrets[nombre]).strip()
+        except Exception:
+            pass
+
+    return str(
+        os.getenv(nombre, valor_local)
+    ).strip()
+
+
+# ==========================================================
 # WMS
 # ==========================================================
 
-URL = "https://app.digipwms.com"
+URL = obtener_secreto(
+    "DIGIP_URL",
+    "https://app.digipwms.com",
+)
 
-USUARIO = "igoyena"
+USUARIO = obtener_secreto(
+    "igoyena"
+)
 
-PASSWORD = "0802"
+PASSWORD = obtener_secreto(
+    "0802"
+)
 
-HEADLESS = False
+HEADLESS = True
