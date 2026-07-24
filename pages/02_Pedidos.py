@@ -3091,9 +3091,12 @@ if (
                     False
                 )
             ):
+
                 with st.expander(
-                    f"Ver error de {nombre_camioneta}"
+                    f"❌ Ver error de {nombre_camioneta}",
+                    expanded=True,
                 ):
+
                     st.error(
                         estado_guardado.get(
                             "mensaje",
@@ -3101,69 +3104,106 @@ if (
                         )
                     )
 
+                    detalle_guardado = estado_guardado.get(
+                        "detalle",
+                        ""
+                    )
+
+                    if detalle_guardado:
+
+                        st.code(
+                            detalle_guardado,
+                            language="text",
+                        )
+
             if ejecutar:
 
                 import traceback
 
-                mensajes_proceso = st.empty()
+                clave_resultado = (
+                    f"resultado_digip_{clave_ejecucion}"
+                )
+
+                estado_visual = st.status(
+                    f"Iniciando {nombre_camioneta}...",
+                    expanded=True,
+                )
 
                 def actualizar_estado(
                     etapa,
                     mensaje
                 ):
-                    mensajes_proceso.info(mensaje)
-
-                mensajes_proceso.info(
-                    "1/4 — La app recibió la orden de ejecución."
-                )
+                    estado_visual.write(
+                        f"**{str(etapa).upper()}** — {mensaje}"
+                    )
 
                 try:
 
-                    mensajes_proceso.info(
-                        "2/4 — Iniciando navegador y sesión DIGIP..."
+                    estado_visual.write(
+                        "✅ La aplicación recibió la orden."
                     )
 
-                    with st.spinner(
-                        f"Ejecutando {nombre_camioneta} en DIGIP..."
-                    ):
+                    estado_visual.write(
+                        "🌐 Iniciando navegador y sesión DIGIP..."
+                    )
 
-                        resultado_digip = ejecutar_agrupacion(
-                            {
-                                "codigo_despacho": codigo_despacho,
-                                "codigos_despacho": codigos_despacho,
-                                "usar_filtro_codigo_despacho": (
-                                    usar_filtro_codigo_despacho
-                                ),
-                                "despacho": despacho_digip,
-                                "pedidos": lista_pedidos,
-                                "identificador": nombre_camioneta,
-                            },
-                            headless=True,
-                            callback=actualizar_estado,
-                        )
+                    resultado_digip = ejecutar_agrupacion(
+                        {
+                            "codigo_despacho": codigo_despacho,
+                            "codigos_despacho": codigos_despacho,
+                            "usar_filtro_codigo_despacho": (
+                                usar_filtro_codigo_despacho
+                            ),
+                            "despacho": despacho_digip,
+                            "pedidos": lista_pedidos,
+                            "identificador": nombre_camioneta,
+                        },
+                        headless=True,
+                        callback=actualizar_estado,
+                    )
 
-                    mensajes_proceso.info(
-                        "3/4 — DIGIP devolvió un resultado."
+                    resultado_guardado = (
+                        resultado_digip.como_dict()
                     )
 
                     st.session_state[
-                        f"resultado_digip_{clave_ejecucion}"
-                    ] = resultado_digip.como_dict()
+                        clave_resultado
+                    ] = resultado_guardado
 
                     if resultado_digip.exito:
 
-                        mensajes_proceso.success(
-                            "4/4 — Agrupación creada correctamente."
+                        estado_visual.update(
+                            label=(
+                                f"{nombre_camioneta} creada "
+                                "correctamente"
+                            ),
+                            state="complete",
+                            expanded=True,
+                        )
+
+                        estado_visual.write(
+                            "✅ DIGIP confirmó la agrupación."
                         )
 
                         st.success(
-                            f"{nombre_camioneta} creada correctamente en DIGIP."
+                            f"{nombre_camioneta} creada "
+                            "correctamente en DIGIP."
                         )
 
                     else:
 
-                        mensajes_proceso.error(
-                            "4/4 — DIGIP devolvió un error."
+                        estado_visual.update(
+                            label=(
+                                f"No se pudo crear "
+                                f"{nombre_camioneta}"
+                            ),
+                            state="error",
+                            expanded=True,
+                        )
+
+                        estado_visual.write(
+                            "❌ DIGIP devolvió un resultado "
+                            "sin éxito."
                         )
 
                         st.error(
@@ -3175,15 +3215,30 @@ if (
 
                     detalle_error = traceback.format_exc()
 
-                    st.session_state[
-                        f"resultado_digip_{clave_ejecucion}"
-                    ] = {
+                    error_guardado = {
                         "exito": False,
                         "mensaje": str(error),
                         "detalle": detalle_error,
                     }
 
-                    mensajes_proceso.error(
+                    st.session_state[
+                        clave_resultado
+                    ] = error_guardado
+
+                    estado_visual.update(
+                        label=(
+                            f"Error ejecutando "
+                            f"{nombre_camioneta}"
+                        ),
+                        state="error",
+                        expanded=True,
+                    )
+
+                    estado_visual.write(
+                        f"❌ {type(error).__name__}: {error}"
+                    )
+
+                    st.error(
                         f"Error ejecutando DIGIP: {error}"
                     )
 
@@ -3191,29 +3246,10 @@ if (
                         "Ver detalle técnico del error",
                         expanded=True,
                     ):
-                        st.code(detalle_error)
-
-                st.session_state[
-                    f"resultado_digip_"
-                    f"{clave_ejecucion}"
-                ] = resultado_digip.como_dict()
-
-               
-
-                if resultado_digip.exito:
-
-                    st.success(
-                        f"{nombre_camioneta} creada "
-                        "correctamente en DIGIP."
-                    )
-
-
-                else:
-
-                    st.error(
-                        "No se pudo crear la agrupación: "
-                        f"{resultado_digip.mensaje}"
-                    )
+                        st.code(
+                            detalle_error,
+                            language="text",
+                        )
 
             st.markdown(
                 "<hr style='margin:0.35rem 0;'>",
