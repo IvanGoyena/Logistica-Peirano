@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -115,8 +116,47 @@ class DigipSession:
 
         self.playwright = sync_playwright().start()
 
-        self.browser = self.playwright.chromium.launch(
-            headless=self.headless
+    def _crear_contexto(self) -> BrowserContext:
+        """
+        Crea un contexto compatible con ejecución local
+        y Streamlit Community Cloud.
+        """
+
+        if self.browser is None:
+            raise RuntimeError(
+                "El navegador todavía no fue iniciado."
+            )
+
+        opciones_contexto = {
+            "viewport": {
+                "width": 1920,
+                "height": 1080,
+            },
+            "locale": "es-AR",
+            "timezone_id": "America/Argentina/Buenos_Aires",
+            "ignore_https_errors": True,
+        }
+
+        if SESSION_FILE.exists():
+            try:
+                registrar_log(
+                    f"Intentando reutilizar sesión guardada: "
+                    f"{SESSION_FILE}"
+                )
+
+                return self.browser.new_context(
+                    storage_state=str(SESSION_FILE),
+                    **opciones_contexto,
+                )
+
+            except Exception as error:
+                registrar_log(
+                    "No se pudo reutilizar la sesión guardada. "
+                    f"Se hará login nuevamente. Error: {error}"
+                )
+
+        return self.browser.new_context(
+            **opciones_contexto
         )
 
         self.context = self._crear_contexto()
