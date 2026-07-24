@@ -321,6 +321,8 @@ def abrir_detalle_solicitud(
 requerir_roles(
     "admin",
     "gerencia",
+    "logistica",
+    "supervisor",
     "comercial",
 )
 
@@ -1193,15 +1195,15 @@ with urg_col_2:
         )
 
 with urg_col_3:
-    abrir_confirmacion_urgentes = st.button(
-        "🚀 Agrupar en DIGIP",
+    enviar_urgentes_worker = st.button(
+        "🚀 Enviar al worker",
         type="primary",
         use_container_width=True,
         disabled=(
             orden_urgentes is None
             or not puede_ejecutar_urgencias
         ),
-        key="btn_abrir_urgentes_digip",
+        key="btn_enviar_urgentes_worker",
     )
 
 
@@ -1222,130 +1224,65 @@ if not puede_ejecutar_urgencias:
     )
 
 
-if abrir_confirmacion_urgentes:
-    st.session_state[
-        "confirmar_agrupacion_urgentes"
-    ] = True
+if enviar_urgentes_worker and orden_urgentes:
 
+    pedidos_a_procesar = orden_urgentes["pedidos"]
 
-if st.session_state.get(
-    "confirmar_agrupacion_urgentes",
-    False,
-):
-    with st.container(border=True):
-        st.warning(
-            f"Se procesarán "
-            f"{len(orden_urgentes['pedidos']) if orden_urgentes else 0} "
-            "pedidos con destino URGENTES."
+    usuario_solicitud = (
+        st.session_state.get("usuario")
+        or st.session_state.get("nombre_usuario")
+        or "Usuario app"
+    )
+
+    try:
+        # Primero se crea la orden. Solo después se cambia el
+        # estado de las urgencias a Procesando. Así, si Google
+        # Sheets falla, las urgencias no quedan bloqueadas.
+        orden_id = crear_orden_agrupacion(
+            camioneta="URGENTES",
+            codigo_despacho=(
+                orden_urgentes["codigo_despacho"]
+            ),
+            codigos_despacho=(
+                orden_urgentes["codigos_despacho"]
+            ),
+            usar_filtro_codigo_despacho=(
+                orden_urgentes[
+                    "usar_filtro_codigo_despacho"
+                ]
+            ),
+            pedidos=pedidos_a_procesar,
+            usuario=usuario_solicitud,
         )
 
-        if orden_urgentes:
-            resumen_confirmacion = pd.DataFrame([
-                {
-                    "Destino": orden_urgentes["despacho"],
-                    "Códigos despacho": " | ".join(
-                        orden_urgentes["codigos_despacho"]
-                    ),
-                    "Cantidad pedidos": len(
-                        orden_urgentes["pedidos"]
-                    ),
-                    "Pedidos": " | ".join(
-                        orden_urgentes["pedidos"]
-                    ),
-                }
-            ])
+        marcar_lote_procesando(
+            pedidos_a_procesar
+        )
 
-            st.dataframe(
-                resumen_confirmacion,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        confirmar_col, cancelar_col = st.columns(2)
-
-        with confirmar_col:
-            confirmar_ejecucion_urgentes = st.button(
-                "Confirmar agrupación",
-                type="primary",
-                use_container_width=True,
-                key="btn_confirmar_urgentes_digip",
-            )
-
-        with cancelar_col:
-            cancelar_ejecucion_urgentes = st.button(
-                "Cancelar",
-                use_container_width=True,
-                key="btn_cancelar_urgentes_digip",
-            )
-
-    if cancelar_ejecucion_urgentes:
         st.session_state[
-            "confirmar_agrupacion_urgentes"
-        ] = False
+            "orden_worker_urgentes"
+        ] = orden_id
 
-    elif confirmar_ejecucion_urgentes and orden_urgentes:
-        pedidos_a_procesar = orden_urgentes["pedidos"]
+        st.session_state[
+            "pedidos_orden_worker_urgentes"
+        ] = pedidos_a_procesar
 
-        usuario_solicitud = (
-            st.session_state.get("usuario")
-            or st.session_state.get("nombre_usuario")
-            or "Usuario app"
+        st.session_state.pop(
+            "resultado_worker_urgentes_aplicado",
+            None,
         )
 
-        try:
-            marcar_lote_procesando(
-                pedidos_a_procesar
-            )
+        st.success(
+            f"Orden {orden_id} enviada al worker de la PC."
+        )
 
-            orden_id = crear_orden_agrupacion(
-                camioneta="URGENTES",
-                codigo_despacho=(
-                    orden_urgentes["codigo_despacho"]
-                ),
-                codigos_despacho=(
-                    orden_urgentes["codigos_despacho"]
-                ),
-                usar_filtro_codigo_despacho=(
-                    orden_urgentes[
-                        "usar_filtro_codigo_despacho"
-                    ]
-                ),
-                pedidos=pedidos_a_procesar,
-                usuario=usuario_solicitud,
-            )
+    except Exception as error:
+        st.error(
+            "No se pudo enviar la agrupación de urgencias "
+            "al worker."
+        )
 
-            st.session_state[
-                "orden_worker_urgentes"
-            ] = orden_id
-
-            st.session_state[
-                "pedidos_orden_worker_urgentes"
-            ] = pedidos_a_procesar
-
-            st.session_state[
-                "confirmar_agrupacion_urgentes"
-            ] = False
-
-            st.success(
-                f"Orden {orden_id} enviada al worker de la PC."
-            )
-
-        except Exception as error:
-            marcar_lote_error(
-                pedidos_a_procesar,
-                mensaje=str(error),
-            )
-
-            st.session_state[
-                "confirmar_agrupacion_urgentes"
-            ] = False
-
-            st.error(
-                "No se pudo enviar la agrupación de urgencias "
-                "al worker."
-            )
-
-            st.exception(error)
+        st.exception(error)
 
 
 orden_worker_urgentes = st.session_state.get(
