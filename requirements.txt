@@ -10,7 +10,6 @@ cffi==2.1.0
 charset-normalizer==3.4.7
 click==8.3.3
 colorama==0.4.6
-comtypes==1.4.16
 cryptography==49.0.0
 et_xmlfile==2.0.0
 extra-streamlit-components==0.1.81
@@ -53,7 +52,6 @@ PyJWT==2.13.0
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 python-multipart==0.0.27
-pywinauto==0.6.9
 PyYAML==6.0.3
 referencing==0.37.0
 requests==2.33.1

@@ -130,8 +130,6 @@ class DigipSession:
             ruta_chromium = (
                 shutil.which("chromium")
                 or shutil.which("chromium-browser")
-                or shutil.which("google-chrome")
-                or shutil.which("google-chrome-stable")
             )
 
             argumentos_navegador = [
