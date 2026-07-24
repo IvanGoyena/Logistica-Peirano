@@ -3111,38 +3111,96 @@ if (
                 ):
                     mensajes_proceso.info(mensaje)
 
+            import traceback
+
+            mensajes_proceso.info(
+                "1/4 — La app recibió la orden de ejecución."
+            )
+
+            try:
+
+                mensajes_proceso.info(
+                    "2/4 — Iniciando navegador y sesión DIGIP..."
+                )
+
                 with st.spinner(
-                    f"Ejecutando {nombre_camioneta} "
-                    "en DIGIP..."
+                    f"Ejecutando {nombre_camioneta} en DIGIP..."
                 ):
 
                     resultado_digip = ejecutar_agrupacion(
                         {
-                            "codigo_despacho": (
-                                codigo_despacho
-                            ),
-                            "codigos_despacho": (
-                                codigos_despacho
-                            ),
+                            "codigo_despacho": codigo_despacho,
+                            "codigos_despacho": codigos_despacho,
                             "usar_filtro_codigo_despacho": (
                                 usar_filtro_codigo_despacho
                             ),
                             "despacho": despacho_digip,
                             "pedidos": lista_pedidos,
-                            "identificador": (
-                                nombre_camioneta
-                            ),
+                            "identificador": nombre_camioneta,
                         },
                         headless=True,
                         callback=actualizar_estado,
                     )
+
+                mensajes_proceso.info(
+                    "3/4 — DIGIP devolvió un resultado."
+                )
+
+                st.session_state[
+                    f"resultado_digip_{clave_ejecucion}"
+                ] = resultado_digip.como_dict()
+
+                if resultado_digip.exito:
+
+                    mensajes_proceso.success(
+                        "4/4 — Agrupación creada correctamente."
+                    )
+
+                    st.success(
+                        f"{nombre_camioneta} creada correctamente en DIGIP."
+                    )
+
+                    # Por ahora NO usar st.rerun()
+
+                else:
+
+                    mensajes_proceso.error(
+                        "4/4 — DIGIP devolvió un error."
+                    )
+
+                    st.error(
+                        "No se pudo crear la agrupación: "
+                        f"{resultado_digip.mensaje}"
+                    )
+
+            except Exception as error:
+
+                detalle_error = traceback.format_exc()
+
+                st.session_state[
+                    f"resultado_digip_{clave_ejecucion}"
+                ] = {
+                    "exito": False,
+                    "mensaje": str(error),
+                    "detalle": detalle_error,
+                }
+
+                mensajes_proceso.error(
+                    f"Error ejecutando DIGIP: {error}"
+                )
+
+                with st.expander(
+                    "Ver detalle técnico del error",
+                    expanded=True,
+                ):
+                    st.code(detalle_error)
 
                 st.session_state[
                     f"resultado_digip_"
                     f"{clave_ejecucion}"
                 ] = resultado_digip.como_dict()
 
-                mensajes_proceso.empty()
+               
 
                 if resultado_digip.exito:
 
@@ -3151,7 +3209,6 @@ if (
                         "correctamente en DIGIP."
                     )
 
-                    st.rerun()
 
                 else:
 
