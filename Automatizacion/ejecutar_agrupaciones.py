@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import time
-import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
@@ -217,7 +216,7 @@ def emitir_estado(
     etapa: str,
     mensaje: str,
 ) -> None:
-    print(f"[{etapa}] {mensaje}", flush=True)
+    print(f"[{etapa}] {mensaje}")
 
     if callback is not None:
         callback(etapa, mensaje)
@@ -376,7 +375,6 @@ def ejecutar_agrupacion_en_pagina(
             codigo_despacho=(
                 agrupacion.codigo_despacho
             ),
-            callback=callback,
         )
 
         if not agrupacion.usar_filtro_codigo_despacho:
@@ -477,19 +475,15 @@ def ejecutar_agrupacion_en_pagina(
         )
 
     except Exception as error:
-        traceback.print_exc()
-
         resultado.exito = False
-        resultado.mensaje = (
-            f"{type(error).__name__}: {error}"
-        )
+        resultado.mensaje = str(error)
 
         emitir_estado(
             callback,
             "error",
             (
                 f"{agrupacion.identificador}: "
-                f"{type(error).__name__}: {error}"
+                f"{error}"
             ),
         )
 
