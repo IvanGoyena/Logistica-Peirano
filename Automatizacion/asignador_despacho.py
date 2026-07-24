@@ -585,7 +585,7 @@ def main() -> None:
         return
 
     with DigipSession(
-        headless=False
+        headless=True
     ) as sesion:
 
         page = sesion.page

@@ -484,7 +484,7 @@ def obtener_page(
 
 def main() -> None:
     with DigipSession(
-        headless=False
+        headless=True
     ) as sesion:
 
         page = sesion.page

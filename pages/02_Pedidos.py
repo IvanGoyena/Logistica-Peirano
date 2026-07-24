@@ -15,6 +15,18 @@ from utils.leer_datos import (
     leer_archivo
 )
 
+from utils.leer_gestion_consultas import (
+    obtener_solicitudes_abiertas,
+    obtener_urgencias_activas,
+    obtener_anulaciones_pendientes,
+    obtener_reclamos_abiertos,
+)
+
+from utils.gestion_consultas import (
+    actualizar_solicitud,
+    finalizar_solicitud_automaticamente,
+)
+
 from models.detalle import (
     construir_tabla_detalle,
     construir_resumen_pedidos
@@ -253,6 +265,287 @@ tabla_pendientes_erp = construir_tabla_pendientes(
 
 
 # =====================================================
+# BLOQUEOS POR GESTIONES COMERCIALES ABIERTAS
+# =====================================================
+
+def normalizar_pedido_gestion(valor: object) -> str:
+    """
+    Normaliza la clave utilizada para comparar las gestiones
+    comerciales con la tabla operativa.
+    """
+
+    texto = str(valor or "").strip()
+
+    if texto.endswith(".0"):
+        texto = texto[:-2]
+
+    return texto
+
+
+def obtener_pedidos_con_gestion_abierta() -> tuple[
+    set[str],
+    dict[str, set[str]],
+]:
+    """
+    Devuelve todos los pedidos que no deben entrar en la
+    planificación automática porque requieren revisión.
+
+    Incluye:
+    - solicitudes abiertas;
+    - urgencias activas;
+    - anulaciones pendientes;
+    - reclamos abiertos.
+    """
+
+    gestiones = {
+        "Solicitud": obtener_solicitudes_abiertas(),
+        "Urgencia": obtener_urgencias_activas(),
+        "Anulación": obtener_anulaciones_pendientes(),
+        "Reclamo": obtener_reclamos_abiertos(),
+    }
+
+    pedidos_por_gestion: dict[str, set[str]] = {}
+    pedidos_bloqueados: set[str] = set()
+
+    for tipo_gestion, dataframe in gestiones.items():
+
+        if dataframe is None or dataframe.empty:
+            pedidos_por_gestion[tipo_gestion] = set()
+            continue
+
+        if "Pedido" not in dataframe.columns:
+            pedidos_por_gestion[tipo_gestion] = set()
+            continue
+
+        pedidos = set(
+            dataframe["Pedido"]
+            .apply(normalizar_pedido_gestion)
+            .loc[lambda serie: serie.ne("")]
+            .tolist()
+        )
+
+        pedidos_por_gestion[tipo_gestion] = pedidos
+        pedidos_bloqueados.update(pedidos)
+
+    return pedidos_bloqueados, pedidos_por_gestion
+
+
+pedidos_bloqueados_gestion, pedidos_por_tipo_gestion = (
+    obtener_pedidos_con_gestion_abierta()
+)
+
+
+# =====================================================
+# SOLICITUDES COMERCIALES PENDIENTES
+# =====================================================
+
+def normalizar_pedido_wms_desde_codigo(valor: object) -> str:
+    """
+    Obtiene la clave utilizada por la tabla operativa desde
+    el código completo del WMS.
+
+    Ejemplo:
+        9999 70-1 -> 70
+    """
+
+    texto = str(valor or "").strip()
+
+    if not texto:
+        return ""
+
+    partes = texto.split()
+
+    if len(partes) >= 2:
+        texto = partes[1]
+
+    return texto.split("-")[0].strip()
+
+
+# -----------------------------------------------------
+# CIERRE AUTOMÁTICO POR ESTADO REAL DEL PEDIDO
+# -----------------------------------------------------
+
+solicitudes_abiertas = obtener_solicitudes_abiertas()
+
+if solicitudes_abiertas is None:
+    solicitudes_abiertas = pd.DataFrame()
+
+if (
+    not solicitudes_abiertas.empty
+    and df_pedidos is not None
+    and not df_pedidos.empty
+):
+
+    pedidos_crudo = df_pedidos.copy()
+
+    if "Codigo" in pedidos_crudo.columns:
+
+        pedidos_crudo["PedidoGestion"] = (
+            pedidos_crudo["Codigo"]
+            .apply(normalizar_pedido_wms_desde_codigo)
+        )
+
+        pedidos_crudo["EstadoGestion"] = (
+            pedidos_crudo.get(
+                "Estado",
+                pd.Series("", index=pedidos_crudo.index),
+            )
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        pedidos_presentes = set(
+            pedidos_crudo["PedidoGestion"]
+            .loc[
+                pedidos_crudo["PedidoGestion"].ne("")
+            ]
+            .tolist()
+        )
+
+        pedidos_completos = set(
+            pedidos_crudo.loc[
+                pedidos_crudo["EstadoGestion"].eq("COMPLETO"),
+                "PedidoGestion",
+            ].tolist()
+        )
+
+        solicitudes_cerradas_automaticamente = 0
+
+        for _, solicitud in solicitudes_abiertas.iterrows():
+
+            solicitud_id = str(
+                solicitud.get("SolicitudID", "")
+            ).strip()
+
+            pedido_solicitud = str(
+                solicitud.get("Pedido", "")
+            ).strip()
+
+            motivo_cierre = ""
+
+            if pedido_solicitud in pedidos_completos:
+                motivo_cierre = (
+                    "Gestión cerrada automáticamente porque "
+                    "el pedido pasó al estado Completo en DIGIP."
+                )
+
+            elif pedido_solicitud not in pedidos_presentes:
+                motivo_cierre = (
+                    "Gestión cerrada automáticamente porque "
+                    "el pedido ya no figura en el reporte actual "
+                    "de Pedidos DIGIP."
+                )
+
+            if solicitud_id and motivo_cierre:
+
+                finalizar_solicitud_automaticamente(
+                    solicitud_id=solicitud_id,
+                    motivo=motivo_cierre,
+                )
+
+                solicitudes_cerradas_automaticamente += 1
+
+        if solicitudes_cerradas_automaticamente:
+
+            solicitudes_abiertas = (
+                obtener_solicitudes_abiertas()
+            )
+
+            st.toast(
+                (
+                    f"{solicitudes_cerradas_automaticamente} "
+                    "solicitud(es) finalizada(s) "
+                    "automáticamente."
+                ),
+                icon="✅",
+            )
+
+
+# -----------------------------------------------------
+# PREPARAR SOLICITUDES ABIERTAS PARA VISUALIZACIÓN
+# -----------------------------------------------------
+
+if solicitudes_abiertas is None:
+    solicitudes_abiertas = pd.DataFrame()
+
+if not solicitudes_abiertas.empty:
+
+    solicitudes_abiertas = solicitudes_abiertas.copy()
+
+    solicitudes_abiertas["Pedido"] = (
+        solicitudes_abiertas["Pedido"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    solicitudes_abiertas["FechaSolicitudOrden"] = pd.to_datetime(
+        solicitudes_abiertas["FechaSolicitud"],
+        errors="coerce",
+    )
+
+    solicitudes_abiertas["FechaSolicitudVisible"] = (
+        solicitudes_abiertas["FechaSolicitudOrden"]
+        .dt.strftime("%d/%m/%Y %H:%M")
+        .fillna(
+            solicitudes_abiertas["FechaSolicitud"]
+            .fillna("")
+            .astype(str)
+        )
+    )
+
+    solicitudes_abiertas = solicitudes_abiertas.sort_values(
+        by="FechaSolicitudOrden",
+        ascending=False,
+        na_position="last",
+    ).reset_index(drop=True)
+
+    cantidad_solicitudes = (
+        solicitudes_abiertas
+        .groupby("Pedido", as_index=False)
+        .agg(CantidadSolicitudes=("SolicitudID", "nunique"))
+    )
+
+    ultima_solicitud = (
+        solicitudes_abiertas
+        .drop_duplicates(subset=["Pedido"], keep="first")
+        [[
+            "Pedido",
+            "TipoSolicitud",
+            "Prioridad",
+            "Descripcion",
+            "UsuarioSolicitante",
+            "FechaSolicitudVisible",
+            "EstadoSolicitud",
+        ]]
+        .rename(columns={
+            "TipoSolicitud": "TipoSolicitudPendiente",
+            "Prioridad": "PrioridadSolicitud",
+            "Descripcion": "DetalleSolicitud",
+            "UsuarioSolicitante": "UsuarioSolicitud",
+            "FechaSolicitudVisible": "FechaSolicitudPendiente",
+            "EstadoSolicitud": "EstadoSolicitudPendiente",
+        })
+        .copy()
+    )
+
+    resumen_solicitudes = ultima_solicitud.merge(
+        cantidad_solicitudes,
+        on="Pedido",
+        how="left",
+        validate="one_to_one",
+    )
+
+else:
+
+    resumen_solicitudes = pd.DataFrame(columns=[
+        "Pedido",
+                                ])
+
+
+# =====================================================
 # NORMALIZAR CLAVE PEDIDO
 # =====================================================
 
@@ -270,6 +563,55 @@ tabla_pendientes_erp["Pedido"] = (
     .astype(str)
     .str.strip()
     .str.replace(r"\.0$", "", regex=True)
+)
+
+
+tabla_transmisiones["Pedido"] = (
+    tabla_transmisiones["Pedido"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+    .str.replace(r"\.0$", "", regex=True)
+    .str.split("-")
+    .str[0]
+)
+
+
+# =====================================================
+# MERGE PEDIDOS DIGIP + ÚLTIMA TRANSMISIÓN ERP
+# =====================================================
+
+tabla = tabla.merge(
+    tabla_transmisiones,
+    on="Pedido",
+    how="left",
+    validate="many_to_one",
+)
+
+tabla["NroEnvioERP"] = (
+    tabla["NroEnvioERP"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+tabla["EstadoTransmisionERP"] = (
+    tabla["EstadoTransmisionERP"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+tabla["FechaTransmisionERP"] = pd.to_datetime(
+    tabla["FechaTransmisionERP"],
+    errors="coerce",
+)
+
+tabla["HoraTransmisionERP"] = (
+    tabla["HoraTransmisionERP"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
 )
 
 
@@ -572,6 +914,8 @@ for columna in columnas_enteras:
 columnas_finales = [
     "Pedido",
     "Fecha",
+    "FechaTransmisionERP",
+    "HoraTransmisionERP",
     "ClienteCodigo",
     "ClienteDescripcion",
     "Estado",
@@ -612,6 +956,53 @@ tabla = tabla[columnas_finales].copy()
 
 
 # =====================================================
+# ENRIQUECER SOLICITUDES PARA EL PANEL SUPERIOR
+# =====================================================
+
+if not solicitudes_abiertas.empty:
+
+    resumen_dimension_pedidos = (
+        tabla[
+            [
+                "Pedido",
+                "TotalUnidades",
+                "TotalM3",
+            ]
+        ]
+        .drop_duplicates(
+            subset=["Pedido"],
+            keep="first",
+        )
+        .copy()
+    )
+
+    solicitudes_abiertas = solicitudes_abiertas.merge(
+        resumen_dimension_pedidos,
+        on="Pedido",
+        how="left",
+        validate="many_to_one",
+    )
+
+    solicitudes_abiertas["TotalUnidades"] = (
+        pd.to_numeric(
+            solicitudes_abiertas["TotalUnidades"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    solicitudes_abiertas["TotalM3"] = (
+        pd.to_numeric(
+            solicitudes_abiertas["TotalM3"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .round(3)
+    )
+
+
+# =====================================================
 # VISUALIZACIÓN
 # =====================================================
 
@@ -620,6 +1011,522 @@ st.title("📦 Gestión de Pedidos")
 st.caption(
     "Tabla operativa consolidada de pedidos DIGIP"
 )
+
+
+# =====================================================
+# AVISO Y GESTIÓN DE SOLICITUDES COMERCIALES
+# =====================================================
+
+ESTADOS_SOLICITUD = [
+    "Pendiente",
+    "En revisión",
+    "En curso",
+    "Finalizada",
+]
+
+
+@st.dialog(
+    "📩 Gestionar solicitud comercial",
+    width="large",
+)
+def abrir_gestion_solicitud(
+    solicitud_id: str,
+) -> None:
+    """
+    Abre una ventana modal para gestionar una solicitud sin
+    ocupar espacio permanente en la pantalla principal.
+    """
+
+    coincidencia = solicitudes_abiertas.loc[
+        solicitudes_abiertas["SolicitudID"]
+        .astype(str)
+        .eq(str(solicitud_id))
+    ].copy()
+
+    if coincidencia.empty:
+        st.error("No se encontró la solicitud seleccionada.")
+        return
+
+    solicitud = coincidencia.iloc[0]
+
+    pedido = str(
+        solicitud.get("Pedido", "")
+    ).strip()
+
+    cliente = str(
+        solicitud.get("Cliente", "")
+    ).strip()
+
+    tipo_solicitud = str(
+        solicitud.get("TipoSolicitud", "")
+    ).strip()
+
+    prioridad = str(
+        solicitud.get("Prioridad", "")
+    ).strip()
+
+    descripcion = str(
+        solicitud.get("Descripcion", "")
+    ).strip()
+
+    solicitado_por = str(
+        solicitud.get("UsuarioSolicitante", "")
+    ).strip()
+
+    fecha_solicitud = str(
+        solicitud.get("FechaSolicitudVisible", "")
+    ).strip()
+
+    responsable_actual = str(
+        solicitud.get("Responsable", "")
+    ).strip()
+
+    unidades_pedido = int(
+        pd.to_numeric(
+            solicitud.get("TotalUnidades", 0),
+            errors="coerce",
+        )
+        if pd.notna(
+            pd.to_numeric(
+                solicitud.get("TotalUnidades", 0),
+                errors="coerce",
+            )
+        )
+        else 0
+    )
+
+    volumen_pedido = float(
+        pd.to_numeric(
+            solicitud.get("TotalM3", 0),
+            errors="coerce",
+        )
+        if pd.notna(
+            pd.to_numeric(
+                solicitud.get("TotalM3", 0),
+                errors="coerce",
+            )
+        )
+        else 0
+    )
+
+    estado_actual = str(
+        solicitud.get(
+            "EstadoSolicitud",
+            "Pendiente",
+        )
+    ).strip()
+
+    if estado_actual not in ESTADOS_SOLICITUD:
+        estado_actual = "Pendiente"
+
+    prioridad_icono = {
+        "ALTA": "🔴",
+        "NORMAL": "🟡",
+        "BAJA": "🟢",
+    }.get(
+        prioridad.upper(),
+        "⚪",
+    )
+
+    cabecera_1, cabecera_2, cabecera_3, cabecera_4 = st.columns(
+        [0.9, 2.1, 0.9, 0.9],
+        vertical_alignment="center",
+    )
+
+    with cabecera_1:
+        st.metric(
+            "Pedido",
+            pedido or "Sin dato",
+        )
+
+    with cabecera_2:
+        st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
+        st.caption(
+            f"{tipo_solicitud or 'Solicitud'} · "
+            f"{prioridad_icono} {prioridad or 'Sin prioridad'}"
+        )
+
+    with cabecera_3:
+        st.metric(
+            "Unidades",
+            f"{unidades_pedido:,}".replace(",", "."),
+        )
+
+    with cabecera_4:
+        volumen_formateado = (
+            f"{volumen_pedido:,.3f} m³"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+        st.metric(
+            "Volumen",
+            volumen_formateado,
+        )
+
+    st.caption(
+        f"**Estado actual:** {estado_actual}"
+    )
+
+    st.info(
+        descripcion or "La solicitud no tiene detalle.",
+        icon="📝",
+    )
+
+    datos_col_1, datos_col_2, datos_col_3 = st.columns(3)
+
+    with datos_col_1:
+        st.caption(
+            f"**Solicitado por**  \n"
+            f"{solicitado_por or 'Sin dato'}"
+        )
+
+    with datos_col_2:
+        st.caption(
+            f"**Fecha**  \n"
+            f"{fecha_solicitud or 'Sin dato'}"
+        )
+
+    with datos_col_3:
+        st.caption(
+            f"**Responsable actual**  \n"
+            f"{responsable_actual or 'Sin asignar'}"
+        )
+
+    st.divider()
+
+    with st.form(
+        f"form_gestion_solicitud_{solicitud_id}",
+        clear_on_submit=False,
+    ):
+
+        formulario_1, formulario_2 = st.columns(
+            [1, 2],
+        )
+
+        with formulario_1:
+
+            nuevo_estado_solicitud = st.selectbox(
+                "Estado",
+                options=ESTADOS_SOLICITUD,
+                index=ESTADOS_SOLICITUD.index(
+                    estado_actual
+                ),
+            )
+
+        with formulario_2:
+
+            observacion_logistica = st.text_area(
+                "Observación / respuesta",
+                value=str(
+                    solicitud.get(
+                        "Respuesta",
+                        "",
+                    )
+                ),
+                placeholder=(
+                    "Detalle de la revisión o acción "
+                    "realizada por Logística..."
+                ),
+                height=110,
+            )
+
+        guardar_estado_solicitud = (
+            st.form_submit_button(
+                "💾 Guardar actualización",
+                type="primary",
+                width="stretch",
+            )
+        )
+
+    if guardar_estado_solicitud:
+
+        usuario_logistica = (
+            st.session_state.get("usuario")
+            or st.session_state.get("nombre_usuario")
+            or "Logística"
+        )
+
+        try:
+
+            resultado_actualizacion = actualizar_solicitud(
+                solicitud_id=solicitud_id,
+                estado_solicitud=nuevo_estado_solicitud,
+                responsable=usuario_logistica,
+                respuesta=observacion_logistica,
+            )
+
+            st.success(
+                resultado_actualizacion["mensaje"]
+            )
+
+            st.toast(
+                "Solicitud actualizada.",
+                icon="✅",
+            )
+
+            st.rerun()
+
+        except Exception as error:
+
+            st.error(
+                "No se pudo actualizar la solicitud."
+            )
+
+            st.exception(error)
+
+
+if solicitudes_abiertas.empty:
+
+    st.success(
+        "No hay solicitudes comerciales pendientes.",
+        icon="✅",
+    )
+
+else:
+
+    total_solicitudes_abiertas = len(solicitudes_abiertas)
+    pedidos_con_solicitud = solicitudes_abiertas["Pedido"].nunique()
+
+    prioridad_alta = int(
+        solicitudes_abiertas["Prioridad"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .eq("ALTA")
+        .sum()
+    )
+
+    cantidad_cancelaciones = int(
+        solicitudes_abiertas["TipoSolicitud"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin({"CANCELACIÓN", "CANCELACION"})
+        .sum()
+    )
+
+    st.warning(
+        (
+            f"Hay {total_solicitudes_abiertas} solicitudes "
+            f"comerciales pendientes sobre "
+            f"{pedidos_con_solicitud} pedidos."
+        ),
+        icon="📩",
+    )
+
+    with st.expander(
+        (
+            f"📩 Solicitudes comerciales "
+            f"({total_solicitudes_abiertas})"
+        ),
+        expanded=False,
+    ):
+
+        (
+            resumen_col_1,
+            resumen_col_2,
+            resumen_col_3,
+            resumen_col_4,
+        ) = st.columns(4)
+
+        resumen_col_1.metric(
+            "Abiertas",
+            total_solicitudes_abiertas,
+        )
+
+        resumen_col_2.metric(
+            "Pedidos",
+            pedidos_con_solicitud,
+        )
+
+        resumen_col_3.metric(
+            "Prioridad alta",
+            prioridad_alta,
+        )
+
+        resumen_col_4.metric(
+            "Cancelaciones",
+            cantidad_cancelaciones,
+            help=(
+                "Solicitudes abiertas de Cancelación que "
+                "requieren revisión prioritaria."
+            ),
+        )
+
+        solicitudes_abiertas_ordenadas = (
+            solicitudes_abiertas
+            .assign(
+                EsCancelacion=(
+                    solicitudes_abiertas["TipoSolicitud"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .isin({"CANCELACIÓN", "CANCELACION"})
+                    .astype(int)
+                ),
+                EsPrioridadAlta=(
+                    solicitudes_abiertas["Prioridad"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .eq("ALTA")
+                    .astype(int)
+                ),
+            )
+            .sort_values(
+                by=[
+                    "EsCancelacion",
+                    "EsPrioridadAlta",
+                    "FechaSolicitudOrden",
+                ],
+                ascending=[False, False, False],
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+        tabla_solicitudes_visible = (
+            solicitudes_abiertas_ordenadas[
+                [
+                    "SolicitudID",
+                    "Pedido",
+                    "Cliente",
+                    "TipoSolicitud",
+                    "Prioridad",
+                    "TotalUnidades",
+                    "TotalM3",
+                    "Descripcion",
+                    "FechaSolicitudVisible",
+                    "EstadoSolicitud",
+                    "Responsable",
+                ]
+            ]
+            .rename(
+                columns={
+                    "SolicitudID": "ID",
+                    "TipoSolicitud": "Tipo",
+                    "Descripcion": "Detalle",
+                    "FechaSolicitudVisible": "Fecha",
+                    "EstadoSolicitud": "Estado",
+                }
+            )
+            .reset_index(drop=True)
+        )
+
+        evento_solicitudes = st.dataframe(
+            tabla_solicitudes_visible,
+            width="stretch",
+            hide_index=True,
+            height=min(
+                340,
+                85 + len(tabla_solicitudes_visible) * 35,
+            ),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tabla_solicitudes_comerciales",
+            column_config={
+                "ID": None,
+                "Pedido": st.column_config.TextColumn(
+                    "Pedido",
+                    width="small",
+                ),
+                "Cliente": st.column_config.TextColumn(
+                    "Cliente",
+                    width="medium",
+                ),
+                "Tipo": st.column_config.TextColumn(
+                    "Solicitud",
+                    width="medium",
+                ),
+                "Prioridad": st.column_config.TextColumn(
+                    "Prioridad",
+                    width="small",
+                ),
+                "Detalle": st.column_config.TextColumn(
+                    "Detalle",
+                    width="large",
+                ),
+                "Fecha": st.column_config.TextColumn(
+                    "Fecha",
+                    width="small",
+                ),
+                "Estado": st.column_config.TextColumn(
+                    "Estado",
+                    width="small",
+                ),
+                "Responsable": st.column_config.TextColumn(
+                    "Responsable",
+                    width="small",
+                ),
+            },
+        )
+
+        filas_seleccionadas = (
+            evento_solicitudes.selection.rows
+            if evento_solicitudes is not None
+            else []
+        )
+
+        accion_col_1, accion_col_2 = st.columns(
+            [4, 1],
+            vertical_alignment="center",
+        )
+
+        with accion_col_1:
+
+            if filas_seleccionadas:
+
+                fila_seleccionada = filas_seleccionadas[0]
+
+                solicitud_seleccionada = (
+                    tabla_solicitudes_visible.iloc[
+                        fila_seleccionada
+                    ]
+                )
+
+                st.caption(
+                    f"Seleccionada: pedido "
+                    f"**{solicitud_seleccionada['Pedido']}** · "
+                    f"{solicitud_seleccionada['Tipo']}"
+                )
+
+            else:
+
+                st.caption(
+                    "Seleccioná una fila para gestionar la solicitud."
+                )
+
+        with accion_col_2:
+
+            gestionar_solicitud = st.button(
+                "Gestionar",
+                icon="📩",
+                type="primary",
+                width="stretch",
+                disabled=not bool(filas_seleccionadas),
+                key="btn_gestionar_solicitud_seleccionada",
+            )
+
+        if gestionar_solicitud and filas_seleccionadas:
+
+            indice_seleccionado = filas_seleccionadas[0]
+
+            solicitud_id_seleccionada = str(
+                tabla_solicitudes_visible.iloc[
+                    indice_seleccionado
+                ]["ID"]
+            )
+
+            abrir_gestion_solicitud(
+                solicitud_id_seleccionada
+            )
+
 
 st.markdown("---")
 
@@ -734,158 +1641,6 @@ if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
 
 filtros_aplicados = st.session_state["filtros_pedidos"]
 
-
-# =====================================================
-# FORMULARIO DE FILTROS
-# No recarga hasta presionar Aplicar filtros
-# =====================================================
-
-st.subheader("🔎 Filtros")
-
-with st.form(
-    key="formulario_filtros_pedidos",
-    clear_on_submit=False
-):
-
-    filtro1, filtro2, filtro3, filtro4 = st.columns(4)
-
-    with filtro1:
-
-        estados_form = st.multiselect(
-            "Estado",
-            options=opciones_estado,
-            default=filtros_aplicados["estados"]
-        )
-
-    with filtro2:
-
-        preparaciones_form = st.multiselect(
-            "Estado preparación",
-            options=opciones_preparacion,
-            default=filtros_aplicados["preparaciones"]
-        )
-
-    with filtro3:
-
-        planificaciones_form = st.multiselect(
-            "Planificación",
-            options=opciones_planificacion,
-            default=filtros_aplicados["planificaciones"]
-        )
-
-    with filtro4:
-
-        despachos_form = st.multiselect(
-            "Despacho",
-            options=opciones_despacho,
-            default=filtros_aplicados["despachos"]
-        )
-
-    filtro5, filtro6 = st.columns([1, 2])
-
-    with filtro5:
-
-        if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
-
-            rango_fechas_form = st.date_input(
-                "Rango de fechas",
-                value=(
-                    filtros_aplicados["fecha_desde"],
-                    filtros_aplicados["fecha_hasta"]
-                ),
-                min_value=fecha_minima.date(),
-                max_value=fecha_maxima.date()
-            )
-
-        else:
-
-            rango_fechas_form = None
-
-    with filtro6:
-
-        busqueda_form = st.text_input(
-            "Buscar pedido o cliente",
-            value=filtros_aplicados["busqueda"],
-            placeholder=(
-                "Número de pedido, código "
-                "o nombre del cliente..."
-            )
-        )
-
-        boton1, boton2 = st.columns(2)
-
-        with boton1:
-
-            aplicar_filtros = st.form_submit_button(
-              "🔎 Aplicar filtros",
-             width="stretch",
-              type="primary"
-    )
-
-        with boton2:
-
-            quitar_filtros = st.form_submit_button(
-        "🧹 Quitar filtros",
-        width="stretch"
-        )
-
-
-
-# =====================================================
-# GUARDAR O QUITAR FILTROS
-# =====================================================
-
-if quitar_filtros:
-
-    st.session_state["filtros_pedidos"] = {
-        "estados": [],
-        "preparaciones": [],
-        "planificaciones": [],
-        "despachos": [],
-        "fecha_desde": (
-            fecha_minima.date()
-            if pd.notna(fecha_minima)
-            else None
-        ),
-        "fecha_hasta": (
-            fecha_maxima.date()
-            if pd.notna(fecha_maxima)
-            else None
-        ),
-        "busqueda": ""
-    }
-
-    st.rerun()
-
-
-if aplicar_filtros:
-
-    if (
-        rango_fechas_form
-        and len(rango_fechas_form) == 2
-    ):
-
-        fecha_desde_form = rango_fechas_form[0]
-        fecha_hasta_form = rango_fechas_form[1]
-
-    else:
-
-        fecha_desde_form = None
-        fecha_hasta_form = None
-
-    st.session_state["filtros_pedidos"] = {
-        "estados": estados_form,
-        "preparaciones": preparaciones_form,
-        "planificaciones": planificaciones_form,
-        "despachos": despachos_form,
-        "fecha_desde": fecha_desde_form,
-        "fecha_hasta": fecha_hasta_form,
-        "busqueda": busqueda_form.strip()
-    }
-
-    filtros_aplicados = st.session_state[
-        "filtros_pedidos"
-    ]
 
 # =====================================================
 # APLICAR LOS FILTROS GUARDADOS
@@ -1030,7 +1785,7 @@ with contenedor_kpis:
 
     st.subheader("📊 Resumen Operativo")
 
-    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
 
     with kpi1:
 
@@ -1065,6 +1820,14 @@ with contenedor_kpis:
         )
 
     with kpi5:
+
+        st.metric(
+            "📩 Solicitudes",
+            f"{len(solicitudes_abiertas):,}"
+            .replace(",", ".")
+        )
+
+    with kpi6:
 
         st.metric(
             "💰 Importe",
@@ -1428,6 +2191,24 @@ st.caption(
     "antigüedad y cliente completo."
 )
 
+if pedidos_bloqueados_gestion:
+
+    detalle_bloqueos = " · ".join(
+        f"{tipo}: {len(pedidos)}"
+        for tipo, pedidos in pedidos_por_tipo_gestion.items()
+        if pedidos
+    )
+
+    st.warning(
+        (
+            f"Hay {len(pedidos_bloqueados_gestion)} pedidos "
+            "bloqueados para planificación porque tienen una "
+            "gestión comercial abierta. "
+            f"{detalle_bloqueos}"
+        ),
+        icon="🔒",
+    )
+
 
 # =====================================================
 # FORMULARIO DE CONFIGURACIÓN
@@ -1469,7 +2250,8 @@ with st.form(
         planificaciones_camionetas = st.multiselect(
             "Planificaciones a procesar",
             options=opciones_planificacion_camionetas,
-            default=opciones_planificacion_camionetas
+            default=[],
+            placeholder="Seleccionar planificaciones..."
         )
 
     with col_plan3:
@@ -1492,7 +2274,32 @@ with st.form(
 
 if generar_planificacion:
 
+    if not planificaciones_camionetas:
+        st.warning(
+            "Seleccioná al menos una planificación para generar "
+            "la propuesta de camionetas."
+        )
+        st.stop()
+
     base_planificacion = tabla_filtrada.copy()
+
+    # Los pedidos con cualquier gestión comercial abierta
+    # requieren revisión y no pueden asignarse a camionetas.
+    if pedidos_bloqueados_gestion:
+
+        base_planificacion["Pedido"] = (
+            base_planificacion["Pedido"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+        base_planificacion = base_planificacion[
+            ~base_planificacion["Pedido"].isin(
+                pedidos_bloqueados_gestion
+            )
+        ].copy()
 
     if planificaciones_camionetas:
 
@@ -1511,6 +2318,16 @@ if generar_planificacion:
             .str.strip()
             .eq("")
         ].copy()
+
+    if base_planificacion.empty:
+
+        st.warning(
+            "No quedaron pedidos disponibles para planificar. "
+            "Todos los pedidos seleccionados tienen una gestión "
+            "comercial abierta o fueron excluidos por los filtros."
+        )
+
+        st.stop()
 
     resumen_clientes = (
         construir_resumen_clientes_planificacion(
@@ -2112,6 +2929,10 @@ if (
                 else ""
             )
 
+            usar_filtro_codigo_despacho = (
+                len(codigos_despacho) == 1
+            )
+
             despacho_digip = str(
                 fila_camioneta[
                     "DespachoDIGIP"
@@ -2300,13 +3121,19 @@ if (
                             "codigo_despacho": (
                                 codigo_despacho
                             ),
+                            "codigos_despacho": (
+                                codigos_despacho
+                            ),
+                            "usar_filtro_codigo_despacho": (
+                                usar_filtro_codigo_despacho
+                            ),
                             "despacho": despacho_digip,
                             "pedidos": lista_pedidos,
                             "identificador": (
                                 nombre_camioneta
                             ),
                         },
-                        headless=False,
+                        headless=True,
                         callback=actualizar_estado,
                     )
 
@@ -2385,6 +3212,163 @@ if (
 
 
 # =====================================================
+# FILTROS DE LA TABLA OPERATIVA
+# Se muestran después de la planificación de camionetas.
+# Los filtros guardados ya fueron aplicados previamente
+# para calcular los KPIs y la propuesta de planificación.
+# =====================================================
+
+st.markdown("---")
+
+st.subheader("🔎 Filtros de la Tabla Operativa")
+
+with st.form(
+    key="formulario_filtros_pedidos",
+    clear_on_submit=False
+):
+
+    filtro1, filtro2, filtro3, filtro4 = st.columns(4)
+
+    with filtro1:
+
+        estados_form = st.multiselect(
+            "Estado",
+            options=opciones_estado,
+            default=filtros_aplicados["estados"]
+        )
+
+    with filtro2:
+
+        preparaciones_form = st.multiselect(
+            "Estado preparación",
+            options=opciones_preparacion,
+            default=filtros_aplicados["preparaciones"]
+        )
+
+    with filtro3:
+
+        planificaciones_form = st.multiselect(
+            "Planificación",
+            options=opciones_planificacion,
+            default=filtros_aplicados["planificaciones"]
+        )
+
+    with filtro4:
+
+        despachos_form = st.multiselect(
+            "Despacho",
+            options=opciones_despacho,
+            default=filtros_aplicados["despachos"]
+        )
+
+    filtro5, filtro6 = st.columns([1, 2])
+
+    with filtro5:
+
+        if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
+
+            rango_fechas_form = st.date_input(
+                "Rango de fechas",
+                value=(
+                    filtros_aplicados["fecha_desde"],
+                    filtros_aplicados["fecha_hasta"]
+                ),
+                min_value=fecha_minima.date(),
+                max_value=fecha_maxima.date()
+            )
+
+        else:
+
+            rango_fechas_form = None
+
+    with filtro6:
+
+        busqueda_form = st.text_input(
+            "Buscar pedido o cliente",
+            value=filtros_aplicados["busqueda"],
+            placeholder=(
+                "Número de pedido, código "
+                "o nombre del cliente..."
+            )
+        )
+
+        boton1, boton2 = st.columns(2)
+
+        with boton1:
+
+            aplicar_filtros = st.form_submit_button(
+                "🔎 Aplicar filtros",
+                width="stretch",
+                type="primary"
+            )
+
+        with boton2:
+
+            quitar_filtros = st.form_submit_button(
+                "🧹 Quitar filtros",
+                width="stretch"
+            )
+
+
+# =====================================================
+# GUARDAR O QUITAR FILTROS
+# =====================================================
+
+if quitar_filtros:
+
+    st.session_state["filtros_pedidos"] = {
+        "estados": [],
+        "preparaciones": [],
+        "planificaciones": [],
+        "despachos": [],
+        "fecha_desde": (
+            fecha_minima.date()
+            if pd.notna(fecha_minima)
+            else None
+        ),
+        "fecha_hasta": (
+            fecha_maxima.date()
+            if pd.notna(fecha_maxima)
+            else None
+        ),
+        "busqueda": ""
+    }
+
+    st.rerun()
+
+
+if aplicar_filtros:
+
+    if (
+        rango_fechas_form
+        and len(rango_fechas_form) == 2
+    ):
+
+        fecha_desde_form = rango_fechas_form[0]
+        fecha_hasta_form = rango_fechas_form[1]
+
+    else:
+
+        fecha_desde_form = None
+        fecha_hasta_form = None
+
+    st.session_state["filtros_pedidos"] = {
+        "estados": estados_form,
+        "preparaciones": preparaciones_form,
+        "planificaciones": planificaciones_form,
+        "despachos": despachos_form,
+        "fecha_desde": fecha_desde_form,
+        "fecha_hasta": fecha_hasta_form,
+        "busqueda": busqueda_form.strip()
+    }
+
+    # La planificación y la tabla fueron calculadas antes de
+    # renderizar este formulario. Se relanza la página para que
+    # ambos bloques utilicen inmediatamente los nuevos filtros.
+    st.rerun()
+
+
+# =====================================================
 # DESCARGA
 # =====================================================
 
@@ -2430,6 +3414,15 @@ st.dataframe(
         "Fecha": st.column_config.DateColumn(
             "Fecha",
             format="DD/MM/YYYY"
+        ),
+
+        "FechaTransmisionERP": st.column_config.DateColumn(
+            "Fecha transmisión",
+            format="DD/MM/YYYY"
+        ),
+
+        "HoraTransmisionERP": st.column_config.TextColumn(
+            "Hora transmisión"
         ),
 
         "TotalUnidades": st.column_config.NumberColumn(

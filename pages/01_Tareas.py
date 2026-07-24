@@ -172,7 +172,7 @@ def modulo_tareas():
 
     df_clientes, clientes_actualizados, mensaje = cargar_archivo_seguro(
         nombre="Maestro Clientes",
-        cache=True,
+        cache=False,
         clave_session="clientes_ultimo_valido",
     )
 

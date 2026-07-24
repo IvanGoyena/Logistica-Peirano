@@ -185,6 +185,13 @@ pagina_auditoria = st.Page(
 )
 
 
+pagina_consultas = st.Page(
+    "pages/08_Consultas.py",
+    title="Consultas Comerciales",
+    icon="💬",
+)
+
+
 # ==========================================================
 # MENÚ SEGÚN ROL
 # ==========================================================
@@ -204,6 +211,10 @@ if tiene_rol("admin"):
         pagina_pedidos,
         pagina_despachos,
         pagina_stock,
+    ]
+
+    paginas["Comercial"] = [
+        pagina_consultas,
     ]
 
     paginas["Análisis"] = [
@@ -226,6 +237,10 @@ elif tiene_rol("gerencia"):
         pagina_stock,
     ]
 
+    paginas["Comercial"] = [
+        pagina_consultas,
+    ]
+
     paginas["Análisis"] = [
         pagina_metricas,
     ]
@@ -240,6 +255,10 @@ elif tiene_rol("logistica"):
         pagina_stock,
     ]
 
+    paginas["Comercial"] = [
+        pagina_consultas,
+    ]
+
     paginas["Configuración"] = [
         pagina_maestros,
     ]
@@ -252,6 +271,18 @@ elif tiene_rol("supervisor"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
+    ]
+
+    paginas["Comercial"] = [
+        pagina_consultas,
+    ]
+
+
+# COMERCIAL
+elif tiene_rol("comercial"):
+
+    paginas["Comercial"] = [
+        pagina_consultas,
     ]
 
 

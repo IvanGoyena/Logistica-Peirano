@@ -60,6 +60,10 @@ class Agrupacion:
     despacho: str
     pedidos: list[str]
     identificador: str = ""
+    codigos_despacho: list[str] = field(
+        default_factory=list
+    )
+    usar_filtro_codigo_despacho: bool = True
 
     def validar(self) -> None:
         self.codigo_despacho = str(
@@ -77,6 +81,26 @@ class Agrupacion:
         self.identificador = str(
             self.identificador
         ).strip()
+
+        self.codigos_despacho = list(
+            dict.fromkeys(
+                str(codigo).strip()
+                for codigo in self.codigos_despacho
+                if str(codigo).strip()
+            )
+        )
+
+        self.usar_filtro_codigo_despacho = bool(
+            self.usar_filtro_codigo_despacho
+        )
+
+        if (
+            not self.codigos_despacho
+            and self.codigo_despacho
+        ):
+            self.codigos_despacho = [
+                self.codigo_despacho
+            ]
 
         if not self.codigo_despacho:
             raise ValueError(
@@ -234,6 +258,18 @@ def crear_agrupacion(
                 "identificador",
                 "",
             ),
+            codigos_despacho=list(
+                agrupacion.get(
+                    "codigos_despacho",
+                    [],
+                )
+            ),
+            usar_filtro_codigo_despacho=bool(
+                agrupacion.get(
+                    "usar_filtro_codigo_despacho",
+                    True,
+                )
+            ),
         )
 
     else:
@@ -245,6 +281,53 @@ def crear_agrupacion(
     resultado.validar()
 
     return resultado
+
+
+# ==========================================================
+# FILTRO DE CÓDIGO DE DESPACHO
+# ==========================================================
+
+def limpiar_filtro_codigo_despacho(
+    page,
+) -> None:
+    """
+    Limpia el filtro CodigoDespacho antes de seleccionar pedidos.
+
+    Se utiliza cuando una misma camioneta contiene pedidos de
+    más de un código de despacho. El filtro se limpia una sola
+    vez, antes de marcar cualquier pedido, para que DIGIP muestre
+    la grilla completa y no pierda selecciones.
+    """
+
+    encabezado = page.get_by_text(
+        "CodigoDespacho",
+        exact=True,
+    ).first
+
+    encabezado.wait_for(
+        state="visible",
+        timeout=30_000,
+    )
+
+    input_codigo = (
+        page.locator("thead tr")
+        .nth(1)
+        .locator("input")
+        .nth(6)
+    )
+
+    input_codigo.wait_for(
+        state="visible",
+        timeout=30_000,
+    )
+
+    input_codigo.click()
+    input_codigo.press("Control+A")
+    input_codigo.press("Backspace")
+    input_codigo.fill("")
+
+    # Espera a que la tabla vuelva a mostrar todos los pedidos.
+    page.wait_for_timeout(3_000)
 
 
 # ==========================================================
@@ -293,6 +376,23 @@ def ejecutar_agrupacion_en_pagina(
                 agrupacion.codigo_despacho
             ),
         )
+
+        if not agrupacion.usar_filtro_codigo_despacho:
+
+            emitir_estado(
+                callback,
+                "navegacion",
+                (
+                    f"{agrupacion.identificador}: "
+                    "la camioneta contiene varios códigos "
+                    "de despacho; se buscarán los pedidos "
+                    "por número sin filtrar la grilla."
+                ),
+            )
+
+            limpiar_filtro_codigo_despacho(
+                page=page
+            )
 
         resultado.etapa = "seleccion_pedidos"
 

@@ -206,7 +206,7 @@ df_articulos = leer_archivo(
 df_clientes = leer_archivo(
     CARPETA_DATOS,
     "Maestro Clientes",
-    cache=True
+    cache=False
 )
 
 df_expresos = leer_archivo(
