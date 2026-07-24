@@ -31,8 +31,9 @@ from utils.gestion_urgencias_digip import (
     marcar_lote_error,
 )
 
-from Automatizacion.ejecutar_agrupaciones import (
-    ejecutar_agrupaciones,
+from utils.cola_agrupaciones import (
+    crear_orden_agrupacion,
+    obtener_orden,
 )
 
 from models.pedidos import construir_tabla_pedidos
@@ -987,20 +988,21 @@ puede_ejecutar_urgencias = (
 )
 
 
-def construir_agrupaciones_urgentes(
+def construir_orden_urgentes(
     pedidos_urgentes: list[str],
     tabla_pedidos: pd.DataFrame,
-) -> tuple[list[dict], list[str]]:
+) -> tuple[dict | None, list[str]]:
     """
-    Separa los pedidos urgentes por Código de Despacho.
+    Prepara una única orden para el worker.
 
-    DIGIP utiliza el código para filtrar los pedidos antes de
-    seleccionarlos. Todas las agrupaciones tienen como destino
-    final el despacho URGENTES.
+    Si existen varios códigos de despacho, el worker abre una sola
+    preparación URGENTES, limpia el filtro de código y selecciona
+    todos los pedidos por número. Así se evita crear varias
+    preparaciones internas para el mismo destino.
     """
 
     if not pedidos_urgentes:
-        return [], []
+        return None, []
 
     columnas_requeridas = {
         "Pedido",
@@ -1016,7 +1018,7 @@ def construir_agrupaciones_urgentes(
         )
 
         raise ValueError(
-            "No se pueden preparar las urgencias. "
+            "No se puede preparar la urgencia. "
             f"Faltan columnas: {faltantes}"
         )
 
@@ -1045,10 +1047,18 @@ def construir_agrupaciones_urgentes(
         .str.replace(r"\.0$", "", regex=True)
     )
 
+    pedidos_normalizados = list(
+        dict.fromkeys(
+            str(pedido).strip()
+            for pedido in pedidos_urgentes
+            if str(pedido).strip()
+        )
+    )
+
     tabla_base = (
         tabla_base[
             tabla_base["Pedido"].isin(
-                pedidos_urgentes
+                pedidos_normalizados
             )
         ]
         .drop_duplicates(
@@ -1058,74 +1068,72 @@ def construir_agrupaciones_urgentes(
         .copy()
     )
 
-    pedidos_sin_codigo = (
-        tabla_base.loc[
-            tabla_base["CodigoDespacho"].eq(""),
-            "Pedido",
-        ]
-        .astype(str)
-        .tolist()
-    )
-
     pedidos_encontrados = set(
         tabla_base["Pedido"].tolist()
     )
 
-    pedidos_no_encontrados = [
+    pedidos_sin_codigo = set(
+        tabla_base.loc[
+            tabla_base["CodigoDespacho"].eq(""),
+            "Pedido",
+        ].tolist()
+    )
+
+    pedidos_no_encontrados = {
         pedido
-        for pedido in pedidos_urgentes
+        for pedido in pedidos_normalizados
         if pedido not in pedidos_encontrados
-    ]
+    }
 
     pedidos_con_error = sorted(
-        set(
-            pedidos_sin_codigo
-            + pedidos_no_encontrados
-        )
+        pedidos_sin_codigo
+        | pedidos_no_encontrados
     )
 
     tabla_valida = tabla_base[
         tabla_base["CodigoDespacho"].ne("")
     ].copy()
 
-    agrupaciones = []
+    pedidos_validos = (
+        tabla_valida["Pedido"]
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
 
-    for codigo_despacho, bloque in (
-        tabla_valida.groupby(
-            "CodigoDespacho",
-            sort=True,
-        )
-    ):
-        pedidos_grupo = (
-            bloque["Pedido"]
-            .astype(str)
-            .drop_duplicates()
-            .tolist()
-        )
+    codigos_despacho = (
+        tabla_valida["CodigoDespacho"]
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
 
-        agrupaciones.append(
-            {
-                "codigo_despacho": codigo_despacho,
-                "despacho": "URGENTES",
-                "pedidos": pedidos_grupo,
-                "identificador": (
-                    f"URGENTES - {codigo_despacho}"
-                ),
-            }
-        )
+    if not pedidos_validos or not codigos_despacho:
+        return None, pedidos_con_error
 
-    return agrupaciones, pedidos_con_error
+    orden = {
+        "codigo_despacho": codigos_despacho[0],
+        "codigos_despacho": codigos_despacho,
+        "usar_filtro_codigo_despacho": (
+            len(codigos_despacho) == 1
+        ),
+        "despacho": "URGENTES",
+        "pedidos": pedidos_validos,
+        "identificador": "URGENTES",
+    }
+
+    return orden, pedidos_con_error
 
 
-agrupaciones_urgentes = []
+orden_urgentes = None
 pedidos_urgentes_sin_codigo = []
 
 if pedidos_urgentes_digip:
     try:
         (
-            agrupaciones_urgentes,
+            orden_urgentes,
             pedidos_urgentes_sin_codigo,
-        ) = construir_agrupaciones_urgentes(
+        ) = construir_orden_urgentes(
             pedidos_urgentes=pedidos_urgentes_digip,
             tabla_pedidos=tabla_operativa,
         )
@@ -1161,12 +1169,23 @@ with urg_col_2:
             )
         )
 
-        st.caption(
-            f"Se ejecutarán "
-            f"{len(agrupaciones_urgentes)} "
-            f"agrupaciones internas por código, "
-            "todas con destino **URGENTES**."
-        )
+        if orden_urgentes:
+            cantidad_codigos = len(
+                orden_urgentes["codigos_despacho"]
+            )
+
+            if cantidad_codigos == 1:
+                st.caption(
+                    "Se enviará una orden al worker con destino "
+                    "**URGENTES**, filtrando por un código de despacho."
+                )
+            else:
+                st.caption(
+                    f"Se enviará una única orden al worker con "
+                    f"{cantidad_codigos} códigos de despacho. "
+                    "DIGIP buscará los pedidos por número sin "
+                    "filtrar la grilla."
+                )
 
     else:
         st.caption(
@@ -1179,7 +1198,7 @@ with urg_col_3:
         type="primary",
         use_container_width=True,
         disabled=(
-            not agrupaciones_urgentes
+            orden_urgentes is None
             or not puede_ejecutar_urgencias
         ),
         key="btn_abrir_urgentes_digip",
@@ -1216,33 +1235,31 @@ if st.session_state.get(
     with st.container(border=True):
         st.warning(
             f"Se procesarán "
-            f"{sum(len(item['pedidos']) for item in agrupaciones_urgentes)} "
+            f"{len(orden_urgentes['pedidos']) if orden_urgentes else 0} "
             "pedidos con destino URGENTES."
         )
 
-        resumen_confirmacion = pd.DataFrame(
-            [
+        if orden_urgentes:
+            resumen_confirmacion = pd.DataFrame([
                 {
-                    "Código despacho": item[
-                        "codigo_despacho"
-                    ],
-                    "Destino": item["despacho"],
+                    "Destino": orden_urgentes["despacho"],
+                    "Códigos despacho": " | ".join(
+                        orden_urgentes["codigos_despacho"]
+                    ),
                     "Cantidad pedidos": len(
-                        item["pedidos"]
+                        orden_urgentes["pedidos"]
                     ),
                     "Pedidos": " | ".join(
-                        item["pedidos"]
+                        orden_urgentes["pedidos"]
                     ),
                 }
-                for item in agrupaciones_urgentes
-            ]
-        )
+            ])
 
-        st.dataframe(
-            resumen_confirmacion,
-            use_container_width=True,
-            hide_index=True,
-        )
+            st.dataframe(
+                resumen_confirmacion,
+                use_container_width=True,
+                hide_index=True,
+            )
 
         confirmar_col, cancelar_col = st.columns(2)
 
@@ -1266,130 +1283,52 @@ if st.session_state.get(
             "confirmar_agrupacion_urgentes"
         ] = False
 
-        st.rerun()
+    elif confirmar_ejecucion_urgentes and orden_urgentes:
+        pedidos_a_procesar = orden_urgentes["pedidos"]
 
-    if confirmar_ejecucion_urgentes:
-        pedidos_a_procesar = [
-            pedido
-            for agrupacion in agrupaciones_urgentes
-            for pedido in agrupacion["pedidos"]
-        ]
-
-        marcar_lote_procesando(
-            pedidos_a_procesar
+        usuario_solicitud = (
+            st.session_state.get("usuario")
+            or st.session_state.get("nombre_usuario")
+            or "Usuario app"
         )
 
-        contenedor_estado = st.empty()
-        registro_estados: list[str] = []
-
-        def mostrar_estado(
-            etapa: str,
-            mensaje: str,
-        ) -> None:
-            registro_estados.append(
-                f"{etapa.upper()}: {mensaje}"
-            )
-
-            contenedor_estado.info(
-                registro_estados[-1]
-            )
-
         try:
-            with st.spinner(
-                "Ejecutando agrupaciones urgentes en DIGIP..."
-            ):
-                resultado_ejecucion = ejecutar_agrupaciones(
-                    agrupaciones=agrupaciones_urgentes,
-                    headless=True,
-                    detener_ante_error=True,
-                    callback=mostrar_estado,
-                )
-
-            pedidos_exitosos = []
-            pedidos_con_error = []
-            mensajes_error = []
-
-            for resultado_agrupacion in (
-                resultado_ejecucion.resultados
-            ):
-                if resultado_agrupacion.exito:
-                    pedidos_exitosos.extend(
-                        resultado_agrupacion
-                        .pedidos_seleccionados
-                    )
-                else:
-                    pedidos_con_error.extend(
-                        resultado_agrupacion
-                        .pedidos_solicitados
-                    )
-
-                    mensajes_error.append(
-                        f"{resultado_agrupacion.identificador}: "
-                        f"{resultado_agrupacion.mensaje}"
-                    )
-
-            pedidos_exitosos = sorted(
-                set(pedidos_exitosos)
+            marcar_lote_procesando(
+                pedidos_a_procesar
             )
 
-            pedidos_con_error = sorted(
-                set(pedidos_con_error)
-                - set(pedidos_exitosos)
+            orden_id = crear_orden_agrupacion(
+                camioneta="URGENTES",
+                codigo_despacho=(
+                    orden_urgentes["codigo_despacho"]
+                ),
+                codigos_despacho=(
+                    orden_urgentes["codigos_despacho"]
+                ),
+                usar_filtro_codigo_despacho=(
+                    orden_urgentes[
+                        "usar_filtro_codigo_despacho"
+                    ]
+                ),
+                pedidos=pedidos_a_procesar,
+                usuario=usuario_solicitud,
             )
 
-            pedidos_no_procesados = sorted(
-                set(pedidos_a_procesar)
-                - set(pedidos_exitosos)
-                - set(pedidos_con_error)
-            )
+            st.session_state[
+                "orden_worker_urgentes"
+            ] = orden_id
 
-            pedidos_con_error = sorted(
-                set(
-                    pedidos_con_error
-                    + pedidos_no_procesados
-                )
-            )
-
-            if pedidos_exitosos:
-                marcar_lote_exitoso(
-                    pedidos_exitosos,
-                    mensaje=(
-                        "Pedidos agrupados correctamente "
-                        "en el despacho URGENTES."
-                    ),
-                )
-
-            if pedidos_con_error:
-                mensaje_error = (
-                    " | ".join(mensajes_error)
-                    or (
-                        "La ejecución se detuvo antes de "
-                        "procesar estos pedidos."
-                    )
-                )
-
-                marcar_lote_error(
-                    pedidos_con_error,
-                    mensaje=mensaje_error,
-                )
+            st.session_state[
+                "pedidos_orden_worker_urgentes"
+            ] = pedidos_a_procesar
 
             st.session_state[
                 "confirmar_agrupacion_urgentes"
             ] = False
 
-            if pedidos_exitosos:
-                st.success(
-                    f"{len(pedidos_exitosos)} pedidos "
-                    "fueron agrupados en URGENTES."
-                )
-
-            if pedidos_con_error:
-                st.error(
-                    f"{len(pedidos_con_error)} pedidos "
-                    "quedaron pendientes por error."
-                )
-
-            st.rerun()
+            st.success(
+                f"Orden {orden_id} enviada al worker de la PC."
+            )
 
         except Exception as error:
             marcar_lote_error(
@@ -1402,12 +1341,115 @@ if st.session_state.get(
             ] = False
 
             st.error(
-                "No se pudo completar la agrupación "
-                "de urgencias en DIGIP."
+                "No se pudo enviar la agrupación de urgencias "
+                "al worker."
             )
 
             st.exception(error)
 
+
+orden_worker_urgentes = st.session_state.get(
+    "orden_worker_urgentes",
+    "",
+)
+
+if orden_worker_urgentes:
+    orden_actual = obtener_orden(
+        orden_worker_urgentes
+    )
+
+    if orden_actual:
+        estado_orden = str(
+            orden_actual.get("Estado", "")
+        ).strip().upper()
+
+        etapa_orden = str(
+            orden_actual.get("Etapa", "")
+        ).strip()
+
+        mensaje_orden = str(
+            orden_actual.get("Mensaje", "")
+        ).strip()
+
+        pedidos_orden = st.session_state.get(
+            "pedidos_orden_worker_urgentes",
+            [],
+        )
+
+        if estado_orden == "COMPLETADA":
+            clave_aplicada = (
+                "resultado_worker_urgentes_aplicado"
+            )
+
+            if (
+                st.session_state.get(clave_aplicada)
+                != orden_worker_urgentes
+            ):
+                marcar_lote_exitoso(
+                    pedidos_orden,
+                    mensaje=(
+                        "Pedidos agrupados correctamente "
+                        "en el despacho URGENTES."
+                    ),
+                )
+
+                st.session_state[
+                    clave_aplicada
+                ] = orden_worker_urgentes
+
+            st.success(
+                f"✅ {len(pedidos_orden)} pedidos fueron "
+                "agrupados correctamente en URGENTES."
+            )
+
+        elif estado_orden == "ERROR":
+            clave_aplicada = (
+                "resultado_worker_urgentes_aplicado"
+            )
+
+            if (
+                st.session_state.get(clave_aplicada)
+                != orden_worker_urgentes
+            ):
+                marcar_lote_error(
+                    pedidos_orden,
+                    mensaje=mensaje_orden,
+                )
+
+                st.session_state[
+                    clave_aplicada
+                ] = orden_worker_urgentes
+
+            st.error(
+                "La agrupación URGENTES terminó con error: "
+                f"{mensaje_orden}"
+            )
+
+        elif estado_orden == "EN_PROCESO":
+            st.info(
+                f"⚙️ Worker ejecutando URGENTES — "
+                f"{etapa_orden}: {mensaje_orden}"
+            )
+
+        else:
+            st.warning(
+                "🕒 La orden URGENTES está pendiente de ser "
+                "tomada por el worker."
+            )
+
+        if estado_orden not in {
+            "COMPLETADA",
+            "ERROR",
+            "CANCELADA",
+        }:
+            st.button(
+                "🔄 Consultar estado del worker",
+                key="btn_consultar_worker_urgentes",
+                help=(
+                    "Actualiza únicamente cuando necesitás "
+                    "consultar el avance."
+                ),
+            )
 
 st.markdown("---")
 st.markdown("### 📩 Solicitudes pendientes")
