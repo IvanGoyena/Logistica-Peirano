@@ -5,6 +5,12 @@ from __future__ import annotations
 import mimetypes
 import uuid
 
+from config import RESPONSABLES
+
+from utils.mail import (
+    enviar_mail,
+)
+
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +21,9 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from utils.google_sheets import (
     agregar_registro,
+    actualizar_registro,
     crear_servicio_drive_escritura,
+    leer_hoja,
 )
 
 
@@ -827,17 +835,20 @@ def guardar_reclamo_entrega(
     )
 
 
-    descripcion_reclamo = (
-        f"Remito: {remito}\n"
-        f"{observaciones_limpias}"
+    cliente_visible = " - ".join(
+        parte
+        for parte in [
+            codigo_cliente,
+            descripcion_cliente,
+        ]
+        if parte
     )
 
     cabecera = {
         "ReclamoID": reclamo_id,
         "Pedido": pedido,
-        "NumeroRemito": remito,
-        "ClienteCodigo": codigo_cliente,
-        "ClienteDescripcion": descripcion_cliente,
+        "Remito": remito,
+        "Cliente": cliente_visible,
         "FechaReclamo": (
             _limpiar_texto(fecha_reclamo)
             or fecha_actual
@@ -880,6 +891,102 @@ def guardar_reclamo_entrega(
         )
     )
 
+    # ======================================================
+    # ENVÍO DE CORREO
+    # ======================================================
+
+    configuracion_mail = RESPONSABLES.get(
+    responsable_limpio,
+    {},
+)
+
+    destinatarios_mail = configuracion_mail.get(
+    "to",
+    [],
+)
+
+    copias_mail = configuracion_mail.get(
+    "cc",
+    [],
+)
+
+    mail_enviado = False
+    error_mail = ""
+
+    if destinatarios_mail:
+
+        links_fotos = ""
+
+        if fotos_guardadas:
+
+            items_fotos = "".join(
+                (
+                    "<li>"
+                    f"<a href=\"{foto.get('URLArchivo', '')}\">"
+                    f"{foto.get('NombreArchivo', 'Ver fotografía')}"
+                    "</a>"
+                    "</li>"
+                )
+                for foto in fotos_guardadas
+                if foto.get("URLArchivo")
+            )
+
+            if items_fotos:
+                links_fotos = (
+                    "<h3>Fotografías</h3>"
+                    f"<ul>{items_fotos}</ul>"
+                )
+
+        asunto_mail = (
+            f"Nuevo reclamo | Pedido {pedido} | "
+            f"{cliente_visible}"
+        )
+
+        cuerpo_html = f"""
+        <div style="font-family:Arial,sans-serif;line-height:1.5;">
+            <h2>Nuevo reclamo registrado</h2>
+
+            <p>
+                Se registró un nuevo reclamo desde el
+                Sistema Logístico Peirano.
+            </p>
+
+            <hr>
+
+            <p><strong>ID:</strong> {reclamo_id}</p>
+            <p><strong>Pedido:</strong> {pedido}</p>
+            <p><strong>Remito:</strong> {remito}</p>
+            <p><strong>Cliente:</strong> {cliente_visible}</p>
+            <p><strong>Incidencia:</strong> {incidencia_limpia}</p>
+            <p><strong>Responsable:</strong> {responsable_limpio}</p>
+            <p><strong>Estado:</strong> {estado_limpio}</p>
+            <p><strong>Registrado por:</strong> {usuario_limpio}</p>
+            <p><strong>Fecha:</strong> {fecha_actual}</p>
+
+            <hr>
+
+            <h3>Descripción</h3>
+            <p>{observaciones_limpias}</p>
+
+            {links_fotos}
+        </div>
+        """
+
+        try:
+
+            enviar_mail(
+                destinatario=destinatarios_mail,
+                copia=copias_mail,
+                asunto=asunto_mail,
+                cuerpo_html=cuerpo_html,
+            )
+
+            mail_enviado = True
+
+        except Exception as error:
+
+            error_mail = str(error)
+
     return {
         "ok": True,
         "reclamo_id": reclamo_id,
@@ -891,8 +998,118 @@ def guardar_reclamo_entrega(
         "cantidad_fotos": len(
             fotos_guardadas
         ),
+        "mail_enviado": mail_enviado,
+        "error_mail": error_mail,
+        "destinatario_mail": destinatarios_mail,
         "mensaje": (
             f"Reclamo {reclamo_id} "
             "registrado correctamente."
         ),
+    }
+
+
+# ==========================================================
+# ACTUALIZACIÓN DE RECLAMOS
+# ==========================================================
+
+def actualizar_reclamo(
+    reclamo_id: Any,
+    estado_reclamo: Any,
+    resolucion: Any,
+    responsable: Any,
+) -> dict[str, Any]:
+    """
+    Actualiza el estado, la resolución y el responsable de un
+    reclamo existente.
+
+    Los estados Resuelto y Rechazado completan FechaCierre.
+    Los demás estados mantienen el reclamo abierto.
+    """
+
+    reclamo_id_limpio = _limpiar_texto(reclamo_id)
+
+    if not reclamo_id_limpio:
+        raise ValueError(
+            "El identificador del reclamo es obligatorio."
+        )
+
+    estados_validos = {
+        "PENDIENTE": "Pendiente",
+        "EN REVISIÓN": "En revisión",
+        "EN REVISION": "En revisión",
+        "EN GESTIÓN": "En gestión",
+        "EN GESTION": "En gestión",
+        "RESUELTO": "Resuelto",
+        "RECHAZADO": "Rechazado",
+    }
+
+    estado_normalizado = _limpiar_texto(
+        estado_reclamo
+    ).upper()
+
+    if estado_normalizado not in estados_validos:
+        raise ValueError(
+            "Estado de reclamo no válido. Utilizá Pendiente, "
+            "En revisión, En gestión, Resuelto o Rechazado."
+        )
+
+    reclamos = leer_hoja("Reclamos")
+
+    if reclamos is None or reclamos.empty:
+        raise ValueError(
+            "La hoja Reclamos no contiene registros."
+        )
+
+    if "ReclamoID" not in reclamos.columns:
+        raise ValueError(
+            "La hoja Reclamos no contiene la columna ReclamoID."
+        )
+
+    coincidencias = reclamos[
+        reclamos["ReclamoID"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .eq(reclamo_id_limpio)
+    ]
+
+    if coincidencias.empty:
+        raise ValueError(
+            f"No se encontró el reclamo {reclamo_id_limpio}."
+        )
+
+    estado_final = estados_validos[estado_normalizado]
+    resolucion_limpia = _limpiar_texto(resolucion)
+    responsable_limpio = (
+        _limpiar_texto(responsable)
+        or "Logistica"
+    )
+
+    if estado_final in {"Resuelto", "Rechazado"}:
+        if not resolucion_limpia:
+            raise ValueError(
+                "Para cerrar o rechazar un reclamo debe cargar "
+                "una resolución o respuesta."
+            )
+        fecha_cierre = _ahora()
+    else:
+        fecha_cierre = ""
+
+    actualizar_registro(
+        nombre_hoja="Reclamos",
+        columna_id="ReclamoID",
+        valor_id=reclamo_id_limpio,
+        cambios={
+            "EstadoReclamo": estado_final,
+            "Resolucion": resolucion_limpia,
+            "Responsable": responsable_limpio,
+            "FechaCierre": fecha_cierre,
+        },
+    )
+
+    return {
+        "ok": True,
+        "id": reclamo_id_limpio,
+        "estado": estado_final,
+        "mensaje": "Reclamo actualizado correctamente.",
     }

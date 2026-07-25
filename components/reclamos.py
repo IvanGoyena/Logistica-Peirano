@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 import pandas as pd
 import streamlit as st
+
+logger = logging.getLogger(__name__)
+
 
 from utils.gestion_reclamos import (
     guardar_reclamo_entrega,
@@ -358,11 +362,12 @@ def abrir_carga_reclamo(
                 index=0,
             )
 
-        responsable = st.text_input(
+        responsable = "Logistica"
+
+        st.text_input(
             "Responsable",
-            placeholder=(
-                "Persona asignada para gestionar el caso..."
-            ),
+            value=responsable,
+            disabled=True,
         )
 
         observaciones = st.text_area(
@@ -566,11 +571,14 @@ def abrir_carga_reclamo(
             icon="🧾",
         )
 
-    except Exception as error:
-        st.error(
-            "No se pudo registrar el reclamo."
+    except Exception:
+        logger.exception(
+            "Error al registrar un reclamo comercial."
         )
-        st.exception(error)
+        st.error(
+            "No se pudo registrar el reclamo. "
+            "Revisá los datos e intentá nuevamente."
+        )
 
 
 def mostrar_boton_carga_reclamo(

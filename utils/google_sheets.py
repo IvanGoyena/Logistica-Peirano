@@ -66,9 +66,8 @@ COLUMNAS_URGENCIAS = [
 COLUMNAS_RECLAMOS = [
     "ReclamoID",
     "Pedido",
-    "NumeroRemito",
-    "ClienteCodigo",
-    "ClienteDescripcion",
+    "Remito",
+    "Cliente",
     "FechaReclamo",
     "TipoReclamo",
     "Descripcion",
@@ -79,7 +78,6 @@ COLUMNAS_RECLAMOS = [
     "FechaCreacion",
     "FechaCierre",
 ]
-
 
 COLUMNAS_RECLAMOS_DETALLE = [
     "ReclamoDetalleID",

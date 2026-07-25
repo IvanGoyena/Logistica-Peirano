@@ -20,11 +20,17 @@ from utils.leer_gestion_consultas import (
     obtener_urgencias_activas,
     obtener_anulaciones_pendientes,
     obtener_reclamos_abiertos,
+    leer_reclamos_detalle,
+    leer_reclamos_fotos,
 )
 
 from utils.gestion_consultas import (
     actualizar_solicitud,
     finalizar_solicitud_automaticamente,
+)
+
+from utils.gestion_reclamos import (
+    actualizar_reclamo,
 )
 
 from models.detalle import (
@@ -283,6 +289,12 @@ def normalizar_pedido_gestion(valor: object) -> str:
     return texto
 
 
+reclamos_abiertos = obtener_reclamos_abiertos()
+
+if reclamos_abiertos is None:
+    reclamos_abiertos = pd.DataFrame()
+
+
 def obtener_pedidos_con_gestion_abierta() -> tuple[
     set[str],
     dict[str, set[str]],
@@ -302,7 +314,7 @@ def obtener_pedidos_con_gestion_abierta() -> tuple[
         "Solicitud": obtener_solicitudes_abiertas(),
         "Urgencia": obtener_urgencias_activas(),
         "Anulación": obtener_anulaciones_pendientes(),
-        "Reclamo": obtener_reclamos_abiertos(),
+        "Reclamo": reclamos_abiertos,
     }
 
     pedidos_por_gestion: dict[str, set[str]] = {}
@@ -1024,6 +1036,352 @@ ESTADOS_SOLICITUD = [
     "En curso",
     "Finalizada",
 ]
+
+
+# =====================================================
+# RECLAMOS PENDIENTES
+# =====================================================
+
+ESTADOS_RECLAMO_GESTION = [
+    "Pendiente",
+    "En revisión",
+    "En gestión",
+    "Resuelto",
+    "Rechazado",
+]
+
+
+@st.dialog(
+    "🧾 Gestionar reclamos",
+    width="large",
+)
+def abrir_reclamos_pendientes() -> None:
+    """
+    Permite consultar y gestionar los reclamos abiertos sin
+    ocupar espacio permanente en la página de Pedidos.
+    """
+
+    reclamos_actuales = obtener_reclamos_abiertos()
+
+    if reclamos_actuales is None or reclamos_actuales.empty:
+        st.success(
+            "No hay reclamos pendientes de revisión.",
+            icon="✅",
+        )
+        return
+
+    tabla_reclamos = reclamos_actuales.copy()
+
+    columnas_reclamos = [
+        "ReclamoID",
+        "Pedido",
+        "Remito",
+        "Cliente",
+        "FechaReclamo",
+        "TipoReclamo",
+        "Descripcion",
+        "Responsable",
+        "EstadoReclamo",
+        "Resolucion",
+        "UsuarioCreador",
+        "FechaCreacion",
+        "FechaCierre",
+    ]
+
+    for columna in columnas_reclamos:
+        if columna not in tabla_reclamos.columns:
+            tabla_reclamos[columna] = ""
+
+    tabla_reclamos["FechaCreacionOrden"] = pd.to_datetime(
+        tabla_reclamos["FechaCreacion"],
+        errors="coerce",
+    )
+
+    tabla_reclamos["FechaCreacionVisible"] = (
+        tabla_reclamos["FechaCreacionOrden"]
+        .dt.strftime("%d/%m/%Y %H:%M")
+        .fillna(
+            tabla_reclamos["FechaCreacion"]
+            .fillna("")
+            .astype(str)
+        )
+    )
+
+    tabla_reclamos = (
+        tabla_reclamos
+        .sort_values(
+            by="FechaCreacionOrden",
+            ascending=False,
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    total_reclamos = len(tabla_reclamos)
+    pedidos_afectados = tabla_reclamos["Pedido"].nunique()
+
+    resumen_1, resumen_2 = st.columns(2)
+    resumen_1.metric("Reclamos abiertos", total_reclamos)
+    resumen_2.metric("Pedidos involucrados", pedidos_afectados)
+
+    opciones_reclamo = {}
+
+    for _, fila in tabla_reclamos.iterrows():
+        reclamo_id = str(fila.get("ReclamoID", "")).strip()
+        pedido = str(fila.get("Pedido", "")).strip()
+        cliente = str(fila.get("Cliente", "")).strip()
+        incidencia = str(fila.get("TipoReclamo", "")).strip()
+        estado = str(fila.get("EstadoReclamo", "")).strip()
+
+        etiqueta = (
+            f"{pedido or 'Sin pedido'} · "
+            f"{incidencia or 'Sin incidencia'} · "
+            f"{estado or 'Pendiente'} · "
+            f"{cliente or 'Cliente sin identificar'}"
+        )
+        opciones_reclamo[etiqueta] = reclamo_id
+
+    etiqueta_seleccionada = st.selectbox(
+        "Seleccionar reclamo",
+        options=list(opciones_reclamo.keys()),
+        key="selector_reclamo_gestion",
+    )
+
+    reclamo_id = opciones_reclamo[etiqueta_seleccionada]
+
+    coincidencia = tabla_reclamos.loc[
+        tabla_reclamos["ReclamoID"]
+        .astype(str)
+        .eq(str(reclamo_id))
+    ]
+
+    if coincidencia.empty:
+        st.error("No se encontró el reclamo seleccionado.")
+        return
+
+    reclamo = coincidencia.iloc[0]
+
+    pedido = str(reclamo.get("Pedido", "")).strip()
+    remito = str(reclamo.get("Remito", "")).strip()
+    cliente = str(reclamo.get("Cliente", "")).strip()
+    incidencia = str(reclamo.get("TipoReclamo", "")).strip()
+    descripcion = str(reclamo.get("Descripcion", "")).strip()
+    registrado_por = str(reclamo.get("UsuarioCreador", "")).strip()
+    fecha_creacion = str(
+        reclamo.get("FechaCreacionVisible", "")
+    ).strip()
+    responsable_actual = str(
+        reclamo.get("Responsable", "")
+    ).strip()
+    resolucion_actual = str(
+        reclamo.get("Resolucion", "")
+    ).strip()
+    estado_actual = str(
+        reclamo.get("EstadoReclamo", "Pendiente")
+    ).strip()
+
+    if estado_actual not in ESTADOS_RECLAMO_GESTION:
+        estado_actual = "Pendiente"
+
+    cabecera_1, cabecera_2, cabecera_3 = st.columns(
+        [1, 2.4, 1.2],
+        vertical_alignment="center",
+    )
+
+    with cabecera_1:
+        st.metric("Pedido", pedido or "Sin dato")
+
+    with cabecera_2:
+        st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
+        st.caption(
+            f"{incidencia or 'Reclamo'} · Remito {remito or 'Sin dato'}"
+        )
+
+    with cabecera_3:
+        st.metric("Estado", estado_actual)
+
+    st.info(
+        descripcion or "El reclamo no tiene descripción.",
+        icon="📝",
+    )
+
+    datos_1, datos_2, datos_3 = st.columns(3)
+
+    with datos_1:
+        st.caption(
+            f"**Registrado por**  \n{registrado_por or 'Sin dato'}"
+        )
+
+    with datos_2:
+        st.caption(
+            f"**Fecha de creación**  \n{fecha_creacion or 'Sin dato'}"
+        )
+
+    with datos_3:
+        st.caption(
+            f"**Responsable actual**  \n"
+            f"{responsable_actual or 'Logistica'}"
+        )
+
+    detalle_reclamos = leer_reclamos_detalle()
+
+    if detalle_reclamos is not None and not detalle_reclamos.empty:
+        detalle_seleccionado = detalle_reclamos.loc[
+            detalle_reclamos["ReclamoID"]
+            .astype(str)
+            .eq(str(reclamo_id))
+        ].copy()
+
+        if not detalle_seleccionado.empty:
+            st.markdown("#### Artículos reclamados")
+
+            columnas_detalle = [
+                "CodigoArticulo",
+                "DescripcionArticulo",
+                "Cantidad",
+                "Observacion",
+            ]
+
+            for columna in columnas_detalle:
+                if columna not in detalle_seleccionado.columns:
+                    detalle_seleccionado[columna] = ""
+
+            st.dataframe(
+                detalle_seleccionado[columnas_detalle].rename(
+                    columns={
+                        "CodigoArticulo": "Código",
+                        "DescripcionArticulo": "Descripción",
+                        "Cantidad": "Cantidad reclamada",
+                        "Observacion": "Detalle de cantidades",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+    fotos_reclamos = leer_reclamos_fotos()
+
+    if fotos_reclamos is not None and not fotos_reclamos.empty:
+        fotos_seleccionadas = fotos_reclamos.loc[
+            fotos_reclamos["ReclamoID"]
+            .astype(str)
+            .eq(str(reclamo_id))
+        ].copy()
+
+        if not fotos_seleccionadas.empty:
+            st.markdown("#### Fotografías")
+
+            for posicion, (_, foto) in enumerate(
+                fotos_seleccionadas.iterrows(),
+                start=1,
+            ):
+                nombre_foto = str(
+                    foto.get("NombreArchivo", f"Fotografía {posicion}")
+                ).strip()
+                url_foto = str(
+                    foto.get("URLArchivo", "")
+                ).strip()
+
+                if url_foto:
+                    st.link_button(
+                        f"📷 {nombre_foto or f'Fotografía {posicion}'}",
+                        url_foto,
+                        width="stretch",
+                    )
+
+    st.divider()
+
+    with st.form(
+        f"form_gestion_reclamo_{reclamo_id}",
+        clear_on_submit=False,
+    ):
+        formulario_1, formulario_2 = st.columns([1, 2])
+
+        with formulario_1:
+            nuevo_estado_reclamo = st.selectbox(
+                "Estado",
+                options=ESTADOS_RECLAMO_GESTION,
+                index=ESTADOS_RECLAMO_GESTION.index(
+                    estado_actual
+                ),
+            )
+
+        with formulario_2:
+            resolucion_reclamo = st.text_area(
+                "Respuesta / resolución",
+                value=resolucion_actual,
+                placeholder=(
+                    "Detalle de la revisión, respuesta al reclamo "
+                    "o solución aplicada por Logística..."
+                ),
+                height=120,
+            )
+
+        guardar_reclamo = st.form_submit_button(
+            "💾 Guardar gestión del reclamo",
+            type="primary",
+            width="stretch",
+        )
+
+    if guardar_reclamo:
+        usuario_logistica = (
+            st.session_state.get("usuario")
+            or st.session_state.get("nombre_usuario")
+            or "Logistica"
+        )
+
+        try:
+            resultado = actualizar_reclamo(
+                reclamo_id=reclamo_id,
+                estado_reclamo=nuevo_estado_reclamo,
+                resolucion=resolucion_reclamo,
+                responsable=usuario_logistica,
+            )
+
+            st.success(resultado["mensaje"])
+            st.toast("Reclamo actualizado.", icon="✅")
+            st.rerun()
+
+        except Exception as error:
+            st.error("No se pudo actualizar el reclamo.")
+            st.exception(error)
+
+
+if not reclamos_abiertos.empty:
+
+    cantidad_reclamos_abiertos = len(reclamos_abiertos)
+    pedidos_con_reclamo = (
+        reclamos_abiertos["Pedido"].nunique()
+        if "Pedido" in reclamos_abiertos.columns
+        else 0
+    )
+
+    aviso_reclamo, boton_reclamo = st.columns(
+        [5, 1.25],
+        vertical_alignment="center",
+    )
+
+    with aviso_reclamo:
+        st.warning(
+            (
+                f"Hay {cantidad_reclamos_abiertos} reclamo(s) "
+                f"pendiente(s) de revisión sobre "
+                f"{pedidos_con_reclamo} pedido(s)."
+            ),
+            icon="🧾",
+        )
+
+    with boton_reclamo:
+        ver_reclamos_pendientes = st.button(
+            "Gestionar reclamos",
+            icon="🧾",
+            type="primary",
+            width="stretch",
+            key="btn_ver_reclamos_pendientes",
+        )
+
+    if ver_reclamos_pendientes:
+        abrir_reclamos_pendientes()
 
 
 @st.dialog(
@@ -3183,6 +3541,150 @@ if (
                             )
                         )
                     )
+                )
+
+            # -------------------------------------------------
+            # DETALLE EXPANDIBLE DE LA CAMIONETA
+            # -------------------------------------------------
+
+            with st.expander(
+                f"🔎 Abrir detalle · {nombre_camioneta}",
+                expanded=False,
+            ):
+
+                detalle_camioneta = pedidos_camioneta.copy()
+
+                # Una fila por pedido para evitar duplicaciones
+                # en los indicadores y en la tabla visible.
+                if "Pedido" in detalle_camioneta.columns:
+                    detalle_camioneta = (
+                        detalle_camioneta
+                        .drop_duplicates(
+                            subset=["Pedido"],
+                            keep="first",
+                        )
+                        .reset_index(drop=True)
+                    )
+
+                cantidad_clientes_detalle = (
+                    detalle_camioneta["ClienteCodigo"].nunique()
+                    if "ClienteCodigo" in detalle_camioneta.columns
+                    else 0
+                )
+
+                cantidad_pedidos_detalle = (
+                    detalle_camioneta["Pedido"].nunique()
+                    if "Pedido" in detalle_camioneta.columns
+                    else len(detalle_camioneta)
+                )
+
+                total_unidades_detalle = int(
+                    pd.to_numeric(
+                        detalle_camioneta.get(
+                            "TotalUnidades",
+                            pd.Series(dtype=float),
+                        ),
+                        errors="coerce",
+                    )
+                    .fillna(0)
+                    .sum()
+                )
+
+                total_m3_detalle = float(
+                    pd.to_numeric(
+                        detalle_camioneta.get(
+                            "TotalM3",
+                            pd.Series(dtype=float),
+                        ),
+                        errors="coerce",
+                    )
+                    .fillna(0)
+                    .sum()
+                )
+
+                detalle_kpi_1, detalle_kpi_2, \
+                    detalle_kpi_3, detalle_kpi_4 = st.columns(4)
+
+                detalle_kpi_1.metric(
+                    "👥 Clientes",
+                    cantidad_clientes_detalle,
+                )
+
+                detalle_kpi_2.metric(
+                    "📦 Pedidos",
+                    cantidad_pedidos_detalle,
+                )
+
+                detalle_kpi_3.metric(
+                    "🔢 Unidades",
+                    f"{total_unidades_detalle:,}".replace(",", "."),
+                )
+
+                detalle_kpi_4.metric(
+                    "📐 Volumen",
+                    f"{total_m3_detalle:,.3f} m³"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", "."),
+                )
+
+                columnas_detalle_preferidas = [
+                    "Pedido",
+                    "ClienteCodigo",
+                    "ClienteDescripcion",
+                    "TotalUnidades",
+                    "TotalM3",
+                    "TotalSKUs",
+                    "DetalleFamilias",
+                    "CodigoDespacho",
+                    "DespachoDescripcion",
+                    "Planificacion",
+                ]
+
+                columnas_detalle_disponibles = [
+                    columna
+                    for columna in columnas_detalle_preferidas
+                    if columna in detalle_camioneta.columns
+                ]
+
+                tabla_detalle_camioneta = detalle_camioneta[
+                    columnas_detalle_disponibles
+                ].copy()
+
+                tabla_detalle_camioneta = (
+                    tabla_detalle_camioneta.rename(
+                        columns={
+                            "ClienteCodigo": "Código cliente",
+                            "ClienteDescripcion": "Cliente",
+                            "TotalUnidades": "Unidades",
+                            "TotalM3": "Volumen m³",
+                            "TotalSKUs": "SKUs",
+                            "DetalleFamilias": "Familias",
+                            "CodigoDespacho": "Código despacho",
+                            "DespachoDescripcion": "Despacho actual",
+                            "Planificacion": "Planificación",
+                        }
+                    )
+                )
+
+                st.dataframe(
+                    tabla_detalle_camioneta,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Volumen m³": st.column_config.NumberColumn(
+                            "Volumen m³",
+                            format="%.3f",
+                        ),
+                        "Unidades": st.column_config.NumberColumn(
+                            "Unidades",
+                            format="%d",
+                        ),
+                        "SKUs": st.column_config.NumberColumn(
+                            "SKUs",
+                            format="%d",
+                        ),
+                    },
                 )
 
             if (

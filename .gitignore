@@ -35,3 +35,6 @@ __pycache__/
 
 # Credenciales
 .streamlit/secrets.toml
+
+# Requirements
+requirements.txt

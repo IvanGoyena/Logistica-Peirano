@@ -67,3 +67,20 @@ PASSWORD = obtener_secreto(
 )
 
 HEADLESS = True
+
+
+# ==========================================================
+# RESPONSABLES DE GESTIÓN
+# ==========================================================
+
+RESPONSABLES = {
+    "Logistica": {
+        "to": [
+            "igoyena@peirano.com.ar",
+            "control.gestion@queija.com.ar",
+        ],
+        "cc": [
+            "lvega@peirano.com.ar",
+        ],
+    },
+}

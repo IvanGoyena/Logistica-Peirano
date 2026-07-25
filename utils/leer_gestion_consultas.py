@@ -941,3 +941,35 @@ def obtener_resumen_gestion(
             obtener_pedidos_bloqueados()
         ),
     }
+
+# ==========================================================
+# LECTURA TOLERANTE PARA PANTALLAS INFORMATIVAS
+# ==========================================================
+
+def leer_tabla_google_segura(
+    nombre_hoja: str,
+    columnas: list[str],
+    columna_fecha: str | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """
+    Variante tolerante para una pantalla que puede continuar
+    mostrando información parcial.
+
+    Devuelve (tabla, mensaje_error). Las funciones operativas
+    continúan usando leer_tabla_google para no ocultar fallos.
+    """
+
+    try:
+        return (
+            leer_tabla_google(
+                nombre_hoja=nombre_hoja,
+                columnas=columnas,
+                columna_fecha=columna_fecha,
+            ),
+            "",
+        )
+    except Exception as error:
+        return (
+            crear_dataframe_vacio(columnas),
+            str(error),
+        )

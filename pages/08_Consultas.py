@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from config import CARPETA_DATOS
 from utils.autenticacion import requerir_roles
@@ -272,7 +276,7 @@ def abrir_detalle_solicitud(
                 st.error(
                     "No se pudo modificar la solicitud."
                 )
-                st.exception(error)
+                logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
     elif modo_accion == "Eliminar":
 
@@ -311,7 +315,165 @@ def abrir_detalle_solicitud(
                 st.error(
                     "No se pudo eliminar la solicitud."
                 )
-                st.exception(error)
+                logger.exception("Error controlado en el módulo de Consultas Comerciales.")
+
+
+
+# ==========================================================
+# DIÁLOGO DE DETALLE DE RECLAMO
+# ==========================================================
+
+@st.dialog(
+    "🧾 Detalle del reclamo",
+    width="large",
+)
+def abrir_detalle_reclamo_consultas(
+    reclamo: pd.Series,
+) -> None:
+    """
+    Muestra el reclamo completo y la respuesta registrada por Logística.
+    Esta vista es informativa: la gestión se realiza desde 02_Pedidos.
+    """
+
+    reclamo_id = str(
+        reclamo.get("ReclamoID", "")
+    ).strip()
+
+    pedido = str(
+        reclamo.get("Pedido", "")
+    ).strip()
+
+    remito = str(
+        reclamo.get("Remito", "")
+    ).strip()
+
+    cliente = str(
+        reclamo.get("Cliente", "")
+    ).strip()
+
+    tipo_reclamo = str(
+        reclamo.get("TipoReclamo", "")
+    ).strip()
+
+    descripcion = str(
+        reclamo.get("Descripcion", "")
+    ).strip()
+
+    responsable = str(
+        reclamo.get("Responsable", "")
+    ).strip()
+
+    estado = str(
+        reclamo.get("EstadoReclamo", "")
+    ).strip()
+
+    resolucion = str(
+        reclamo.get("Resolucion", "")
+    ).strip()
+
+    usuario_creador = str(
+        reclamo.get("UsuarioCreador", "")
+    ).strip()
+
+    fecha_creacion = pd.to_datetime(
+        reclamo.get("FechaCreacion", ""),
+        errors="coerce",
+    )
+
+    fecha_cierre = pd.to_datetime(
+        reclamo.get("FechaCierre", ""),
+        errors="coerce",
+    )
+
+    fecha_creacion_texto = (
+        fecha_creacion.strftime("%d/%m/%Y %H:%M")
+        if pd.notna(fecha_creacion)
+        else str(
+            reclamo.get("FechaCreacion", "")
+        ).strip()
+    )
+
+    fecha_cierre_texto = (
+        fecha_cierre.strftime("%d/%m/%Y %H:%M")
+        if pd.notna(fecha_cierre)
+        else str(
+            reclamo.get("FechaCierre", "")
+        ).strip()
+    )
+
+    cabecera_1, cabecera_2, cabecera_3 = st.columns(
+        [1, 2.4, 1],
+        vertical_alignment="center",
+    )
+
+    with cabecera_1:
+        st.metric(
+            "Pedido",
+            pedido or "Sin dato",
+        )
+
+    with cabecera_2:
+        st.markdown(
+            f"**{cliente or 'Cliente sin identificar'}**"
+        )
+        st.caption(
+            f"{tipo_reclamo or 'Reclamo'} · "
+            f"Remito {remito or 'sin dato'}"
+        )
+
+    with cabecera_3:
+        st.metric(
+            "Estado",
+            estado or "Sin estado",
+        )
+
+    st.info(
+        descripcion or "Sin descripción.",
+        icon="📝",
+    )
+
+    detalle_1, detalle_2, detalle_3 = st.columns(3)
+
+    with detalle_1:
+        st.caption(
+            f"**Registrado por**  \n"
+            f"{usuario_creador or 'Sin dato'}"
+        )
+
+    with detalle_2:
+        st.caption(
+            f"**Fecha de registro**  \n"
+            f"{fecha_creacion_texto or 'Sin dato'}"
+        )
+
+    with detalle_3:
+        st.caption(
+            f"**Responsable**  \n"
+            f"{responsable or 'Sin asignar'}"
+        )
+
+    st.divider()
+    st.markdown("#### 💬 Respuesta de Logística")
+
+    if resolucion:
+        st.success(
+            resolucion,
+            icon="✅",
+        )
+    else:
+        st.warning(
+            "Logística todavía no registró una resolución.",
+            icon="⏳",
+        )
+
+    if fecha_cierre_texto:
+        st.caption(
+            f"Fecha de cierre: **{fecha_cierre_texto}**"
+        )
+
+    st.caption(
+        f"ID del reclamo: {reclamo_id or 'Sin dato'}"
+    )
 
 
 # ==========================================================
@@ -769,7 +931,7 @@ try:
 
 except Exception as error:
     st.error("No se pudo construir la tabla de consultas.")
-    st.exception(error)
+    logger.exception("Error controlado en el módulo de Consultas Comerciales.")
     st.stop()
 
 
@@ -912,6 +1074,298 @@ kpi_gestion_6.metric(
     "🧾 Reclamos",
     f"{cantidad_reclamos:,}".replace(",", "."),
 )
+
+
+# ==========================================================
+# HISTORIAL Y SEGUIMIENTO DE RECLAMOS
+# ==========================================================
+
+st.markdown("### 🧾 Seguimiento de reclamos")
+st.caption(
+    "Consultá los reclamos registrados y la resolución informada "
+    "por Logística. La actualización del estado se realiza desde "
+    "Gestión de Pedidos."
+)
+
+if reclamos_totales.empty:
+    st.info(
+        "Todavía no hay reclamos registrados.",
+        icon="🧾",
+    )
+else:
+    reclamos_vista = reclamos_totales.copy()
+
+    columnas_reclamos_requeridas = [
+        "ReclamoID",
+        "Pedido",
+        "Remito",
+        "Cliente",
+        "TipoReclamo",
+        "Descripcion",
+        "Responsable",
+        "EstadoReclamo",
+        "Resolucion",
+        "UsuarioCreador",
+        "FechaCreacion",
+        "FechaCierre",
+    ]
+
+    for columna in columnas_reclamos_requeridas:
+        if columna not in reclamos_vista.columns:
+            reclamos_vista[columna] = ""
+
+    reclamos_vista["Pedido"] = (
+        reclamos_vista["Pedido"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    reclamos_vista["FechaCreacionOrden"] = pd.to_datetime(
+        reclamos_vista["FechaCreacion"],
+        errors="coerce",
+    )
+
+    reclamos_vista["FechaVisible"] = (
+        reclamos_vista["FechaCreacionOrden"]
+        .dt.strftime("%d/%m/%Y %H:%M")
+        .fillna(
+            reclamos_vista["FechaCreacion"]
+            .fillna("")
+            .astype(str)
+        )
+    )
+
+    reclamos_vista["ResolucionVisible"] = (
+        reclamos_vista["Resolucion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Pendiente de respuesta")
+    )
+
+    reclamos_vista = (
+        reclamos_vista
+        .sort_values(
+            "FechaCreacionOrden",
+            ascending=False,
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    estados_disponibles = sorted(
+        estado
+        for estado in reclamos_vista["EstadoReclamo"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+        if estado
+    )
+
+    filtro_reclamo_1, filtro_reclamo_2 = st.columns(
+        [2, 1],
+        vertical_alignment="bottom",
+    )
+
+    with filtro_reclamo_1:
+        busqueda_reclamo = st.text_input(
+            "Buscar reclamo",
+            placeholder=(
+                "Pedido, remito, cliente, incidencia o ID..."
+            ),
+            key="buscar_reclamos_consultas",
+        )
+
+    with filtro_reclamo_2:
+        estado_reclamo_filtro = st.selectbox(
+            "Estado",
+            options=["Todos"] + estados_disponibles,
+            key="estado_reclamos_consultas",
+        )
+
+    reclamos_filtrados = reclamos_vista.copy()
+
+    if busqueda_reclamo.strip():
+        texto_reclamo = busqueda_reclamo.strip()
+
+        mascara_reclamos = pd.Series(
+            False,
+            index=reclamos_filtrados.index,
+        )
+
+        for columna in [
+            "ReclamoID",
+            "Pedido",
+            "Remito",
+            "Cliente",
+            "TipoReclamo",
+        ]:
+            mascara_reclamos = (
+                mascara_reclamos
+                | reclamos_filtrados[columna]
+                .fillna("")
+                .astype(str)
+                .str.contains(
+                    texto_reclamo,
+                    case=False,
+                    na=False,
+                    regex=False,
+                )
+            )
+
+        reclamos_filtrados = reclamos_filtrados.loc[
+            mascara_reclamos
+        ].copy()
+
+    if estado_reclamo_filtro != "Todos":
+        reclamos_filtrados = reclamos_filtrados[
+            reclamos_filtrados["EstadoReclamo"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq(estado_reclamo_filtro)
+        ].copy()
+
+    tabla_reclamos_consultas = (
+        reclamos_filtrados[
+            [
+                "ReclamoID",
+                "Pedido",
+                "Remito",
+                "Cliente",
+                "TipoReclamo",
+                "EstadoReclamo",
+                "Responsable",
+                "FechaVisible",
+                "ResolucionVisible",
+            ]
+        ]
+        .rename(
+            columns={
+                "ReclamoID": "ID",
+                "TipoReclamo": "Incidencia",
+                "EstadoReclamo": "Estado",
+                "FechaVisible": "Fecha",
+                "ResolucionVisible": "Respuesta Logística",
+            }
+        )
+        .reset_index(drop=True)
+    )
+
+    st.caption(
+        f"{len(tabla_reclamos_consultas):,} reclamo(s) visible(s)"
+        .replace(",", ".")
+    )
+
+    evento_reclamos_consultas = st.dataframe(
+        tabla_reclamos_consultas,
+        use_container_width=True,
+        hide_index=True,
+        height=min(
+            430,
+            85 + len(tabla_reclamos_consultas) * 35,
+        ),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tabla_historial_reclamos_consultas",
+        column_config={
+            "ID": None,
+            "Pedido": st.column_config.TextColumn(
+                "Pedido",
+                width="small",
+            ),
+            "Remito": st.column_config.TextColumn(
+                "Remito",
+                width="small",
+            ),
+            "Cliente": st.column_config.TextColumn(
+                "Cliente",
+                width="large",
+            ),
+            "Incidencia": st.column_config.TextColumn(
+                "Incidencia",
+                width="medium",
+            ),
+            "Estado": st.column_config.TextColumn(
+                "Estado",
+                width="small",
+            ),
+            "Responsable": st.column_config.TextColumn(
+                "Responsable",
+                width="small",
+            ),
+            "Fecha": st.column_config.TextColumn(
+                "Fecha",
+                width="small",
+            ),
+            "Respuesta Logística": st.column_config.TextColumn(
+                "Respuesta Logística",
+                width="large",
+            ),
+        },
+    )
+
+    filas_reclamos_consultas = (
+        evento_reclamos_consultas.selection.rows
+        if evento_reclamos_consultas is not None
+        else []
+    )
+
+    reclamo_accion_1, reclamo_accion_2 = st.columns(
+        [4, 1],
+        vertical_alignment="center",
+    )
+
+    with reclamo_accion_1:
+        if filas_reclamos_consultas:
+            fila_reclamo_seleccionada = (
+                tabla_reclamos_consultas.iloc[
+                    filas_reclamos_consultas[0]
+                ]
+            )
+
+            st.caption(
+                f"Seleccionado: pedido "
+                f"**{fila_reclamo_seleccionada['Pedido']}** · "
+                f"{fila_reclamo_seleccionada['Incidencia']} · "
+                f"{fila_reclamo_seleccionada['Estado']}"
+            )
+        else:
+            st.caption(
+                "Seleccioná un reclamo para ver el detalle "
+                "y la respuesta completa."
+            )
+
+    with reclamo_accion_2:
+        ver_detalle_reclamo = st.button(
+            "🧾 Ver detalle",
+            type="primary",
+            use_container_width=True,
+            disabled=not bool(
+                filas_reclamos_consultas
+            ),
+            key="btn_ver_detalle_reclamo_consultas",
+        )
+
+    if (
+        ver_detalle_reclamo
+        and filas_reclamos_consultas
+    ):
+        indice_reclamo = filas_reclamos_consultas[0]
+
+        reclamo_seleccionado = (
+            reclamos_filtrados
+            .reset_index(drop=True)
+            .iloc[indice_reclamo]
+        )
+
+        abrir_detalle_reclamo_consultas(
+            reclamo_seleccionado
+        )
 
 st.markdown("---")
 
@@ -1145,7 +1599,7 @@ if pedidos_urgentes_digip:
             "No se pudo preparar la agrupación "
             "de pedidos urgentes."
         )
-        st.exception(error)
+        logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
 
 st.markdown("---")
@@ -1282,7 +1736,7 @@ if enviar_urgentes_worker and orden_urgentes:
             "al worker."
         )
 
-        st.exception(error)
+        logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
 
 orden_worker_urgentes = st.session_state.get(
@@ -1839,7 +2293,7 @@ def abrir_detalle_pedido(
                         st.error(
                             "No se pudo registrar la gestión."
                         )
-                        st.exception(error)
+                        logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
         elif tipo_gestion == "Solicitud":
             st.caption(
@@ -1918,7 +2372,7 @@ def abrir_detalle_pedido(
                     st.error(
                         "No se pudo registrar la solicitud."
                     )
-                    st.exception(error)
+                    logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
         fecha_transmision = fila[
             "FechaTransmisionERP"

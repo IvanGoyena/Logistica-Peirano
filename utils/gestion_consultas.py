@@ -86,6 +86,82 @@ def normalizar_pedido(
     )
 
 
+
+
+ESTADOS_GESTION_CERRADA = {
+    "FINALIZADA",
+    "FINALIZADO",
+    "RESUELTA",
+    "RESUELTO",
+    "CERRADA",
+    "CERRADO",
+    "RECHAZADA",
+    "RECHAZADO",
+    "CANCELADA",
+    "CANCELADO",
+    "AGRUPADA",
+    "EXITOSO",
+}
+
+
+def existe_gestion_abierta(
+    nombre_hoja: str,
+    pedido: Any,
+    columna_estado: str,
+    columna_tipo: str | None = None,
+    tipo: str = "",
+) -> dict[str, Any] | None:
+    """
+    Busca una gestión abierta equivalente antes de insertar.
+
+    Es una protección simple contra doble clic o reintentos
+    inmediatos desde la interfaz.
+    """
+
+    pedido_normalizado = normalizar_pedido(pedido)
+    tabla = leer_hoja(nombre_hoja)
+
+    if tabla is None or tabla.empty or "Pedido" not in tabla.columns:
+        return None
+
+    pedidos = (
+        tabla["Pedido"]
+        .fillna("")
+        .apply(lambda valor: normalizar_pedido(valor) if limpiar_texto(valor) else "")
+    )
+
+    mascara = pedidos.eq(pedido_normalizado)
+
+    if columna_estado in tabla.columns:
+        estados = (
+            tabla[columna_estado]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        mascara &= ~estados.isin(ESTADOS_GESTION_CERRADA)
+
+    tipo_limpio = limpiar_texto(tipo)
+
+    if columna_tipo and tipo_limpio and columna_tipo in tabla.columns:
+        tipos = (
+            tabla[columna_tipo]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        mascara &= tipos.eq(tipo_limpio.upper())
+
+    coincidencias = tabla.loc[mascara]
+
+    if coincidencias.empty:
+        return None
+
+    return coincidencias.iloc[0].to_dict()
+
+
 def generar_id(
     prefijo: str,
 ) -> str:
@@ -185,6 +261,28 @@ def guardar_solicitud(
             "La descripción de la solicitud "
             "es obligatoria."
         )
+
+    existente = existe_gestion_abierta(
+        nombre_hoja="Solicitudes",
+        pedido=pedido_normalizado,
+        columna_estado="EstadoSolicitud",
+        columna_tipo="TipoSolicitud",
+        tipo=tipo_solicitud,
+    )
+
+    if existente is not None:
+        return {
+            "ok": True,
+            "duplicado": True,
+            "id": limpiar_texto(
+                existente.get("SolicitudID", "")
+            ),
+            "pedido": pedido_normalizado,
+            "mensaje": (
+                "El pedido ya tiene una solicitud abierta "
+                "del mismo tipo. No se creó un duplicado."
+            ),
+        }
 
     registro = {
         "SolicitudID": generar_id("SOL"),
@@ -504,6 +602,26 @@ def guardar_urgencia(
             "El motivo de la urgencia "
             "es obligatorio."
         )
+
+    existente = existe_gestion_abierta(
+        nombre_hoja="Urgencias",
+        pedido=pedido_normalizado,
+        columna_estado="EstadoUrgencia",
+    )
+
+    if existente is not None:
+        return {
+            "ok": True,
+            "duplicado": True,
+            "id": limpiar_texto(
+                existente.get("UrgenciaID", "")
+            ),
+            "pedido": pedido_normalizado,
+            "mensaje": (
+                "El pedido ya tiene una urgencia activa. "
+                "No se creó un duplicado."
+            ),
+        }
 
     registro = {
         "UrgenciaID": generar_id("URG"),
