@@ -192,6 +192,15 @@ pagina_consultas = st.Page(
 )
 
 
+
+pagina_devoluciones = st.Page(
+    "pages/09_Devoluciones.py",
+    title="Gestión de Devoluciones",
+    icon="↩️",
+)
+
+
+
 # ==========================================================
 # MENÚ SEGÚN ROL
 # ==========================================================
@@ -211,6 +220,7 @@ if tiene_rol("admin"):
         pagina_pedidos,
         pagina_despachos,
         pagina_stock,
+        pagina_devoluciones,
     ]
 
     paginas["Comercial"] = [
@@ -235,6 +245,7 @@ elif tiene_rol("gerencia"):
         pagina_pedidos,
         pagina_despachos,
         pagina_stock,
+        pagina_devoluciones,
     ]
 
     paginas["Comercial"] = [
@@ -253,6 +264,7 @@ elif tiene_rol("logistica"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
+        pagina_devoluciones,
     ]
 
     paginas["Comercial"] = [
@@ -271,6 +283,7 @@ elif tiene_rol("supervisor"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
+        pagina_devoluciones,
     ]
 
     paginas["Comercial"] = [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +26,19 @@ from utils.leer_gestion_consultas import (
     obtener_urgencias_activas,
     obtener_solicitudes_abiertas,
     obtener_solicitudes_pedido,
+    obtener_historial_solicitudes,
+    obtener_historial_urgencias,
+    obtener_historial_reclamos,
+)
+
+from utils.gestion_devoluciones import (
+    guardar_cancelacion_entrega,
+    confirmar_envio_whatsapp,
+)
+from utils.leer_devoluciones import (
+    obtener_cancelaciones_activas,
+    obtener_historial_cancelaciones,
+    estado_para_comercial,
 )
 
 from utils.gestion_urgencias_digip import (
@@ -281,16 +295,16 @@ def abrir_detalle_solicitud(
     elif modo_accion == "Eliminar":
 
         st.warning(
-            "Esta acción elimina definitivamente la solicitud."
+            "La solicitud se cancelará y seguirá disponible en su histórico."
         )
 
         confirmar = st.checkbox(
-            "Confirmo que quiero eliminar esta solicitud.",
+            "Confirmo que quiero cancelar esta solicitud.",
             key=f"confirmar_eliminar_{solicitud_id}",
         )
 
         eliminar = st.button(
-            "🗑️ Eliminar solicitud",
+            "🚫 Cancelar solicitud",
             type="primary",
             use_container_width=True,
             disabled=not confirmar,
@@ -300,20 +314,27 @@ def abrir_detalle_solicitud(
         if eliminar:
 
             try:
+                usuario_cancelacion = (
+                    st.session_state.get("usuario")
+                    or st.session_state.get("nombre_usuario")
+                    or "Usuario no identificado"
+                )
+
                 resultado = eliminar_solicitud(
-                    solicitud_id
+                    solicitud_id=solicitud_id,
+                    usuario_cancelacion=usuario_cancelacion,
                 )
 
                 st.success(resultado["mensaje"])
                 st.toast(
-                    "Solicitud eliminada.",
-                    icon="🗑️",
+                    "Solicitud cancelada.",
+                    icon="🚫",
                 )
                 st.rerun()
 
             except Exception as error:
                 st.error(
-                    "No se pudo eliminar la solicitud."
+                    "No se pudo cancelar la solicitud."
                 )
                 logger.exception("Error controlado en el módulo de Consultas Comerciales.")
 
@@ -767,6 +788,308 @@ if "consultas_detalle_abierto" not in st.session_state:
 if "consultas_pedido_detalle" not in st.session_state:
     st.session_state["consultas_pedido_detalle"] = ""
 
+if "mostrar_historico_reclamos" not in st.session_state:
+    st.session_state["mostrar_historico_reclamos"] = False
+
+if "mostrar_historico_solicitudes" not in st.session_state:
+    st.session_state["mostrar_historico_solicitudes"] = False
+
+if "mostrar_historico_urgencias" not in st.session_state:
+    st.session_state["mostrar_historico_urgencias"] = False
+
+if "mostrar_historico_cancelaciones_entrega" not in st.session_state:
+    st.session_state["mostrar_historico_cancelaciones_entrega"] = False
+
+if "ultima_cancelacion_whatsapp" not in st.session_state:
+    st.session_state["ultima_cancelacion_whatsapp"] = None
+
+
+# ==========================================================
+# HISTÓRICOS ESPECÍFICOS DE LA INTERFAZ
+# ==========================================================
+
+def mostrar_historial_solicitudes(
+    solicitudes: pd.DataFrame,
+) -> None:
+    st.markdown("#### 📚 Histórico de solicitudes")
+    st.caption(
+        "Solicitudes pendientes, en curso, finalizadas y canceladas "
+        "conservadas en Google Sheets."
+    )
+
+    if solicitudes is None or solicitudes.empty:
+        st.info("Todavía no hay solicitudes registradas.", icon="📩")
+        return
+
+    tabla = solicitudes.copy()
+    for columna in [
+        "SolicitudID", "Pedido", "Cliente", "TipoSolicitud",
+        "Prioridad", "Descripcion", "UsuarioSolicitante",
+        "FechaSolicitud", "EstadoSolicitud", "Responsable",
+        "Respuesta", "FechaResolucion",
+    ]:
+        if columna not in tabla.columns:
+            tabla[columna] = ""
+
+    tabla["FechaOrden"] = pd.to_datetime(
+        tabla["FechaSolicitud"], errors="coerce"
+    )
+    tabla["Fecha"] = tabla["FechaOrden"].dt.strftime(
+        "%d/%m/%Y %H:%M"
+    ).fillna(tabla["FechaSolicitud"].astype(str))
+    tabla = tabla.sort_values(
+        "FechaOrden", ascending=False, na_position="last"
+    )
+
+    busqueda = st.text_input(
+        "Buscar en solicitudes",
+        placeholder="Pedido, cliente, tipo o ID...",
+        key="buscar_historico_solicitudes",
+    )
+    if busqueda.strip():
+        mascara = pd.Series(False, index=tabla.index)
+        for columna in [
+            "SolicitudID", "Pedido", "Cliente",
+            "TipoSolicitud", "Descripcion",
+        ]:
+            mascara |= tabla[columna].astype(str).str.contains(
+                busqueda.strip(), case=False, na=False, regex=False
+            )
+        tabla = tabla.loc[mascara]
+
+    vista = tabla[[
+        "SolicitudID", "Pedido", "Cliente", "TipoSolicitud",
+        "Prioridad", "EstadoSolicitud", "Responsable", "Fecha",
+        "Respuesta",
+    ]].rename(columns={
+        "SolicitudID": "ID",
+        "TipoSolicitud": "Tipo",
+        "EstadoSolicitud": "Estado",
+        "Respuesta": "Respuesta Logística",
+    })
+
+    st.dataframe(
+        vista, use_container_width=True, hide_index=True,
+        height=min(420, 85 + len(vista) * 35),
+        key="tabla_historico_solicitudes",
+    )
+
+
+def mostrar_historial_urgencias(
+    urgencias: pd.DataFrame,
+) -> None:
+    st.markdown("#### 📚 Histórico de urgencias")
+    st.caption(
+        "Urgencias pendientes, procesadas, agrupadas y con error "
+        "conservadas en Google Sheets."
+    )
+
+    if urgencias is None or urgencias.empty:
+        st.info("Todavía no hay urgencias registradas.", icon="🚨")
+        return
+
+    tabla = urgencias.copy()
+    for columna in [
+        "UrgenciaID", "Pedido", "Cliente", "Motivo",
+        "FechaRequerida", "Observacion", "UsuarioSolicitante",
+        "FechaSolicitud", "EstadoUrgencia", "AgrupadorDestino",
+        "EstadoEjecucionDIGIP", "MensajeEjecucionDIGIP",
+        "FechaEjecucionDIGIP",
+    ]:
+        if columna not in tabla.columns:
+            tabla[columna] = ""
+
+    tabla["FechaOrden"] = pd.to_datetime(
+        tabla["FechaSolicitud"], errors="coerce"
+    )
+    tabla["Fecha"] = tabla["FechaOrden"].dt.strftime(
+        "%d/%m/%Y %H:%M"
+    ).fillna(tabla["FechaSolicitud"].astype(str))
+    tabla = tabla.sort_values(
+        "FechaOrden", ascending=False, na_position="last"
+    )
+
+    busqueda = st.text_input(
+        "Buscar en urgencias",
+        placeholder="Pedido, cliente, motivo o ID...",
+        key="buscar_historico_urgencias",
+    )
+    if busqueda.strip():
+        mascara = pd.Series(False, index=tabla.index)
+        for columna in [
+            "UrgenciaID", "Pedido", "Cliente",
+            "Motivo", "Observacion",
+        ]:
+            mascara |= tabla[columna].astype(str).str.contains(
+                busqueda.strip(), case=False, na=False, regex=False
+            )
+        tabla = tabla.loc[mascara]
+
+    vista = tabla[[
+        "UrgenciaID", "Pedido", "Cliente", "Motivo",
+        "FechaRequerida", "EstadoUrgencia",
+        "EstadoEjecucionDIGIP", "Fecha",
+        "MensajeEjecucionDIGIP",
+    ]].rename(columns={
+        "UrgenciaID": "ID",
+        "FechaRequerida": "Fecha requerida",
+        "EstadoUrgencia": "Estado",
+        "EstadoEjecucionDIGIP": "Ejecución DIGIP",
+        "MensajeEjecucionDIGIP": "Resultado DIGIP",
+    })
+
+    st.dataframe(
+        vista, use_container_width=True, hide_index=True,
+        height=min(420, 85 + len(vista) * 35),
+        key="tabla_historico_urgencias",
+    )
+
+
+def construir_opciones_clientes_cancelacion(
+    df_clientes: pd.DataFrame,
+) -> list[str]:
+    """Construye opciones legibles desde el Maestro de Clientes."""
+
+    if df_clientes is None or df_clientes.empty:
+        return ["Seleccionar cliente..."]
+
+    tabla = df_clientes.copy()
+    columnas = list(tabla.columns)
+
+    candidatas_codigo = [
+        "CodigoCliente", "CódigoCliente", "ClienteCodigo",
+        "CodigoSucursal", "Código", "Codigo",
+    ]
+    candidatas_nombre = [
+        "ClienteDescripcion", "RazonSocial", "Razón Social",
+        "NombreCliente", "Cliente", "Descripcion", "Descripción",
+    ]
+
+    columna_codigo = next(
+        (col for col in candidatas_codigo if col in columnas),
+        None,
+    )
+    columna_nombre = next(
+        (col for col in candidatas_nombre if col in columnas),
+        None,
+    )
+
+    if columna_nombre is None:
+        columnas_texto = [
+            col for col in columnas
+            if tabla[col].dtype == "object"
+        ]
+        columna_nombre = columnas_texto[0] if columnas_texto else columnas[0]
+
+    opciones: list[str] = []
+    for _, fila in tabla.iterrows():
+        nombre = str(fila.get(columna_nombre, "") or "").strip()
+        codigo = (
+            str(fila.get(columna_codigo, "") or "").strip()
+            if columna_codigo
+            else ""
+        )
+        if codigo.endswith(".0"):
+            codigo = codigo[:-2]
+        if not nombre:
+            continue
+        etiqueta = f"{codigo} - {nombre}" if codigo else nombre
+        if etiqueta not in opciones:
+            opciones.append(etiqueta)
+
+    opciones = sorted(opciones, key=str.upper)
+    return ["Seleccionar cliente..."] + opciones
+
+
+def obtener_telefono_cancelaciones() -> str:
+    """Obtiene el teléfono de prueba desde Secrets o usa el número empresarial."""
+
+    try:
+        telefono = str(st.secrets.get("WHATSAPP_CANCELACIONES", "")).strip()
+    except Exception:
+        telefono = ""
+
+    return telefono or "5491172151924"
+
+
+def construir_mensaje_whatsapp_cancelacion(registro: dict) -> str:
+    """Construye el mensaje crítico para WhatsApp."""
+
+    remitos = str(registro.get("Remito", "") or "").split(" | ")
+    remitos = [remito.strip() for remito in remitos if remito.strip()]
+    detalle_remitos = "\n".join(f"• {remito}" for remito in remitos)
+    etiqueta_remitos = "Remitos" if len(remitos) > 1 else "Remito"
+
+    return (
+        "🚨 *CANCELACIÓN DE ENTREGA* 🚨\n\n"
+        f"*{etiqueta_remitos}:*\n{detalle_remitos}\n"
+        f"*Cliente:* {registro.get('Cliente', '') or 'Sin informar'}\n"
+        f"*Motivo:* {registro.get('Motivo', '')}\n"
+        f"*Observación:* {registro.get('Observacion', '') or 'Sin observaciones'}\n"
+        f"*Solicitado por:* {registro.get('UsuarioSolicitante', '')}\n"
+        f"*Fecha:* {registro.get('FechaSolicitud', '')}\n\n"
+        "⛔ *NO CARGAR NI DESPACHAR ESTA MERCADERÍA.*\n"
+        "Separar el remito y confirmar que la entrega fue detenida.\n\n"
+        f"ID de gestión: {registro.get('CancelacionEntregaID', '')}"
+    )
+
+
+def construir_url_whatsapp_cancelacion(registro: dict) -> str:
+    telefono = obtener_telefono_cancelaciones()
+    mensaje = construir_mensaje_whatsapp_cancelacion(registro)
+    return f"https://wa.me/{telefono}?text={quote(mensaje)}"
+
+
+def mostrar_historial_cancelaciones_entrega(cancelaciones: pd.DataFrame) -> None:
+    st.markdown("#### 📚 Histórico de cancelaciones de entrega")
+
+    if cancelaciones is None or cancelaciones.empty:
+        st.info("Todavía no hay cancelaciones de entrega registradas.")
+        return
+
+    tabla = cancelaciones.copy()
+    tabla["Fecha"] = pd.to_datetime(
+        tabla["FechaSolicitud"], errors="coerce"
+    ).dt.strftime("%d/%m/%Y %H:%M").fillna(
+        tabla["FechaSolicitud"].fillna("").astype(str)
+    )
+
+    busqueda = st.text_input(
+        "Buscar en cancelaciones",
+        placeholder="Remito, cliente, motivo o ID...",
+        key="buscar_historico_cancelaciones_entrega",
+    )
+
+    if busqueda.strip():
+        mascara = pd.Series(False, index=tabla.index)
+        for columna in [
+            "CancelacionEntregaID", "Remito", "Cliente", "Motivo",
+        ]:
+            mascara |= tabla[columna].fillna("").astype(str).str.contains(
+                busqueda.strip(), case=False, na=False, regex=False
+            )
+        tabla = tabla.loc[mascara]
+
+    vista = tabla[[
+        "CancelacionEntregaID", "Remito", "Cliente", "Motivo",
+        "EstadoCancelacion", "EstadoWhatsApp", "NumeroIR",
+        "EstadoReingreso", "Fecha",
+    ]].rename(columns={
+        "CancelacionEntregaID": "ID",
+        "EstadoCancelacion": "Estado",
+        "EstadoWhatsApp": "WhatsApp",
+        "NumeroIR": "IR",
+        "EstadoReingreso": "Reingreso",
+    })
+
+    st.dataframe(
+        vista,
+        use_container_width=True,
+        hide_index=True,
+        height=min(420, 85 + len(vista) * 35),
+        key="tabla_historico_cancelaciones_entrega",
+    )
+
 
 # ==========================================================
 # CABECERA
@@ -780,9 +1103,10 @@ st.caption(
 (
     col_info,
     col_reclamo,
+    col_historico,
     col_actualizar,
 ) = st.columns(
-    [5.2, 1.35, 1],
+    [4.2, 1.35, 1.2, 1],
     vertical_alignment="center",
 )
 
@@ -793,6 +1117,24 @@ with col_info:
 
 with col_reclamo:
     espacio_boton_reclamo = st.empty()
+
+with col_historico:
+    texto_historico = (
+        "Ocultar histórico"
+        if st.session_state["mostrar_historico_reclamos"]
+        else "Histórico"
+    )
+
+    if st.button(
+        texto_historico,
+        icon="📚",
+        use_container_width=True,
+        key="btn_historico_reclamos_consultas",
+    ):
+        st.session_state["mostrar_historico_reclamos"] = (
+            not st.session_state["mostrar_historico_reclamos"]
+        )
+        st.rerun()
 
 with col_actualizar:
     actualizar = st.button(
@@ -950,9 +1292,9 @@ with espacio_boton_reclamo.container():
 # KPIs GENERALES DE GESTIÓN
 # ==========================================================
 
-solicitudes_totales = leer_solicitudes()
-urgencias_totales = leer_urgencias()
-reclamos_totales = leer_reclamos()
+solicitudes_totales = obtener_historial_solicitudes()
+urgencias_totales = obtener_historial_urgencias()
+reclamos_totales = obtener_historial_reclamos()
 
 if solicitudes_totales is None:
     solicitudes_totales = pd.DataFrame()
@@ -1076,297 +1418,297 @@ kpi_gestion_6.metric(
 )
 
 
-# ==========================================================
-# HISTORIAL Y SEGUIMIENTO DE RECLAMOS
-# ==========================================================
+if st.session_state["mostrar_historico_reclamos"]:
+    # ==========================================================
+    # HISTORIAL Y SEGUIMIENTO DE RECLAMOS
+    # ==========================================================
 
-st.markdown("### 🧾 Seguimiento de reclamos")
-st.caption(
-    "Consultá los reclamos registrados y la resolución informada "
-    "por Logística. La actualización del estado se realiza desde "
-    "Gestión de Pedidos."
-)
-
-if reclamos_totales.empty:
-    st.info(
-        "Todavía no hay reclamos registrados.",
-        icon="🧾",
-    )
-else:
-    reclamos_vista = reclamos_totales.copy()
-
-    columnas_reclamos_requeridas = [
-        "ReclamoID",
-        "Pedido",
-        "Remito",
-        "Cliente",
-        "TipoReclamo",
-        "Descripcion",
-        "Responsable",
-        "EstadoReclamo",
-        "Resolucion",
-        "UsuarioCreador",
-        "FechaCreacion",
-        "FechaCierre",
-    ]
-
-    for columna in columnas_reclamos_requeridas:
-        if columna not in reclamos_vista.columns:
-            reclamos_vista[columna] = ""
-
-    reclamos_vista["Pedido"] = (
-        reclamos_vista["Pedido"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
+    st.markdown("### 📚 Histórico de reclamos")
+    st.caption(
+        "Incluye todos los reclamos abiertos, resueltos y rechazados "
+        "guardados en Google Sheets. La actualización del estado se realiza "
+        "desde Gestión de Pedidos."
     )
 
-    reclamos_vista["FechaCreacionOrden"] = pd.to_datetime(
-        reclamos_vista["FechaCreacion"],
-        errors="coerce",
-    )
-
-    reclamos_vista["FechaVisible"] = (
-        reclamos_vista["FechaCreacionOrden"]
-        .dt.strftime("%d/%m/%Y %H:%M")
-        .fillna(
-            reclamos_vista["FechaCreacion"]
-            .fillna("")
-            .astype(str)
+    if reclamos_totales.empty:
+        st.info(
+            "Todavía no hay reclamos registrados.",
+            icon="🧾",
         )
-    )
+    else:
+        reclamos_vista = reclamos_totales.copy()
 
-    reclamos_vista["ResolucionVisible"] = (
-        reclamos_vista["Resolucion"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .replace("", "Pendiente de respuesta")
-    )
-
-    reclamos_vista = (
-        reclamos_vista
-        .sort_values(
-            "FechaCreacionOrden",
-            ascending=False,
-            na_position="last",
-        )
-        .reset_index(drop=True)
-    )
-
-    estados_disponibles = sorted(
-        estado
-        for estado in reclamos_vista["EstadoReclamo"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-        if estado
-    )
-
-    filtro_reclamo_1, filtro_reclamo_2 = st.columns(
-        [2, 1],
-        vertical_alignment="bottom",
-    )
-
-    with filtro_reclamo_1:
-        busqueda_reclamo = st.text_input(
-            "Buscar reclamo",
-            placeholder=(
-                "Pedido, remito, cliente, incidencia o ID..."
-            ),
-            key="buscar_reclamos_consultas",
-        )
-
-    with filtro_reclamo_2:
-        estado_reclamo_filtro = st.selectbox(
-            "Estado",
-            options=["Todos"] + estados_disponibles,
-            key="estado_reclamos_consultas",
-        )
-
-    reclamos_filtrados = reclamos_vista.copy()
-
-    if busqueda_reclamo.strip():
-        texto_reclamo = busqueda_reclamo.strip()
-
-        mascara_reclamos = pd.Series(
-            False,
-            index=reclamos_filtrados.index,
-        )
-
-        for columna in [
+        columnas_reclamos_requeridas = [
             "ReclamoID",
             "Pedido",
             "Remito",
             "Cliente",
             "TipoReclamo",
-        ]:
-            mascara_reclamos = (
-                mascara_reclamos
-                | reclamos_filtrados[columna]
-                .fillna("")
-                .astype(str)
-                .str.contains(
-                    texto_reclamo,
-                    case=False,
-                    na=False,
-                    regex=False,
-                )
-            )
+            "Descripcion",
+            "Responsable",
+            "EstadoReclamo",
+            "Resolucion",
+            "UsuarioCreador",
+            "FechaCreacion",
+            "FechaCierre",
+        ]
 
-        reclamos_filtrados = reclamos_filtrados.loc[
-            mascara_reclamos
-        ].copy()
+        for columna in columnas_reclamos_requeridas:
+            if columna not in reclamos_vista.columns:
+                reclamos_vista[columna] = ""
 
-    if estado_reclamo_filtro != "Todos":
-        reclamos_filtrados = reclamos_filtrados[
-            reclamos_filtrados["EstadoReclamo"]
+        reclamos_vista["Pedido"] = (
+            reclamos_vista["Pedido"]
             .fillna("")
             .astype(str)
             .str.strip()
-            .eq(estado_reclamo_filtro)
-        ].copy()
+            .str.replace(r"\.0$", "", regex=True)
+        )
 
-    tabla_reclamos_consultas = (
-        reclamos_filtrados[
-            [
+        reclamos_vista["FechaCreacionOrden"] = pd.to_datetime(
+            reclamos_vista["FechaCreacion"],
+            errors="coerce",
+        )
+
+        reclamos_vista["FechaVisible"] = (
+            reclamos_vista["FechaCreacionOrden"]
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna(
+                reclamos_vista["FechaCreacion"]
+                .fillna("")
+                .astype(str)
+            )
+        )
+
+        reclamos_vista["ResolucionVisible"] = (
+            reclamos_vista["Resolucion"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "Pendiente de respuesta")
+        )
+
+        reclamos_vista = (
+            reclamos_vista
+            .sort_values(
+                "FechaCreacionOrden",
+                ascending=False,
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+        estados_disponibles = sorted(
+            estado
+            for estado in reclamos_vista["EstadoReclamo"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .unique()
+            .tolist()
+            if estado
+        )
+
+        filtro_reclamo_1, filtro_reclamo_2 = st.columns(
+            [2, 1],
+            vertical_alignment="bottom",
+        )
+
+        with filtro_reclamo_1:
+            busqueda_reclamo = st.text_input(
+                "Buscar reclamo",
+                placeholder=(
+                    "Pedido, remito, cliente, incidencia o ID..."
+                ),
+                key="buscar_reclamos_consultas",
+            )
+
+        with filtro_reclamo_2:
+            estado_reclamo_filtro = st.selectbox(
+                "Estado",
+                options=["Todos"] + estados_disponibles,
+                key="estado_reclamos_consultas",
+            )
+
+        reclamos_filtrados = reclamos_vista.copy()
+
+        if busqueda_reclamo.strip():
+            texto_reclamo = busqueda_reclamo.strip()
+
+            mascara_reclamos = pd.Series(
+                False,
+                index=reclamos_filtrados.index,
+            )
+
+            for columna in [
                 "ReclamoID",
                 "Pedido",
                 "Remito",
                 "Cliente",
                 "TipoReclamo",
-                "EstadoReclamo",
-                "Responsable",
-                "FechaVisible",
-                "ResolucionVisible",
-            ]
-        ]
-        .rename(
-            columns={
-                "ReclamoID": "ID",
-                "TipoReclamo": "Incidencia",
-                "EstadoReclamo": "Estado",
-                "FechaVisible": "Fecha",
-                "ResolucionVisible": "Respuesta Logística",
-            }
-        )
-        .reset_index(drop=True)
-    )
+            ]:
+                mascara_reclamos = (
+                    mascara_reclamos
+                    | reclamos_filtrados[columna]
+                    .fillna("")
+                    .astype(str)
+                    .str.contains(
+                        texto_reclamo,
+                        case=False,
+                        na=False,
+                        regex=False,
+                    )
+                )
 
-    st.caption(
-        f"{len(tabla_reclamos_consultas):,} reclamo(s) visible(s)"
-        .replace(",", ".")
-    )
+            reclamos_filtrados = reclamos_filtrados.loc[
+                mascara_reclamos
+            ].copy()
 
-    evento_reclamos_consultas = st.dataframe(
-        tabla_reclamos_consultas,
-        use_container_width=True,
-        hide_index=True,
-        height=min(
-            430,
-            85 + len(tabla_reclamos_consultas) * 35,
-        ),
-        on_select="rerun",
-        selection_mode="single-row",
-        key="tabla_historial_reclamos_consultas",
-        column_config={
-            "ID": None,
-            "Pedido": st.column_config.TextColumn(
-                "Pedido",
-                width="small",
-            ),
-            "Remito": st.column_config.TextColumn(
-                "Remito",
-                width="small",
-            ),
-            "Cliente": st.column_config.TextColumn(
-                "Cliente",
-                width="large",
-            ),
-            "Incidencia": st.column_config.TextColumn(
-                "Incidencia",
-                width="medium",
-            ),
-            "Estado": st.column_config.TextColumn(
-                "Estado",
-                width="small",
-            ),
-            "Responsable": st.column_config.TextColumn(
-                "Responsable",
-                width="small",
-            ),
-            "Fecha": st.column_config.TextColumn(
-                "Fecha",
-                width="small",
-            ),
-            "Respuesta Logística": st.column_config.TextColumn(
-                "Respuesta Logística",
-                width="large",
-            ),
-        },
-    )
+        if estado_reclamo_filtro != "Todos":
+            reclamos_filtrados = reclamos_filtrados[
+                reclamos_filtrados["EstadoReclamo"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq(estado_reclamo_filtro)
+            ].copy()
 
-    filas_reclamos_consultas = (
-        evento_reclamos_consultas.selection.rows
-        if evento_reclamos_consultas is not None
-        else []
-    )
-
-    reclamo_accion_1, reclamo_accion_2 = st.columns(
-        [4, 1],
-        vertical_alignment="center",
-    )
-
-    with reclamo_accion_1:
-        if filas_reclamos_consultas:
-            fila_reclamo_seleccionada = (
-                tabla_reclamos_consultas.iloc[
-                    filas_reclamos_consultas[0]
+        tabla_reclamos_consultas = (
+            reclamos_filtrados[
+                [
+                    "ReclamoID",
+                    "Pedido",
+                    "Remito",
+                    "Cliente",
+                    "TipoReclamo",
+                    "EstadoReclamo",
+                    "Responsable",
+                    "FechaVisible",
+                    "ResolucionVisible",
                 ]
+            ]
+            .rename(
+                columns={
+                    "ReclamoID": "ID",
+                    "TipoReclamo": "Incidencia",
+                    "EstadoReclamo": "Estado",
+                    "FechaVisible": "Fecha",
+                    "ResolucionVisible": "Respuesta Logística",
+                }
             )
-
-            st.caption(
-                f"Seleccionado: pedido "
-                f"**{fila_reclamo_seleccionada['Pedido']}** · "
-                f"{fila_reclamo_seleccionada['Incidencia']} · "
-                f"{fila_reclamo_seleccionada['Estado']}"
-            )
-        else:
-            st.caption(
-                "Seleccioná un reclamo para ver el detalle "
-                "y la respuesta completa."
-            )
-
-    with reclamo_accion_2:
-        ver_detalle_reclamo = st.button(
-            "🧾 Ver detalle",
-            type="primary",
-            use_container_width=True,
-            disabled=not bool(
-                filas_reclamos_consultas
-            ),
-            key="btn_ver_detalle_reclamo_consultas",
-        )
-
-    if (
-        ver_detalle_reclamo
-        and filas_reclamos_consultas
-    ):
-        indice_reclamo = filas_reclamos_consultas[0]
-
-        reclamo_seleccionado = (
-            reclamos_filtrados
             .reset_index(drop=True)
-            .iloc[indice_reclamo]
         )
 
-        abrir_detalle_reclamo_consultas(
-            reclamo_seleccionado
+        st.caption(
+            f"{len(tabla_reclamos_consultas):,} reclamo(s) visible(s)"
+            .replace(",", ".")
         )
 
+        evento_reclamos_consultas = st.dataframe(
+            tabla_reclamos_consultas,
+            use_container_width=True,
+            hide_index=True,
+            height=min(
+                430,
+                85 + len(tabla_reclamos_consultas) * 35,
+            ),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tabla_historial_reclamos_consultas",
+            column_config={
+                "ID": None,
+                "Pedido": st.column_config.TextColumn(
+                    "Pedido",
+                    width="small",
+                ),
+                "Remito": st.column_config.TextColumn(
+                    "Remito",
+                    width="small",
+                ),
+                "Cliente": st.column_config.TextColumn(
+                    "Cliente",
+                    width="large",
+                ),
+                "Incidencia": st.column_config.TextColumn(
+                    "Incidencia",
+                    width="medium",
+                ),
+                "Estado": st.column_config.TextColumn(
+                    "Estado",
+                    width="small",
+                ),
+                "Responsable": st.column_config.TextColumn(
+                    "Responsable",
+                    width="small",
+                ),
+                "Fecha": st.column_config.TextColumn(
+                    "Fecha",
+                    width="small",
+                ),
+                "Respuesta Logística": st.column_config.TextColumn(
+                    "Respuesta Logística",
+                    width="large",
+                ),
+            },
+        )
+
+        filas_reclamos_consultas = (
+            evento_reclamos_consultas.selection.rows
+            if evento_reclamos_consultas is not None
+            else []
+        )
+
+        reclamo_accion_1, reclamo_accion_2 = st.columns(
+            [4, 1],
+            vertical_alignment="center",
+        )
+
+        with reclamo_accion_1:
+            if filas_reclamos_consultas:
+                fila_reclamo_seleccionada = (
+                    tabla_reclamos_consultas.iloc[
+                        filas_reclamos_consultas[0]
+                    ]
+                )
+
+                st.caption(
+                    f"Seleccionado: pedido "
+                    f"**{fila_reclamo_seleccionada['Pedido']}** · "
+                    f"{fila_reclamo_seleccionada['Incidencia']} · "
+                    f"{fila_reclamo_seleccionada['Estado']}"
+                )
+            else:
+                st.caption(
+                    "Seleccioná un reclamo para ver el detalle "
+                    "y la respuesta completa."
+                )
+
+        with reclamo_accion_2:
+            ver_detalle_reclamo = st.button(
+                "🧾 Ver detalle",
+                type="primary",
+                use_container_width=True,
+                disabled=not bool(
+                    filas_reclamos_consultas
+                ),
+                key="btn_ver_detalle_reclamo_consultas",
+            )
+
+        if (
+            ver_detalle_reclamo
+            and filas_reclamos_consultas
+        ):
+            indice_reclamo = filas_reclamos_consultas[0]
+
+            reclamo_seleccionado = (
+                reclamos_filtrados
+                .reset_index(drop=True)
+                .iloc[indice_reclamo]
+            )
+
+            abrir_detalle_reclamo_consultas(
+                reclamo_seleccionado
+            )
 st.markdown("---")
 
 
@@ -1421,6 +1763,88 @@ if texto_busqueda:
 
 
 # ==========================================================
+
+# CANCELACIONES DE ENTREGA - CARGA Y SEGUIMIENTO COMERCIAL
+# ==========================================================
+
+st.divider()
+can_titulo, can_historial = st.columns([4, 1])
+with can_titulo:
+    st.markdown("### 🚫 Cancelaciones de entrega")
+    st.caption(
+        "Comercial registra y envía el aviso urgente. La resolución operativa "
+        "continúa en el módulo Devoluciones de Logística."
+    )
+with can_historial:
+    if st.button(
+        "Ocultar histórico" if st.session_state["mostrar_historico_cancelaciones_entrega"] else "📚 Histórico",
+        use_container_width=True, key="btn_historico_cancelaciones_entrega"):
+        st.session_state["mostrar_historico_cancelaciones_entrega"] = not st.session_state["mostrar_historico_cancelaciones_entrega"]
+        st.rerun()
+
+try:
+    cancelaciones_totales = obtener_historial_cancelaciones()
+    cancelaciones_activas = obtener_cancelaciones_activas()
+except Exception as error:
+    cancelaciones_totales = pd.DataFrame(); cancelaciones_activas = pd.DataFrame()
+    st.error(f"No se pudieron leer las cancelaciones de entrega: {error}")
+
+if st.session_state["mostrar_historico_cancelaciones_entrega"]:
+    mostrar_historial_cancelaciones_entrega(cancelaciones_totales)
+    st.divider()
+
+with st.expander("➕ Cargar cancelación de entrega", expanded=False):
+    st.warning("Gestión de SUPER PRIORIDAD. Registrala y enviá el aviso inmediatamente.")
+    opciones_clientes_cancelacion = construir_opciones_clientes_cancelacion(datos.get("clientes", pd.DataFrame()))
+    with st.form("form_cancelacion_entrega", clear_on_submit=True):
+        c1,c2=st.columns(2)
+        with c1:
+            remito_cancelacion=st.text_area("Remitos *",placeholder="Uno por línea o separados por coma",height=110)
+            cliente_cancelacion=st.selectbox("Cliente *",options=opciones_clientes_cancelacion,index=0)
+        with c2:
+            motivo_cancelacion=st.selectbox("Motivo *",options=["Devolución del cliente","Error de carga del vendedor","Pedido duplicado","Error de carga de productos","Otros"])
+            observacion_cancelacion=st.text_area("Observación")
+        telefono_prueba=obtener_telefono_cancelaciones()
+        st.caption(f"El aviso se preparará para el WhatsApp: **{telefono_prueba}**")
+        cargar_cancelacion=st.form_submit_button("🚨 Registrar y preparar WhatsApp",type="primary",use_container_width=True)
+    if cargar_cancelacion:
+        usuario_cancelacion=st.session_state.get("usuario") or st.session_state.get("nombre_usuario") or "Usuario app"
+        if cliente_cancelacion=="Seleccionar cliente...":
+            st.error("Seleccioná un cliente.")
+        else:
+            try:
+                resultado=guardar_cancelacion_entrega(remito_cancelacion,cliente_cancelacion,motivo_cancelacion,observacion_cancelacion,usuario_cancelacion,telefono_prueba)
+                if resultado.get("duplicado"): st.warning(resultado["mensaje"])
+                else:
+                    st.session_state["ultima_cancelacion_whatsapp"]={"id":resultado["id"],"url":construir_url_whatsapp_cancelacion(resultado["registro"]),"registro":resultado["registro"]}
+                    st.success("Cancelación registrada. Abrí WhatsApp y enviá la alerta.")
+            except Exception as error: st.error(f"No se pudo registrar: {error}")
+
+ultima=st.session_state.get("ultima_cancelacion_whatsapp")
+if ultima:
+    st.error("🚨 Aviso pendiente de envío.")
+    w1,w2=st.columns([3,1.25])
+    with w1: st.link_button("📲 Abrir WhatsApp con la alerta",ultima["url"],type="primary",use_container_width=True)
+    with w2:
+        if st.button("✅ Confirmar envío",use_container_width=True,key="btn_confirmar_whatsapp_enviado"):
+            usuario=st.session_state.get("usuario") or st.session_state.get("nombre_usuario") or "Usuario app"
+            confirmar_envio_whatsapp(ultima["id"],usuario)
+            st.session_state["ultima_cancelacion_whatsapp"]=None
+            st.success("Aviso enviado y gestión derivada a Logística.")
+            st.rerun()
+
+if cancelaciones_activas.empty:
+    st.info("No hay cancelaciones abiertas.")
+else:
+    vista=cancelaciones_activas.copy()
+    vista["EstadoComercial"]=vista["EstadoCancelacion"].apply(estado_para_comercial)
+    vista["Fecha"]=pd.to_datetime(vista["FechaSolicitud"],errors="coerce").dt.strftime("%d/%m/%Y %H:%M").fillna(vista["FechaSolicitud"].astype(str))
+    columnas=["Remito","Cliente","Motivo","EstadoComercial","ResponsableGestion","UltimaActualizacion","ResultadoFinal","Fecha"]
+    columnas=[c for c in columnas if c in vista.columns]
+    st.markdown("#### Seguimiento de cancelaciones abiertas")
+    st.dataframe(vista[columnas].rename(columns={"EstadoComercial":"Estado","ResponsableGestion":"Responsable Logística","UltimaActualizacion":"Última actualización","ResultadoFinal":"Resultado"}),use_container_width=True,hide_index=True)
+
+
 # GESTIÓN DE URGENCIAS DIGIP
 # ==========================================================
 
@@ -1603,7 +2027,27 @@ if pedidos_urgentes_digip:
 
 
 st.markdown("---")
-st.markdown("### 🚨 Gestión de urgencias")
+urg_titulo, urg_historial = st.columns(
+    [5, 1.25], vertical_alignment="center"
+)
+with urg_titulo:
+    st.markdown("### 🚨 Gestión de urgencias")
+with urg_historial:
+    if st.button(
+        "Ocultar histórico"
+        if st.session_state["mostrar_historico_urgencias"]
+        else "📚 Histórico",
+        use_container_width=True,
+        key="btn_historico_urgencias",
+    ):
+        st.session_state["mostrar_historico_urgencias"] = (
+            not st.session_state["mostrar_historico_urgencias"]
+        )
+        st.rerun()
+
+if st.session_state["mostrar_historico_urgencias"]:
+    mostrar_historial_urgencias(urgencias_totales)
+    st.divider()
 
 urg_col_1, urg_col_2, urg_col_3 = st.columns(
     [1.2, 4.2, 1.6],
@@ -1843,7 +2287,27 @@ if orden_worker_urgentes:
             )
 
 st.markdown("---")
-st.markdown("### 📩 Solicitudes pendientes")
+sol_titulo, sol_historial = st.columns(
+    [5, 1.25], vertical_alignment="center"
+)
+with sol_titulo:
+    st.markdown("### 📩 Solicitudes pendientes")
+with sol_historial:
+    if st.button(
+        "Ocultar histórico"
+        if st.session_state["mostrar_historico_solicitudes"]
+        else "📚 Histórico",
+        use_container_width=True,
+        key="btn_historico_solicitudes",
+    ):
+        st.session_state["mostrar_historico_solicitudes"] = (
+            not st.session_state["mostrar_historico_solicitudes"]
+        )
+        st.rerun()
+
+if st.session_state["mostrar_historico_solicitudes"]:
+    mostrar_historial_solicitudes(solicitudes_totales)
+    st.divider()
 
 if solicitudes_abiertas.empty:
     st.info("No hay solicitudes pendientes de gestión.")

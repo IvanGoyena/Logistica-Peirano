@@ -79,6 +79,7 @@ COLUMNAS_RECLAMOS = [
     "FechaCierre",
 ]
 
+
 COLUMNAS_RECLAMOS_DETALLE = [
     "ReclamoDetalleID",
     "ReclamoID",
@@ -115,6 +116,38 @@ COLUMNAS_ANULACIONES = [
     "FechaResolucion",
 ]
 
+
+COLUMNAS_CANCELACIONES_ENTREGA = [
+    "CancelacionEntregaID",
+    "Remito",
+    "Cliente",
+    "Motivo",
+    "Observacion",
+    "UsuarioSolicitante",
+    "FechaSolicitud",
+    "EstadoCancelacion",
+    "TelefonoDestino",
+    "EstadoWhatsApp",
+    "FechaEnvioWhatsApp",
+    "ResponsableConfirmacion",
+    "FechaConfirmacion",
+    "ObservacionConfirmacion",
+    "NumeroIR",
+    "FechaIR",
+    "EstadoReingreso",
+    "FechaReingreso",
+    "FechaCierre",
+    "ResponsableGestion",
+    "FechaInicioGestion",
+    "ResultadoOperativo",
+    "ResponsableIR",
+    "ObservacionIR",
+    "ResponsableReingreso",
+    "ObservacionReingreso",
+    "ResultadoFinal",
+    "UltimaActualizacion",
+]
+
 ESTRUCTURA_HOJAS = {
 
     "Solicitudes": COLUMNAS_SOLICITUDES,
@@ -122,6 +155,8 @@ ESTRUCTURA_HOJAS = {
     "Urgencias": COLUMNAS_URGENCIAS,
 
     "Anulaciones": COLUMNAS_ANULACIONES,
+
+    "CancelacionesEntrega": COLUMNAS_CANCELACIONES_ENTREGA,
 
     "Reclamos": COLUMNAS_RECLAMOS,
 
@@ -335,6 +370,39 @@ def escribir_encabezados(
     ).execute()
 
 
+def asegurar_hoja(nombre_hoja: str) -> None:
+    """Crea una hoja configurada y sus encabezados cuando todavía no existe."""
+
+    if nombre_hoja not in ESTRUCTURA_HOJAS:
+        raise ValueError(f"Hoja no configurada: {nombre_hoja}")
+
+    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+    hojas_existentes = obtener_nombres_hojas()
+
+    if nombre_hoja not in hojas_existentes:
+        crear_hoja(nombre_hoja)
+        escribir_encabezados(nombre_hoja, columnas)
+        return
+
+    encabezados = leer_encabezados(nombre_hoja)
+    if not encabezados:
+        escribir_encabezados(nombre_hoja, columnas)
+        return
+
+    if encabezados != columnas:
+        # Migración segura: si la hoja conserva el mismo orden y sólo le
+        # faltan columnas nuevas al final, se amplían los encabezados sin
+        # tocar los registros existentes.
+        if columnas[:len(encabezados)] == encabezados:
+            escribir_encabezados(nombre_hoja, columnas)
+            return
+
+        raise ValueError(
+            f"La hoja '{nombre_hoja}' tiene encabezados diferentes "
+            "a los esperados."
+        )
+
+
 def inicializar_planilla() -> dict[str, Any]:
     """
     Verifica que existan todas las hojas y encabezados.
@@ -471,7 +539,10 @@ def agregar_registro(
     registro: dict[str, Any],
 ) -> None:
     """
-    Agrega una fila nueva respetando el orden de columnas.
+    Agrega una fila respetando los encabezados REALES de la hoja.
+
+    Esto evita corrimientos cuando la estructura configurada en Python
+    y las columnas existentes en Google Sheets no coinciden exactamente.
     """
 
     if nombre_hoja not in ESTRUCTURA_HOJAS:
@@ -479,14 +550,50 @@ def agregar_registro(
             f"Hoja no configurada: {nombre_hoja}"
         )
 
-    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+    servicio = crear_servicio_sheets()
+
+    respuesta_encabezados = (
+        servicio
+        .spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja, "1:1"),
+        )
+        .execute()
+    )
+
+    filas_encabezado = respuesta_encabezados.get(
+        "values",
+        [],
+    )
+
+    if filas_encabezado and filas_encabezado[0]:
+        columnas = [
+            limpiar_valor(columna)
+            for columna in filas_encabezado[0]
+            if limpiar_valor(columna)
+        ]
+    else:
+        columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+
+    columnas_esperadas = ESTRUCTURA_HOJAS[nombre_hoja]
+    faltantes = [
+        columna
+        for columna in columnas_esperadas
+        if columna not in columnas
+    ]
+
+    if faltantes:
+        raise ValueError(
+            f"La hoja '{nombre_hoja}' no contiene las columnas "
+            f"requeridas: {', '.join(faltantes)}"
+        )
 
     fila = [
         limpiar_valor(registro.get(columna, ""))
         for columna in columnas
     ]
-
-    servicio = crear_servicio_sheets()
 
     servicio.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
@@ -724,81 +831,3 @@ def numero_a_columna_excel(numero: int) -> str:
         resultado = chr(65 + resto) + resultado
 
     return resultado
-
-def actualizar_registro(
-    nombre_hoja,
-    columna_id,
-    valor_id,
-    cambios,
-):
-    """
-    Actualiza una fila buscando por una columna ID.
-    """
-
-    df = leer_hoja(nombre_hoja)
-
-    if df.empty:
-        raise ValueError("La hoja está vacía.")
-
-    indice = df[
-        df[columna_id].astype(str).str.strip()
-        == str(valor_id).strip()
-    ].index
-
-    if len(indice) == 0:
-        raise ValueError(
-            f"No existe {valor_id} en {nombre_hoja}"
-        )
-
-    fila = indice[0]
-
-    for columna, valor in cambios.items():
-        df.loc[fila, columna] = valor
-
-    servicio = crear_servicio_sheets()
-
-    servicio.spreadsheets().values().clear(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_hoja,
-    ).execute()
-
-    servicio.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"{nombre_hoja}!A1",
-        valueInputOption="RAW",
-        body={
-            "values":[
-                list(df.columns)
-            ] + df.fillna("").values.tolist()
-        },
-    ).execute()
-
-    def eliminar_registro(
-    nombre_hoja,
-    columna_id,
-    valor_id,
-):
-       df = leer_hoja(nombre_hoja)
-
-    df = df[
-        df[columna_id].astype(str).str.strip()
-        != str(valor_id).strip()
-    ]
-
-    servicio = crear_servicio_sheets()
-
-    servicio.spreadsheets().values().clear(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_hoja,
-    ).execute()
-
-    servicio.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"{nombre_hoja}!A1",
-        valueInputOption="RAW",
-        body={
-            "values":[
-                list(df.columns)
-            ] + df.fillna("").values.tolist()
-        },
-    ).execute()

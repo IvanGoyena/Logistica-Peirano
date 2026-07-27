@@ -418,7 +418,7 @@ def abrir_carga_reclamo(
 
         detalle_editado = st.data_editor(
             detalle_inicial,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             num_rows="dynamic",
             column_config={
@@ -455,7 +455,7 @@ def abrir_carga_reclamo(
         guardar = st.form_submit_button(
             "💾 Registrar reclamo",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     if not guardar:
@@ -592,7 +592,7 @@ def mostrar_boton_carga_reclamo(
     if st.button(
         "🧾 Cargar reclamo",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         key="abrir_carga_reclamo",
     ):
         abrir_carga_reclamo(

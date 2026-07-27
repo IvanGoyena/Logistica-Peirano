@@ -20,6 +20,7 @@ from utils.leer_gestion_consultas import (
     obtener_urgencias_activas,
     obtener_anulaciones_pendientes,
     obtener_reclamos_abiertos,
+    leer_reclamos,
     leer_reclamos_detalle,
     leer_reclamos_fotos,
 )
@@ -58,19 +59,38 @@ from models.expresos import (
     construir_tabla_expresos
 )
 
-from models.planificacion import (
-    construir_resumen_clientes_planificacion,
-    asignar_camionetas,
-    asignar_camioneta_a_pedidos,
-)
 
-from utils.cola_agrupaciones import (
-    crear_orden_agrupacion,
-    obtener_orden,
-)
 
 import pandas as pd
 import re
+
+from models.dashboard_pedidos import (
+    aplicar_filtros_dashboard,
+    calcular_kpis,
+    evaluar_riesgo_operativo,
+    formatear_importe_compacto,
+    indicadores_inteligencia,
+    indice_complejidad_pedidos,
+    pedidos_criticos,
+    preparar_datos_dashboard,
+    resumen_abc_detalle,
+    resumen_clientes_impacto,
+    resumen_categoria,
+    resumen_clientes_analitico,
+    resumen_composicion_detalle,
+    resumen_evolucion,
+    resumen_periodo,
+    resumen_planificacion_analitico,
+)
+from utils.graficos_pedidos import (
+    barras as grafico_barras_pedidos,
+    barras_antiguedad_unidades,
+    donut_composicion as grafico_donut_composicion,
+    grafico_abc,
+    grafico_impacto_clientes,
+    evolucion as grafico_evolucion_pedidos,
+    pareto_clientes,
+)
 
 # =====================================================
 # CONFIGURACIÓN
@@ -1026,3072 +1046,2481 @@ st.caption(
 )
 
 
-# =====================================================
-# AVISO Y GESTIÓN DE SOLICITUDES COMERCIALES
-# =====================================================
 
-ESTADOS_SOLICITUD = [
-    "Pendiente",
-    "En revisión",
-    "En curso",
-    "Finalizada",
-]
+datos_dashboard = preparar_datos_dashboard(tabla)
 
-
-# =====================================================
-# RECLAMOS PENDIENTES
-# =====================================================
-
-ESTADOS_RECLAMO_GESTION = [
-    "Pendiente",
-    "En revisión",
-    "En gestión",
-    "Resuelto",
-    "Rechazado",
-]
-
-
-@st.dialog(
-    "🧾 Gestionar reclamos",
-    width="large",
+# Detalle enriquecido con Maestro de Artículos.
+# Se utiliza para analizar la composición real del pendiente.
+tabla_detalle_dashboard = construir_tabla_detalle(
+    df_detalle,
+    df_articulos,
+    df_volumetria,
 )
-def abrir_reclamos_pendientes() -> None:
-    """
-    Permite consultar y gestionar los reclamos abiertos sin
-    ocupar espacio permanente en la página de Pedidos.
-    """
 
-    reclamos_actuales = obtener_reclamos_abiertos()
-
-    if reclamos_actuales is None or reclamos_actuales.empty:
-        st.success(
-            "No hay reclamos pendientes de revisión.",
-            icon="✅",
-        )
-        return
-
-    tabla_reclamos = reclamos_actuales.copy()
-
-    columnas_reclamos = [
-        "ReclamoID",
-        "Pedido",
-        "Remito",
-        "Cliente",
-        "FechaReclamo",
-        "TipoReclamo",
-        "Descripcion",
-        "Responsable",
-        "EstadoReclamo",
-        "Resolucion",
-        "UsuarioCreador",
-        "FechaCreacion",
-        "FechaCierre",
+tab_dashboard, tab_inteligencia, tab_operacion = st.tabs(
+    [
+        "📊 Dashboard",
+        "🧠 Inteligencia analítica",
+        "📋 Tabla y gestiones",
     ]
+)
 
-    for columna in columnas_reclamos:
-        if columna not in tabla_reclamos.columns:
-            tabla_reclamos[columna] = ""
+with tab_dashboard:
+    st.subheader("📊 Panorama operativo de pedidos")
 
-    tabla_reclamos["FechaCreacionOrden"] = pd.to_datetime(
-        tabla_reclamos["FechaCreacion"],
-        errors="coerce",
-    )
-
-    tabla_reclamos["FechaCreacionVisible"] = (
-        tabla_reclamos["FechaCreacionOrden"]
-        .dt.strftime("%d/%m/%Y %H:%M")
-        .fillna(
-            tabla_reclamos["FechaCreacion"]
-            .fillna("")
-            .astype(str)
+    if datos_dashboard.empty:
+        st.info("No hay pedidos disponibles para analizar.")
+    else:
+        fecha_min = (
+            datos_dashboard["FechaDia"].dropna().min()
         )
-    )
-
-    tabla_reclamos = (
-        tabla_reclamos
-        .sort_values(
-            by="FechaCreacionOrden",
-            ascending=False,
-            na_position="last",
-        )
-        .reset_index(drop=True)
-    )
-
-    total_reclamos = len(tabla_reclamos)
-    pedidos_afectados = tabla_reclamos["Pedido"].nunique()
-
-    resumen_1, resumen_2 = st.columns(2)
-    resumen_1.metric("Reclamos abiertos", total_reclamos)
-    resumen_2.metric("Pedidos involucrados", pedidos_afectados)
-
-    opciones_reclamo = {}
-
-    for _, fila in tabla_reclamos.iterrows():
-        reclamo_id = str(fila.get("ReclamoID", "")).strip()
-        pedido = str(fila.get("Pedido", "")).strip()
-        cliente = str(fila.get("Cliente", "")).strip()
-        incidencia = str(fila.get("TipoReclamo", "")).strip()
-        estado = str(fila.get("EstadoReclamo", "")).strip()
-
-        etiqueta = (
-            f"{pedido or 'Sin pedido'} · "
-            f"{incidencia or 'Sin incidencia'} · "
-            f"{estado or 'Pendiente'} · "
-            f"{cliente or 'Cliente sin identificar'}"
-        )
-        opciones_reclamo[etiqueta] = reclamo_id
-
-    etiqueta_seleccionada = st.selectbox(
-        "Seleccionar reclamo",
-        options=list(opciones_reclamo.keys()),
-        key="selector_reclamo_gestion",
-    )
-
-    reclamo_id = opciones_reclamo[etiqueta_seleccionada]
-
-    coincidencia = tabla_reclamos.loc[
-        tabla_reclamos["ReclamoID"]
-        .astype(str)
-        .eq(str(reclamo_id))
-    ]
-
-    if coincidencia.empty:
-        st.error("No se encontró el reclamo seleccionado.")
-        return
-
-    reclamo = coincidencia.iloc[0]
-
-    pedido = str(reclamo.get("Pedido", "")).strip()
-    remito = str(reclamo.get("Remito", "")).strip()
-    cliente = str(reclamo.get("Cliente", "")).strip()
-    incidencia = str(reclamo.get("TipoReclamo", "")).strip()
-    descripcion = str(reclamo.get("Descripcion", "")).strip()
-    registrado_por = str(reclamo.get("UsuarioCreador", "")).strip()
-    fecha_creacion = str(
-        reclamo.get("FechaCreacionVisible", "")
-    ).strip()
-    responsable_actual = str(
-        reclamo.get("Responsable", "")
-    ).strip()
-    resolucion_actual = str(
-        reclamo.get("Resolucion", "")
-    ).strip()
-    estado_actual = str(
-        reclamo.get("EstadoReclamo", "Pendiente")
-    ).strip()
-
-    if estado_actual not in ESTADOS_RECLAMO_GESTION:
-        estado_actual = "Pendiente"
-
-    cabecera_1, cabecera_2, cabecera_3 = st.columns(
-        [1, 2.4, 1.2],
-        vertical_alignment="center",
-    )
-
-    with cabecera_1:
-        st.metric("Pedido", pedido or "Sin dato")
-
-    with cabecera_2:
-        st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
-        st.caption(
-            f"{incidencia or 'Reclamo'} · Remito {remito or 'Sin dato'}"
+        fecha_max = (
+            datos_dashboard["FechaDia"].dropna().max()
         )
 
-    with cabecera_3:
-        st.metric("Estado", estado_actual)
-
-    st.info(
-        descripcion or "El reclamo no tiene descripción.",
-        icon="📝",
-    )
-
-    datos_1, datos_2, datos_3 = st.columns(3)
-
-    with datos_1:
-        st.caption(
-            f"**Registrado por**  \n{registrado_por or 'Sin dato'}"
+        filtro_1, filtro_2, filtro_3, filtro_4, filtro_5 = st.columns(
+            [1.25, 1, 1, 1, 0.85]
         )
 
-    with datos_2:
-        st.caption(
-            f"**Fecha de creación**  \n{fecha_creacion or 'Sin dato'}"
+        with filtro_1:
+            rango = st.date_input(
+                "Período de transmisión",
+                value=(
+                    fecha_min.date(),
+                    fecha_max.date(),
+                )
+                if pd.notna(fecha_min)
+                and pd.notna(fecha_max)
+                else (),
+                key="pedidos_dashboard_periodo",
+            )
+
+        with filtro_2:
+            estados_filtro = st.multiselect(
+                "Estado del pedido",
+                options=sorted(
+                    datos_dashboard["Estado"]
+                    .loc[
+                        datos_dashboard["Estado"].ne("")
+                    ]
+                    .unique()
+                    .tolist()
+                ),
+                default=[],
+            )
+
+        with filtro_3:
+            preparacion_filtro = st.multiselect(
+                "Preparación",
+                options=sorted(
+                    datos_dashboard[
+                        "CategoriaPreparacion"
+                    ].unique().tolist()
+                ),
+                default=[],
+            )
+
+        with filtro_4:
+            planificacion_filtro = st.multiselect(
+                "Planificación",
+                options=sorted(
+                    datos_dashboard[
+                        "PlanificacionVisible"
+                    ].unique().tolist()
+                ),
+                default=[],
+            )
+
+        with filtro_5:
+            incluir_cencosud = st.toggle(
+                "Incluir Cencosud",
+                value=True,
+                key="pedidos_incluir_cencosud",
+                help=(
+                    "Encendido: incluye los pedidos de Cencosud. "
+                    "Apagado: muestra el pendiente sin Cencosud."
+                ),
+            )
+
+        fecha_desde = None
+        fecha_hasta = None
+        if isinstance(rango, (list, tuple)) and len(rango) == 2:
+            fecha_desde, fecha_hasta = rango
+
+        dashboard_filtrado = aplicar_filtros_dashboard(
+            datos_dashboard,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            estados=estados_filtro,
+            preparaciones=preparacion_filtro,
+            planificaciones=planificacion_filtro,
+            incluir_cencosud=incluir_cencosud,
         )
 
-    with datos_3:
-        st.caption(
-            f"**Responsable actual**  \n"
-            f"{responsable_actual or 'Logistica'}"
+        kpis = calcular_kpis(dashboard_filtrado)
+
+        k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
+
+        k1.metric(
+            "📦 Pedidos",
+            f"{kpis['pedidos']:,}".replace(",", "."),
+        )
+        k2.metric(
+            "📦 Unidades",
+            f"{kpis['unidades']:,}".replace(",", "."),
+        )
+        k3.metric(
+            "💰 Importe",
+            formatear_importe_compacto(
+                kpis["importe"]
+            ),
+            help=(
+                "Importe pendiente ERP de los pedidos "
+                "incluidos en los filtros."
+            ),
+        )
+        k4.metric(
+            "📐 Volumen",
+            f"{kpis['volumen']:.2f} m³",
+        )
+        k5.metric("👥 Clientes", kpis["clientes"])
+        k6.metric(
+            "⏳ Antigüedad",
+            f"{kpis['antiguedad_promedio']:.1f} días",
+        )
+        k7.metric(
+            "🚨 Críticos",
+            kpis["pedidos_criticos"],
+            help=(
+                "Pedidos con más de 5 días o ubicados "
+                "en el percentil 90 de unidades/volumen."
+            ),
+        )
+        k8.metric(
+            "🚚 Planificaciones",
+            kpis["planificaciones"],
         )
 
-    detalle_reclamos = leer_reclamos_detalle()
+        st.divider()
 
-    if detalle_reclamos is not None and not detalle_reclamos.empty:
-        detalle_seleccionado = detalle_reclamos.loc[
-            detalle_reclamos["ReclamoID"]
-            .astype(str)
-            .eq(str(reclamo_id))
-        ].copy()
+        c1, c2 = st.columns([1.15, 1])
+        with c1:
+            st.markdown("#### Unidades por fecha de transmisión")
 
-        if not detalle_seleccionado.empty:
-            st.markdown("#### Artículos reclamados")
+            evolucion_dashboard = resumen_evolucion(
+                dashboard_filtrado
+            )
+            grafico_evolucion_pedidos(
+                evolucion_dashboard
+            )
 
-            columnas_detalle = [
-                "CodigoArticulo",
-                "DescripcionArticulo",
-                "Cantidad",
-                "Observacion",
+            resumen_temporal = resumen_periodo(
+                dashboard_filtrado
+            )
+
+            resumen_1, resumen_2 = st.columns(2)
+            resumen_3, resumen_4 = st.columns(2)
+
+            resumen_1.metric(
+                "🔺 Máximo del período",
+                (
+                    f"{resumen_temporal['unidades_maximas']:,} u"
+                ).replace(",", "."),
+                help=(
+                    "Mayor cantidad de unidades transmitidas "
+                    "en una misma fecha del período filtrado."
+                ),
+            )
+            resumen_1.caption(
+                resumen_temporal["fecha_maxima"]
+            )
+
+            resumen_2.metric(
+                "📊 Promedio diario",
+                (
+                    f"{resumen_temporal['promedio_diario']:,.0f} u"
+                ).replace(",", "."),
+            )
+
+            resumen_3.metric(
+                "📦 Total del período",
+                (
+                    f"{resumen_temporal['total_unidades']:,} u"
+                ).replace(",", "."),
+            )
+
+            variacion_ultima = resumen_temporal[
+                "variacion_ultima_fecha"
             ]
+            delta_transmision = (
+                f"{variacion_ultima:+.1f}% vs fecha anterior"
+                if variacion_ultima is not None
+                else None
+            )
 
-            for columna in columnas_detalle:
-                if columna not in detalle_seleccionado.columns:
-                    detalle_seleccionado[columna] = ""
+            resumen_4.metric(
+                "📄 Pedidos transmitidos",
+                resumen_temporal["pedidos_transmitidos"],
+                delta=delta_transmision,
+                delta_color="inverse",
+            )
+
+        with c2:
+            st.markdown("#### Composición del pendiente")
+
+            dimension_composicion = st.radio(
+                "Analizar unidades por",
+                options=["Sectorización", "Familia"],
+                horizontal=True,
+                key="pedidos_dimension_composicion",
+                label_visibility="collapsed",
+            )
+
+            columna_dimension = (
+                "Sectorizacion"
+                if dimension_composicion == "Sectorización"
+                else "Familia"
+            )
+
+            pedidos_dashboard = (
+                dashboard_filtrado["Pedido"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+
+            resumen_composicion = resumen_composicion_detalle(
+                tabla_detalle_dashboard,
+                pedidos=pedidos_dashboard,
+                dimension=columna_dimension,
+                top=10,
+            )
+
+            grafico_donut_composicion(
+                resumen_composicion,
+                dimension_composicion,
+                "Unidades",
+            )
+
+            st.caption(
+                "Incluye Cencosud"
+                if incluir_cencosud
+                else "Vista sin Cencosud"
+            )
+
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown("#### Pedidos por planificación")
+            grafico_barras_pedidos(
+                resumen_categoria(
+                    dashboard_filtrado,
+                    "PlanificacionVisible",
+                    "Planificación",
+                    top=10,
+                ),
+                "Planificación",
+                "Pedidos",
+                color="#14B8A6",
+            )
+        with c4:
+            st.markdown("#### Volumen por planificación")
+            grafico_barras_pedidos(
+                resumen_categoria(
+                    dashboard_filtrado,
+                    "PlanificacionVisible",
+                    "Planificación",
+                    top=10,
+                    medida="Volumen",
+                ),
+                "Planificación",
+                "Volumen",
+                color="#F59E0B",
+            )
+
+        c5, c6 = st.columns(2)
+        with c5:
+            st.markdown("#### Clientes con más unidades")
+            grafico_barras_pedidos(
+                resumen_categoria(
+                    dashboard_filtrado,
+                    "ClienteVisible",
+                    "Cliente",
+                    top=10,
+                    medida="Unidades",
+                ),
+                "Cliente",
+                "Unidades",
+                color="#8B5CF6",
+            )
+        with c6:
+            st.markdown("#### Antigüedad de pedidos")
+            grafico_barras_pedidos(
+                resumen_categoria(
+                    dashboard_filtrado,
+                    "RangoAntiguedad",
+                    "Antigüedad",
+                ),
+                "Antigüedad",
+                "Pedidos",
+                horizontal=False,
+                color="#EF4444",
+            )
+
+
+with tab_inteligencia:
+    st.subheader("🧠 Inteligencia analítica del pendiente")
+    st.caption(
+        "Lectura de concentración, tendencia, antigüedad y dimensión "
+        "operativa sobre los mismos filtros aplicados en Dashboard."
+    )
+
+    if datos_dashboard.empty:
+        st.info("No hay pedidos disponibles para analizar.")
+    else:
+        # Se reutilizan los filtros definidos en Dashboard.
+        # Streamlit ejecuta la página completa en cada interacción.
+        if "dashboard_filtrado" not in locals():
+            dashboard_filtrado = datos_dashboard.copy()
+
+        inteligencia = indicadores_inteligencia(
+            dashboard_filtrado
+        )
+
+        i1, i2, i3, i4, i5, i6 = st.columns(6)
+
+        i1.metric(
+            "Unidades / pedido",
+            f"{inteligencia['unidades_promedio_pedido']:.1f}",
+        )
+        i2.metric(
+            "M³ / pedido",
+            f"{inteligencia['volumen_promedio_pedido']:.2f}",
+        )
+        i3.metric(
+            "Concentración Top 5",
+            f"{inteligencia['concentracion_top_5']:.1f}%",
+            help=(
+                "Porcentaje de unidades concentrado en los "
+                "cinco clientes con mayor pendiente."
+            ),
+        )
+        i4.metric(
+            "Cliente principal",
+            inteligencia["cliente_principal"],
+            delta=(
+                f"{inteligencia['participacion_cliente_principal']:.1f}% "
+                "de las unidades"
+            ),
+            delta_color="off",
+        )
+        i5.metric(
+            "Pedidos +5 días",
+            inteligencia["pedidos_mas_5_dias"],
+            delta=(
+                f"{inteligencia['unidades_mas_5_dias']:,} unidades"
+            ).replace(",", "."),
+            delta_color="inverse",
+        )
+
+        tendencia = inteligencia["tendencia_reciente"]
+        tendencia_texto = (
+            f"{tendencia:+.1f}%"
+            if tendencia is not None
+            else "Sin base"
+        )
+        i6.metric(
+            "Tendencia reciente",
+            tendencia_texto,
+            help=(
+                "Compara el promedio de unidades de las últimas "
+                "fechas transmitidas contra el bloque anterior."
+            ),
+            delta_color="inverse",
+        )
+
+        st.divider()
+
+        analitica_1, analitica_2 = st.columns([1.45, 1])
+
+        with analitica_1:
+            st.markdown(
+                "#### Pareto de clientes por unidades"
+            )
+            tabla_pareto = resumen_clientes_analitico(
+                dashboard_filtrado,
+                top=12,
+            )
+            pareto_clientes(tabla_pareto)
+
+        with analitica_2:
+            st.markdown(
+                "#### Unidades por antigüedad"
+            )
+            antiguedad_unidades = resumen_categoria(
+                dashboard_filtrado,
+                "RangoAntiguedad",
+                "Antigüedad",
+                medida="Unidades",
+            )
+            barras_antiguedad_unidades(
+                antiguedad_unidades
+            )
+
+        st.markdown("### Diagnóstico operativo avanzado")
+
+        avanzada_1, avanzada_2 = st.columns([1.15, 1])
+
+        with avanzada_1:
+            st.markdown("#### ABC de la composición")
+
+            dimension_abc = st.radio(
+                "Dimensión ABC",
+                options=["Familia", "Sectorización"],
+                horizontal=True,
+                key="pedidos_dimension_abc",
+                label_visibility="collapsed",
+            )
+            columna_abc = (
+                "Familia"
+                if dimension_abc == "Familia"
+                else "Sectorizacion"
+            )
+            tabla_abc = resumen_abc_detalle(
+                tabla_detalle_dashboard,
+                pedidos=dashboard_filtrado[
+                    "Pedido"
+                ].tolist(),
+                dimension=columna_abc,
+            )
+
+            grafico_abc(
+                tabla_abc.head(15),
+                dimension_abc,
+            )
+
+            st.caption(
+                "Clase A: hasta 80% acumulado · "
+                "Clase B: 80–95% · Clase C: restante. "
+                "El importe no se reparte por familia porque "
+                "el detalle no contiene valor por línea."
+            )
+
+        with avanzada_2:
+            st.markdown("#### Riesgo operativo")
+
+            riesgo = evaluar_riesgo_operativo(
+                dashboard_filtrado,
+                inteligencia,
+            )
+
+            color_riesgo = {
+                "Alto": "error",
+                "Medio": "warning",
+                "Bajo": "success",
+            }.get(riesgo["nivel"], "info")
+
+            mensaje_riesgo = (
+                f"Nivel {riesgo['nivel']} · "
+                f"{riesgo['puntaje']} puntos"
+            )
+
+            if color_riesgo == "error":
+                st.error(mensaje_riesgo, icon="🔴")
+            elif color_riesgo == "warning":
+                st.warning(mensaje_riesgo, icon="🟡")
+            elif color_riesgo == "success":
+                st.success(mensaje_riesgo, icon="🟢")
+            else:
+                st.info(mensaje_riesgo)
+
+            for motivo in riesgo["motivos"]:
+                st.markdown(f"- {motivo}")
+
+            st.markdown("#### Clientes calientes")
+            clientes_impacto = resumen_clientes_impacto(
+                dashboard_filtrado,
+                top=8,
+            )
+            grafico_impacto_clientes(
+                clientes_impacto
+            )
+
+        analitica_3, analitica_4 = st.columns(2)
+
+        with analitica_3:
+            st.markdown(
+                "#### Productividad por planificación"
+            )
+            tabla_planificacion = (
+                resumen_planificacion_analitico(
+                    dashboard_filtrado
+                )
+            )
 
             st.dataframe(
-                detalle_seleccionado[columnas_detalle].rename(
-                    columns={
-                        "CodigoArticulo": "Código",
-                        "DescripcionArticulo": "Descripción",
-                        "Cantidad": "Cantidad reclamada",
-                        "Observacion": "Detalle de cantidades",
-                    }
-                ),
+                tabla_planificacion,
                 width="stretch",
                 hide_index=True,
+                height=min(
+                    420,
+                    75 + len(tabla_planificacion) * 35,
+                ),
+                column_config={
+                    "Pedidos": st.column_config.NumberColumn(
+                        format="%d"
+                    ),
+                    "Unidades": st.column_config.NumberColumn(
+                        format="%d"
+                    ),
+                    "Volumen": st.column_config.NumberColumn(
+                        "Volumen (m³)",
+                        format="%.2f",
+                    ),
+                    "Unidades por pedido": (
+                        st.column_config.NumberColumn(
+                            format="%.1f"
+                        )
+                    ),
+                    "M3 por pedido": (
+                        st.column_config.NumberColumn(
+                            "M³ por pedido",
+                            format="%.2f",
+                        )
+                    ),
+                },
             )
 
-    fotos_reclamos = leer_reclamos_fotos()
+        with analitica_4:
+            st.markdown("#### Señales de gestión")
 
-    if fotos_reclamos is not None and not fotos_reclamos.empty:
-        fotos_seleccionadas = fotos_reclamos.loc[
-            fotos_reclamos["ReclamoID"]
-            .astype(str)
-            .eq(str(reclamo_id))
-        ].copy()
-
-        if not fotos_seleccionadas.empty:
-            st.markdown("#### Fotografías")
-
-            for posicion, (_, foto) in enumerate(
-                fotos_seleccionadas.iterrows(),
-                start=1,
+            if (
+                inteligencia["concentracion_top_5"]
+                >= 60
             ):
-                nombre_foto = str(
-                    foto.get("NombreArchivo", f"Fotografía {posicion}")
-                ).strip()
-                url_foto = str(
-                    foto.get("URLArchivo", "")
-                ).strip()
+                st.warning(
+                    (
+                        "Alta concentración: los cinco principales "
+                        f"clientes representan "
+                        f"{inteligencia['concentracion_top_5']:.1f}% "
+                        "de las unidades pendientes."
+                    ),
+                    icon="⚠️",
+                )
+            else:
+                st.success(
+                    (
+                        "La carga está relativamente distribuida: "
+                        f"el Top 5 concentra "
+                        f"{inteligencia['concentracion_top_5']:.1f}%."
+                    ),
+                    icon="✅",
+                )
 
-                if url_foto:
-                    st.link_button(
-                        f"📷 {nombre_foto or f'Fotografía {posicion}'}",
-                        url_foto,
-                        width="stretch",
+            if inteligencia["pedidos_mas_5_dias"] > 0:
+                st.error(
+                    (
+                        f"Hay {inteligencia['pedidos_mas_5_dias']} "
+                        "pedido(s) con más de 5 días, por "
+                        f"{inteligencia['unidades_mas_5_dias']:,} "
+                        "unidades."
+                    ).replace(",", "."),
+                    icon="⏳",
+                )
+            else:
+                st.success(
+                    "No hay pedidos con más de 5 días.",
+                    icon="✅",
+                )
+
+            if tendencia is not None:
+                if tendencia > 10:
+                    st.warning(
+                        (
+                            "La carga reciente está creciendo: "
+                            f"{tendencia:+.1f}% frente al bloque "
+                            "de fechas anterior."
+                        ),
+                        icon="📈",
+                    )
+                elif tendencia < -10:
+                    st.success(
+                        (
+                            "La carga reciente está bajando: "
+                            f"{tendencia:+.1f}% frente al bloque "
+                            "de fechas anterior."
+                        ),
+                        icon="📉",
+                    )
+                else:
+                    st.info(
+                        (
+                            "La carga reciente se mantiene estable: "
+                            f"{tendencia:+.1f}%."
+                        ),
+                        icon="➡️",
                     )
 
-    st.divider()
-
-    with st.form(
-        f"form_gestion_reclamo_{reclamo_id}",
-        clear_on_submit=False,
-    ):
-        formulario_1, formulario_2 = st.columns([1, 2])
-
-        with formulario_1:
-            nuevo_estado_reclamo = st.selectbox(
-                "Estado",
-                options=ESTADOS_RECLAMO_GESTION,
-                index=ESTADOS_RECLAMO_GESTION.index(
-                    estado_actual
+            st.info(
+                (
+                    "Cliente con mayor impacto: "
+                    f"{inteligencia['cliente_principal']} "
+                    f"({inteligencia['participacion_cliente_principal']:.1f}% "
+                    "de las unidades)."
                 ),
+                icon="🏢",
             )
 
-        with formulario_2:
-            resolucion_reclamo = st.text_area(
-                "Respuesta / resolución",
-                value=resolucion_actual,
-                placeholder=(
-                    "Detalle de la revisión, respuesta al reclamo "
-                    "o solución aplicada por Logística..."
-                ),
-                height=120,
-            )
+        st.markdown(
+            "#### Priorización por complejidad operativa"
+        )
+        st.caption(
+            "El puntaje combina antigüedad, unidades, volumen, "
+            "SKU, cantidad de familias e importe. El ranking es "
+            "relativo al conjunto filtrado y explica sus motivos."
+        )
 
-        guardar_reclamo = st.form_submit_button(
-            "💾 Guardar gestión del reclamo",
-            type="primary",
+        tabla_criticos = indice_complejidad_pedidos(
+            dashboard_filtrado,
+            tabla_detalle_dashboard,
+            limite=20,
+        )
+
+        st.dataframe(
+            tabla_criticos,
             width="stretch",
-        )
-
-    if guardar_reclamo:
-        usuario_logistica = (
-            st.session_state.get("usuario")
-            or st.session_state.get("nombre_usuario")
-            or "Logistica"
-        )
-
-        try:
-            resultado = actualizar_reclamo(
-                reclamo_id=reclamo_id,
-                estado_reclamo=nuevo_estado_reclamo,
-                resolucion=resolucion_reclamo,
-                responsable=usuario_logistica,
-            )
-
-            st.success(resultado["mensaje"])
-            st.toast("Reclamo actualizado.", icon="✅")
-            st.rerun()
-
-        except Exception as error:
-            st.error("No se pudo actualizar el reclamo.")
-            st.exception(error)
-
-
-if not reclamos_abiertos.empty:
-
-    cantidad_reclamos_abiertos = len(reclamos_abiertos)
-    pedidos_con_reclamo = (
-        reclamos_abiertos["Pedido"].nunique()
-        if "Pedido" in reclamos_abiertos.columns
-        else 0
-    )
-
-    aviso_reclamo, boton_reclamo = st.columns(
-        [5, 1.25],
-        vertical_alignment="center",
-    )
-
-    with aviso_reclamo:
-        st.warning(
-            (
-                f"Hay {cantidad_reclamos_abiertos} reclamo(s) "
-                f"pendiente(s) de revisión sobre "
-                f"{pedidos_con_reclamo} pedido(s)."
+            hide_index=True,
+            height=min(
+                560,
+                75 + len(tabla_criticos) * 35,
             ),
-            icon="🧾",
-        )
-
-    with boton_reclamo:
-        ver_reclamos_pendientes = st.button(
-            "Gestionar reclamos",
-            icon="🧾",
-            type="primary",
-            width="stretch",
-            key="btn_ver_reclamos_pendientes",
-        )
-
-    if ver_reclamos_pendientes:
-        abrir_reclamos_pendientes()
-
-
-@st.dialog(
-    "📩 Gestionar solicitud comercial",
-    width="large",
-)
-def abrir_gestion_solicitud(
-    solicitud_id: str,
-) -> None:
-    """
-    Abre una ventana modal para gestionar una solicitud sin
-    ocupar espacio permanente en la pantalla principal.
-    """
-
-    coincidencia = solicitudes_abiertas.loc[
-        solicitudes_abiertas["SolicitudID"]
-        .astype(str)
-        .eq(str(solicitud_id))
-    ].copy()
-
-    if coincidencia.empty:
-        st.error("No se encontró la solicitud seleccionada.")
-        return
-
-    solicitud = coincidencia.iloc[0]
-
-    pedido = str(
-        solicitud.get("Pedido", "")
-    ).strip()
-
-    cliente = str(
-        solicitud.get("Cliente", "")
-    ).strip()
-
-    tipo_solicitud = str(
-        solicitud.get("TipoSolicitud", "")
-    ).strip()
-
-    prioridad = str(
-        solicitud.get("Prioridad", "")
-    ).strip()
-
-    descripcion = str(
-        solicitud.get("Descripcion", "")
-    ).strip()
-
-    solicitado_por = str(
-        solicitud.get("UsuarioSolicitante", "")
-    ).strip()
-
-    fecha_solicitud = str(
-        solicitud.get("FechaSolicitudVisible", "")
-    ).strip()
-
-    responsable_actual = str(
-        solicitud.get("Responsable", "")
-    ).strip()
-
-    unidades_pedido = int(
-        pd.to_numeric(
-            solicitud.get("TotalUnidades", 0),
-            errors="coerce",
-        )
-        if pd.notna(
-            pd.to_numeric(
-                solicitud.get("TotalUnidades", 0),
-                errors="coerce",
-            )
-        )
-        else 0
-    )
-
-    volumen_pedido = float(
-        pd.to_numeric(
-            solicitud.get("TotalM3", 0),
-            errors="coerce",
-        )
-        if pd.notna(
-            pd.to_numeric(
-                solicitud.get("TotalM3", 0),
-                errors="coerce",
-            )
-        )
-        else 0
-    )
-
-    estado_actual = str(
-        solicitud.get(
-            "EstadoSolicitud",
-            "Pendiente",
-        )
-    ).strip()
-
-    if estado_actual not in ESTADOS_SOLICITUD:
-        estado_actual = "Pendiente"
-
-    prioridad_icono = {
-        "ALTA": "🔴",
-        "NORMAL": "🟡",
-        "BAJA": "🟢",
-    }.get(
-        prioridad.upper(),
-        "⚪",
-    )
-
-    cabecera_1, cabecera_2, cabecera_3, cabecera_4 = st.columns(
-        [0.9, 2.1, 0.9, 0.9],
-        vertical_alignment="center",
-    )
-
-    with cabecera_1:
-        st.metric(
-            "Pedido",
-            pedido or "Sin dato",
-        )
-
-    with cabecera_2:
-        st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
-        st.caption(
-            f"{tipo_solicitud or 'Solicitud'} · "
-            f"{prioridad_icono} {prioridad or 'Sin prioridad'}"
-        )
-
-    with cabecera_3:
-        st.metric(
-            "Unidades",
-            f"{unidades_pedido:,}".replace(",", "."),
-        )
-
-    with cabecera_4:
-        volumen_formateado = (
-            f"{volumen_pedido:,.3f} m³"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
-        st.metric(
-            "Volumen",
-            volumen_formateado,
-        )
-
-    st.caption(
-        f"**Estado actual:** {estado_actual}"
-    )
-
-    st.info(
-        descripcion or "La solicitud no tiene detalle.",
-        icon="📝",
-    )
-
-    datos_col_1, datos_col_2, datos_col_3 = st.columns(3)
-
-    with datos_col_1:
-        st.caption(
-            f"**Solicitado por**  \n"
-            f"{solicitado_por or 'Sin dato'}"
-        )
-
-    with datos_col_2:
-        st.caption(
-            f"**Fecha**  \n"
-            f"{fecha_solicitud or 'Sin dato'}"
-        )
-
-    with datos_col_3:
-        st.caption(
-            f"**Responsable actual**  \n"
-            f"{responsable_actual or 'Sin asignar'}"
-        )
-
-    st.divider()
-
-    with st.form(
-        f"form_gestion_solicitud_{solicitud_id}",
-        clear_on_submit=False,
-    ):
-
-        formulario_1, formulario_2 = st.columns(
-            [1, 2],
-        )
-
-        with formulario_1:
-
-            nuevo_estado_solicitud = st.selectbox(
-                "Estado",
-                options=ESTADOS_SOLICITUD,
-                index=ESTADOS_SOLICITUD.index(
-                    estado_actual
+            column_config={
+                "Pedido": st.column_config.TextColumn(
+                    width="small"
                 ),
-            )
-
-        with formulario_2:
-
-            observacion_logistica = st.text_area(
-                "Observación / respuesta",
-                value=str(
-                    solicitud.get(
-                        "Respuesta",
-                        "",
-                    )
+                "Cliente": st.column_config.TextColumn(
+                    width="large"
                 ),
-                placeholder=(
-                    "Detalle de la revisión o acción "
-                    "realizada por Logística..."
+                "Prioridad": st.column_config.NumberColumn(
+                    "#",
+                    format="%d",
+                    width="small",
                 ),
-                height=110,
-            )
-
-        guardar_estado_solicitud = (
-            st.form_submit_button(
-                "💾 Guardar actualización",
-                type="primary",
-                width="stretch",
-            )
+                "Puntaje": st.column_config.ProgressColumn(
+                    "Complejidad",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f",
+                    width="medium",
+                ),
+                "Días": st.column_config.NumberColumn(
+                    format="%d"
+                ),
+                "Unidades": st.column_config.NumberColumn(
+                    format="%d"
+                ),
+                "SKU": st.column_config.NumberColumn(
+                    format="%d"
+                ),
+                "Familias": st.column_config.NumberColumn(
+                    format="%d"
+                ),
+                "M3": st.column_config.NumberColumn(
+                    "M³",
+                    format="%.2f",
+                ),
+                "Importe": st.column_config.NumberColumn(
+                    "Importe",
+                    format="$ %.0f",
+                ),
+                "Planificación": st.column_config.TextColumn(
+                    width="medium"
+                ),
+                "Motivos": st.column_config.TextColumn(
+                    width="large"
+                ),
+            },
         )
 
-    if guardar_estado_solicitud:
 
-        usuario_logistica = (
-            st.session_state.get("usuario")
-            or st.session_state.get("nombre_usuario")
-            or "Logística"
-        )
+with tab_operacion:
+    # =====================================================
+    # AVISO Y GESTIÓN DE SOLICITUDES COMERCIALES
+    # =====================================================
 
-        try:
+    ESTADOS_SOLICITUD = [
+        "Pendiente",
+        "En revisión",
+        "En curso",
+        "Finalizada",
+    ]
 
-            resultado_actualizacion = actualizar_solicitud(
-                solicitud_id=solicitud_id,
-                estado_solicitud=nuevo_estado_solicitud,
-                responsable=usuario_logistica,
-                respuesta=observacion_logistica,
-            )
 
+    # =====================================================
+    # RECLAMOS PENDIENTES
+    # =====================================================
+
+    ESTADOS_RECLAMO_GESTION = [
+        "Pendiente",
+        "En revisión",
+        "En gestión",
+        "Resuelto",
+        "Rechazado",
+    ]
+
+
+    @st.dialog(
+        "🧾 Gestionar reclamos",
+        width="large",
+    )
+    def abrir_reclamos_pendientes() -> None:
+        """
+        Permite consultar y gestionar los reclamos abiertos sin
+        ocupar espacio permanente en la página de Pedidos.
+        """
+
+        reclamos_actuales = obtener_reclamos_abiertos()
+
+        if reclamos_actuales is None or reclamos_actuales.empty:
             st.success(
-                resultado_actualizacion["mensaje"]
-            )
-
-            st.toast(
-                "Solicitud actualizada.",
+                "No hay reclamos pendientes de revisión.",
                 icon="✅",
             )
+            return
 
-            st.rerun()
+        tabla_reclamos = reclamos_actuales.copy()
 
-        except Exception as error:
+        columnas_reclamos = [
+            "ReclamoID",
+            "Pedido",
+            "Remito",
+            "Cliente",
+            "FechaReclamo",
+            "TipoReclamo",
+            "Descripcion",
+            "Responsable",
+            "EstadoReclamo",
+            "Resolucion",
+            "UsuarioCreador",
+            "FechaCreacion",
+            "FechaCierre",
+        ]
 
-            st.error(
-                "No se pudo actualizar la solicitud."
+        for columna in columnas_reclamos:
+            if columna not in tabla_reclamos.columns:
+                tabla_reclamos[columna] = ""
+
+        tabla_reclamos["FechaCreacionOrden"] = pd.to_datetime(
+            tabla_reclamos["FechaCreacion"],
+            errors="coerce",
+        )
+
+        tabla_reclamos["FechaCreacionVisible"] = (
+            tabla_reclamos["FechaCreacionOrden"]
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna(
+                tabla_reclamos["FechaCreacion"]
+                .fillna("")
+                .astype(str)
             )
-
-            st.exception(error)
-
-
-if solicitudes_abiertas.empty:
-
-    st.success(
-        "No hay solicitudes comerciales pendientes.",
-        icon="✅",
-    )
-
-else:
-
-    total_solicitudes_abiertas = len(solicitudes_abiertas)
-    pedidos_con_solicitud = solicitudes_abiertas["Pedido"].nunique()
-
-    prioridad_alta = int(
-        solicitudes_abiertas["Prioridad"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .eq("ALTA")
-        .sum()
-    )
-
-    cantidad_cancelaciones = int(
-        solicitudes_abiertas["TipoSolicitud"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-        .isin({"CANCELACIÓN", "CANCELACION"})
-        .sum()
-    )
-
-    st.warning(
-        (
-            f"Hay {total_solicitudes_abiertas} solicitudes "
-            f"comerciales pendientes sobre "
-            f"{pedidos_con_solicitud} pedidos."
-        ),
-        icon="📩",
-    )
-
-    with st.expander(
-        (
-            f"📩 Solicitudes comerciales "
-            f"({total_solicitudes_abiertas})"
-        ),
-        expanded=False,
-    ):
-
-        (
-            resumen_col_1,
-            resumen_col_2,
-            resumen_col_3,
-            resumen_col_4,
-        ) = st.columns(4)
-
-        resumen_col_1.metric(
-            "Abiertas",
-            total_solicitudes_abiertas,
         )
 
-        resumen_col_2.metric(
-            "Pedidos",
-            pedidos_con_solicitud,
-        )
-
-        resumen_col_3.metric(
-            "Prioridad alta",
-            prioridad_alta,
-        )
-
-        resumen_col_4.metric(
-            "Cancelaciones",
-            cantidad_cancelaciones,
-            help=(
-                "Solicitudes abiertas de Cancelación que "
-                "requieren revisión prioritaria."
-            ),
-        )
-
-        solicitudes_abiertas_ordenadas = (
-            solicitudes_abiertas
-            .assign(
-                EsCancelacion=(
-                    solicitudes_abiertas["TipoSolicitud"]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .str.upper()
-                    .isin({"CANCELACIÓN", "CANCELACION"})
-                    .astype(int)
-                ),
-                EsPrioridadAlta=(
-                    solicitudes_abiertas["Prioridad"]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .str.upper()
-                    .eq("ALTA")
-                    .astype(int)
-                ),
-            )
+        tabla_reclamos = (
+            tabla_reclamos
             .sort_values(
-                by=[
-                    "EsCancelacion",
-                    "EsPrioridadAlta",
-                    "FechaSolicitudOrden",
-                ],
-                ascending=[False, False, False],
+                by="FechaCreacionOrden",
+                ascending=False,
                 na_position="last",
             )
             .reset_index(drop=True)
         )
 
-        tabla_solicitudes_visible = (
-            solicitudes_abiertas_ordenadas[
-                [
-                    "SolicitudID",
-                    "Pedido",
-                    "Cliente",
-                    "TipoSolicitud",
-                    "Prioridad",
-                    "TotalUnidades",
-                    "TotalM3",
-                    "Descripcion",
-                    "FechaSolicitudVisible",
-                    "EstadoSolicitud",
-                    "Responsable",
-                ]
-            ]
-            .rename(
-                columns={
-                    "SolicitudID": "ID",
-                    "TipoSolicitud": "Tipo",
-                    "Descripcion": "Detalle",
-                    "FechaSolicitudVisible": "Fecha",
-                    "EstadoSolicitud": "Estado",
-                }
+        total_reclamos = len(tabla_reclamos)
+        pedidos_afectados = tabla_reclamos["Pedido"].nunique()
+
+        resumen_1, resumen_2 = st.columns(2)
+        resumen_1.metric("Reclamos abiertos", total_reclamos)
+        resumen_2.metric("Pedidos involucrados", pedidos_afectados)
+
+        opciones_reclamo = {}
+
+        for _, fila in tabla_reclamos.iterrows():
+            reclamo_id = str(fila.get("ReclamoID", "")).strip()
+            pedido = str(fila.get("Pedido", "")).strip()
+            cliente = str(fila.get("Cliente", "")).strip()
+            incidencia = str(fila.get("TipoReclamo", "")).strip()
+            estado = str(fila.get("EstadoReclamo", "")).strip()
+
+            etiqueta = (
+                f"{pedido or 'Sin pedido'} · "
+                f"{incidencia or 'Sin incidencia'} · "
+                f"{estado or 'Pendiente'} · "
+                f"{cliente or 'Cliente sin identificar'}"
             )
-            .reset_index(drop=True)
+            opciones_reclamo[etiqueta] = reclamo_id
+
+        etiqueta_seleccionada = st.selectbox(
+            "Seleccionar reclamo",
+            options=list(opciones_reclamo.keys()),
+            key="selector_reclamo_gestion",
         )
 
-        evento_solicitudes = st.dataframe(
-            tabla_solicitudes_visible,
-            width="stretch",
-            hide_index=True,
-            height=min(
-                340,
-                85 + len(tabla_solicitudes_visible) * 35,
-            ),
-            on_select="rerun",
-            selection_mode="single-row",
-            key="tabla_solicitudes_comerciales",
-            column_config={
-                "ID": None,
-                "Pedido": st.column_config.TextColumn(
-                    "Pedido",
-                    width="small",
-                ),
-                "Cliente": st.column_config.TextColumn(
-                    "Cliente",
-                    width="medium",
-                ),
-                "Tipo": st.column_config.TextColumn(
-                    "Solicitud",
-                    width="medium",
-                ),
-                "Prioridad": st.column_config.TextColumn(
-                    "Prioridad",
-                    width="small",
-                ),
-                "Detalle": st.column_config.TextColumn(
-                    "Detalle",
-                    width="large",
-                ),
-                "Fecha": st.column_config.TextColumn(
-                    "Fecha",
-                    width="small",
-                ),
-                "Estado": st.column_config.TextColumn(
-                    "Estado",
-                    width="small",
-                ),
-                "Responsable": st.column_config.TextColumn(
-                    "Responsable",
-                    width="small",
-                ),
-            },
-        )
+        reclamo_id = opciones_reclamo[etiqueta_seleccionada]
 
-        filas_seleccionadas = (
-            evento_solicitudes.selection.rows
-            if evento_solicitudes is not None
-            else []
-        )
+        coincidencia = tabla_reclamos.loc[
+            tabla_reclamos["ReclamoID"]
+            .astype(str)
+            .eq(str(reclamo_id))
+        ]
 
-        accion_col_1, accion_col_2 = st.columns(
-            [4, 1],
+        if coincidencia.empty:
+            st.error("No se encontró el reclamo seleccionado.")
+            return
+
+        reclamo = coincidencia.iloc[0]
+
+        pedido = str(reclamo.get("Pedido", "")).strip()
+        remito = str(reclamo.get("Remito", "")).strip()
+        cliente = str(reclamo.get("Cliente", "")).strip()
+        incidencia = str(reclamo.get("TipoReclamo", "")).strip()
+        descripcion = str(reclamo.get("Descripcion", "")).strip()
+        registrado_por = str(reclamo.get("UsuarioCreador", "")).strip()
+        fecha_creacion = str(
+            reclamo.get("FechaCreacionVisible", "")
+        ).strip()
+        responsable_actual = str(
+            reclamo.get("Responsable", "")
+        ).strip()
+        resolucion_actual = str(
+            reclamo.get("Resolucion", "")
+        ).strip()
+        estado_actual = str(
+            reclamo.get("EstadoReclamo", "Pendiente")
+        ).strip()
+
+        if estado_actual not in ESTADOS_RECLAMO_GESTION:
+            estado_actual = "Pendiente"
+
+        cabecera_1, cabecera_2, cabecera_3 = st.columns(
+            [1, 2.4, 1.2],
             vertical_alignment="center",
         )
 
-        with accion_col_1:
+        with cabecera_1:
+            st.metric("Pedido", pedido or "Sin dato")
 
-            if filas_seleccionadas:
+        with cabecera_2:
+            st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
+            st.caption(
+                f"{incidencia or 'Reclamo'} · Remito {remito or 'Sin dato'}"
+            )
 
-                fila_seleccionada = filas_seleccionadas[0]
+        with cabecera_3:
+            st.metric("Estado", estado_actual)
 
-                solicitud_seleccionada = (
-                    tabla_solicitudes_visible.iloc[
-                        fila_seleccionada
-                    ]
+        st.info(
+            descripcion or "El reclamo no tiene descripción.",
+            icon="📝",
+        )
+
+        datos_1, datos_2, datos_3 = st.columns(3)
+
+        with datos_1:
+            st.caption(
+                f"**Registrado por**  \n{registrado_por or 'Sin dato'}"
+            )
+
+        with datos_2:
+            st.caption(
+                f"**Fecha de creación**  \n{fecha_creacion or 'Sin dato'}"
+            )
+
+        with datos_3:
+            st.caption(
+                f"**Responsable actual**  \n"
+                f"{responsable_actual or 'Logistica'}"
+            )
+
+        detalle_reclamos = leer_reclamos_detalle()
+
+        if detalle_reclamos is not None and not detalle_reclamos.empty:
+            detalle_seleccionado = detalle_reclamos.loc[
+                detalle_reclamos["ReclamoID"]
+                .astype(str)
+                .eq(str(reclamo_id))
+            ].copy()
+
+            if not detalle_seleccionado.empty:
+                st.markdown("#### Artículos reclamados")
+
+                columnas_detalle = [
+                    "CodigoArticulo",
+                    "DescripcionArticulo",
+                    "Cantidad",
+                    "Observacion",
+                ]
+
+                for columna in columnas_detalle:
+                    if columna not in detalle_seleccionado.columns:
+                        detalle_seleccionado[columna] = ""
+
+                st.dataframe(
+                    detalle_seleccionado[columnas_detalle].rename(
+                        columns={
+                            "CodigoArticulo": "Código",
+                            "DescripcionArticulo": "Descripción",
+                            "Cantidad": "Cantidad reclamada",
+                            "Observacion": "Detalle de cantidades",
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
                 )
 
-                st.caption(
-                    f"Seleccionada: pedido "
-                    f"**{solicitud_seleccionada['Pedido']}** · "
-                    f"{solicitud_seleccionada['Tipo']}"
+        fotos_reclamos = leer_reclamos_fotos()
+
+        if fotos_reclamos is not None and not fotos_reclamos.empty:
+            fotos_seleccionadas = fotos_reclamos.loc[
+                fotos_reclamos["ReclamoID"]
+                .astype(str)
+                .eq(str(reclamo_id))
+            ].copy()
+
+            if not fotos_seleccionadas.empty:
+                st.markdown("#### Fotografías")
+
+                for posicion, (_, foto) in enumerate(
+                    fotos_seleccionadas.iterrows(),
+                    start=1,
+                ):
+                    nombre_foto = str(
+                        foto.get("NombreArchivo", f"Fotografía {posicion}")
+                    ).strip()
+                    url_foto = str(
+                        foto.get("URLArchivo", "")
+                    ).strip()
+
+                    if url_foto:
+                        st.link_button(
+                            f"📷 {nombre_foto or f'Fotografía {posicion}'}",
+                            url_foto,
+                            width="stretch",
+                        )
+
+        st.divider()
+
+        with st.form(
+            f"form_gestion_reclamo_{reclamo_id}",
+            clear_on_submit=False,
+        ):
+            formulario_1, formulario_2 = st.columns([1, 2])
+
+            with formulario_1:
+                nuevo_estado_reclamo = st.selectbox(
+                    "Estado",
+                    options=ESTADOS_RECLAMO_GESTION,
+                    index=ESTADOS_RECLAMO_GESTION.index(
+                        estado_actual
+                    ),
                 )
 
-            else:
-
-                st.caption(
-                    "Seleccioná una fila para gestionar la solicitud."
+            with formulario_2:
+                resolucion_reclamo = st.text_area(
+                    "Respuesta / resolución",
+                    value=resolucion_actual,
+                    placeholder=(
+                        "Detalle de la revisión, respuesta al reclamo "
+                        "o solución aplicada por Logística..."
+                    ),
+                    height=120,
                 )
 
-        with accion_col_2:
-
-            gestionar_solicitud = st.button(
-                "Gestionar",
-                icon="📩",
+            guardar_reclamo = st.form_submit_button(
+                "💾 Guardar gestión del reclamo",
                 type="primary",
                 width="stretch",
-                disabled=not bool(filas_seleccionadas),
-                key="btn_gestionar_solicitud_seleccionada",
             )
 
-        if gestionar_solicitud and filas_seleccionadas:
-
-            indice_seleccionado = filas_seleccionadas[0]
-
-            solicitud_id_seleccionada = str(
-                tabla_solicitudes_visible.iloc[
-                    indice_seleccionado
-                ]["ID"]
+        if guardar_reclamo:
+            usuario_logistica = (
+                st.session_state.get("usuario")
+                or st.session_state.get("nombre_usuario")
+                or "Logistica"
             )
 
-            abrir_gestion_solicitud(
-                solicitud_id_seleccionada
-            )
-
-
-st.markdown("---")
-
-
-# =====================================================
-# CONTENEDOR DE KPIs
-# Se crea acá para que aparezca arriba de los filtros
-# =====================================================
-
-contenedor_kpis = st.container()
-
-st.markdown("---")
-
-# =====================================================
-# OPCIONES DISPONIBLES PARA LOS FILTROS
-# =====================================================
-
-opciones_estado = sorted(
-    tabla["Estado"]
-    .dropna()
-    .astype(str)
-    .loc[lambda serie: serie.str.strip().ne("")]
-    .unique()
-    .tolist()
-)
-
-opciones_preparacion = sorted(
-    tabla["PreparacionEstado"]
-    .dropna()
-    .astype(str)
-    .loc[lambda serie: serie.str.strip().ne("")]
-    .unique()
-    .tolist()
-)
-
-opciones_planificacion = sorted(
-    tabla["Planificacion"]
-    .dropna()
-    .astype(str)
-    .loc[lambda serie: serie.str.strip().ne("")]
-    .unique()
-    .tolist()
-)
-
-opciones_despacho = sorted(
-    tabla["DespachoDescripcion"]
-    .dropna()
-    .astype(str)
-    .loc[lambda serie: serie.str.strip().ne("")]
-    .unique()
-    .tolist()
-)
-
-fecha_minima = tabla["Fecha"].min()
-fecha_maxima = tabla["Fecha"].max()
-
-
-# =====================================================
-# ESTADO INICIAL DE LOS FILTROS
-# =====================================================
-
-if "filtros_pedidos" not in st.session_state:
-
-    st.session_state["filtros_pedidos"] = {
-        "estados": [],
-        "preparaciones": [],
-        "planificaciones": [],
-        "despachos": [],
-        "fecha_desde": (
-            fecha_minima.date()
-            if pd.notna(fecha_minima)
-            else None
-        ),
-        "fecha_hasta": (
-            fecha_maxima.date()
-            if pd.notna(fecha_maxima)
-            else None
-        ),
-        "busqueda": ""
-    }
-# Ajustar las fechas guardadas al rango actual de los datos
-if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
-
-    fecha_minima_actual = fecha_minima.date()
-    fecha_maxima_actual = fecha_maxima.date()
-
-    fecha_desde_guardada = st.session_state[
-        "filtros_pedidos"
-    ].get("fecha_desde")
-
-    fecha_hasta_guardada = st.session_state[
-        "filtros_pedidos"
-    ].get("fecha_hasta")
-
-    if (
-        fecha_desde_guardada is None
-        or fecha_desde_guardada < fecha_minima_actual
-        or fecha_desde_guardada > fecha_maxima_actual
-    ):
-        st.session_state[
-            "filtros_pedidos"
-        ]["fecha_desde"] = fecha_minima_actual
-
-    if (
-        fecha_hasta_guardada is None
-        or fecha_hasta_guardada > fecha_maxima_actual
-        or fecha_hasta_guardada < fecha_minima_actual
-    ):
-        st.session_state[
-            "filtros_pedidos"
-        ]["fecha_hasta"] = fecha_maxima_actual
-
-filtros_aplicados = st.session_state["filtros_pedidos"]
-
-
-# =====================================================
-# APLICAR LOS FILTROS GUARDADOS
-# =====================================================
-
-tabla_filtrada = tabla.copy()
-
-if filtros_aplicados["estados"]:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["Estado"].isin(
-            filtros_aplicados["estados"]
-        )
-    ]
-
-if filtros_aplicados["preparaciones"]:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["PreparacionEstado"].isin(
-            filtros_aplicados["preparaciones"]
-        )
-    ]
-
-if filtros_aplicados["planificaciones"]:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["Planificacion"].isin(
-            filtros_aplicados["planificaciones"]
-        )
-    ]
-
-if filtros_aplicados["despachos"]:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["DespachoDescripcion"].isin(
-            filtros_aplicados["despachos"]
-        )
-    ]
-
-fecha_desde = filtros_aplicados["fecha_desde"]
-fecha_hasta = filtros_aplicados["fecha_hasta"]
-
-if fecha_desde is not None:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["Fecha"].ge(
-            pd.Timestamp(fecha_desde)
-        )
-    ]
-
-if fecha_hasta is not None:
-
-    tabla_filtrada = tabla_filtrada[
-        tabla_filtrada["Fecha"].lt(
-            pd.Timestamp(fecha_hasta)
-            + pd.Timedelta(days=1)
-        )
-    ]
-
-texto_busqueda = filtros_aplicados["busqueda"]
-
-if texto_busqueda:
-
-    mascara_busqueda = (
-        tabla_filtrada["Pedido"]
-        .astype(str)
-        .str.contains(
-            texto_busqueda,
-            case=False,
-            na=False
-        )
-        |
-        tabla_filtrada["ClienteCodigo"]
-        .astype(str)
-        .str.contains(
-            texto_busqueda,
-            case=False,
-            na=False
-        )
-        |
-        tabla_filtrada["ClienteDescripcion"]
-        .astype(str)
-        .str.contains(
-            texto_busqueda,
-            case=False,
-            na=False
-        )
-    )
-
-    tabla_filtrada = tabla_filtrada[
-        mascara_busqueda
-    ]
-
-
-# =====================================================
-# BASE ÚNICA PARA KPIs
-# =====================================================
-
-tabla_kpis = (
-    tabla_filtrada
-    .drop_duplicates(
-        subset=["Pedido"],
-        keep="first"
-    )
-    .copy()
-)
-
-
-# =====================================================
-# CÁLCULO DE KPIs
-# =====================================================
-
-total_pedidos = tabla_kpis["Pedido"].nunique()
-
-total_unidades = int(
-    tabla_kpis["TotalUnidades"].sum()
-)
-
-total_volumetria = float(
-    tabla_kpis["TotalM3"].sum()
-)
-
-total_importe = float(
-    tabla_kpis["ImporteERP"].sum()
-)
-
-pedidos_en_preparacion = int(
-    tabla_kpis["PreparacionEstado"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-    .ne("")
-    .sum()
-)
-
-
-# =====================================================
-# MOSTRAR KPIs ARRIBA DE LOS FILTROS
-# =====================================================
-
-with contenedor_kpis:
-
-    st.subheader("📊 Resumen Operativo")
-
-    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-
-    with kpi1:
-
-        st.metric(
-            "📦 Pedidos",
-            f"{total_pedidos:,}".replace(",", ".")
-        )
-
-    with kpi2:
-
-        st.metric(
-            "🔢 Unidades",
-            f"{total_unidades:,}".replace(",", ".")
-        )
-
-    with kpi3:
-
-        st.metric(
-            "📐 Volumen total",
-            f"{total_volumetria:,.3f} m³"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
-        )
-
-    with kpi4:
-
-        st.metric(
-            "🛒 Con preparación",
-            f"{pedidos_en_preparacion:,}"
-            .replace(",", ".")
-        )
-
-    with kpi5:
-
-        st.metric(
-            "📩 Solicitudes",
-            f"{len(solicitudes_abiertas):,}"
-            .replace(",", ".")
-        )
-
-    with kpi6:
-
-        st.metric(
-            "💰 Importe",
-            f"$ {total_importe:,.0f}"
-            .replace(",", ".")
-        )
-
-
-
-# =====================================================
-# AGRUPADORES REALES DE DIGIP
-# =====================================================
-
-AGRUPADORES_DIGIP = {
-    "LUNES": [
-        "CAMIONETA LUN 1",
-        "CAMIONETA LUN 2",
-        "CAMIONETA LUN 3",
-        "CAMIONETA LUN 4",
-    ],
-    "MARTES": [
-        "CAMIONETA MAR 1",
-        "CAMIONETA MAR 2",
-        "CAMIONETA MAR 3",
-    ],
-    "MIERCOLES": [
-        "CAMIONETA MIE 1",
-        "CAMIONETA MIE 2",
-        "CAMIONETA MIE 3",
-    ],
-    "JUEVES": [
-        "CAMIONETA JUE 1",
-        "CAMIONETA JUE 2",
-        "CAMIONETA JUE 3",
-    ],
-    "VIERNES": [
-        "CAMIONETA VIE 1",
-        "CAMIONETA VIE 2",
-        "CAMIONETA VIE 3",
-    ],
-    "DIARIOS": [
-        "CAMIONETA DIARIOS 1",
-    ],
-    "EXPRESOS": [
-        "CAMIONETA EXP 1",
-        "CAMIONETA EXP 2",
-        "CAMIONETA EXP 3",
-        "CAMIONETA EXP 4",
-        "CAMIONETA EXP 5",
-        "CAMIONETA EXP 6",
-    ],
-}
-
-
-PLANIFICACIONES_SEMANALES = {
-    "LUNES",
-    "MARTES",
-    "MIERCOLES",
-    "JUEVES",
-    "VIERNES",
-    "DIARIOS",
-}
-
-
-def normalizar_planificacion(
-    valor: object
-) -> str:
-    return (
-        str(valor)
-        .strip()
-        .upper()
-    )
-
-
-def obtener_pool_agrupador(
-    planificacion: object
-) -> str:
-    """
-    Las planificaciones semanales usan su propio pool.
-    Todas las demás planificaciones operativas se consideran
-    expresos: CABA SUR, CABA SUR II, CABA NORTE, etc.
-    """
-
-    planificacion_normalizada = (
-        normalizar_planificacion(
-            planificacion
-        )
-    )
-
-    if (
-        planificacion_normalizada
-        in PLANIFICACIONES_SEMANALES
-    ):
-        return planificacion_normalizada
-
-    return "EXPRESOS"
-
-
-def obtener_agrupadores_ocupados(
-    tabla_pedidos: pd.DataFrame
-) -> set[str]:
-    """
-    Considera ocupado un agrupador cuando existe al menos
-    un pedido con PreparacionID no vacío y su descripción
-    coincide con alguno de los agrupadores configurados.
-    """
-
-    columnas_requeridas = {
-        "PreparacionID",
-        "DespachoDescripcion",
-    }
-
-    if not columnas_requeridas.issubset(
-        tabla_pedidos.columns
-    ):
-        return set()
-
-    nombres_validos = {
-        nombre
-        for agrupadores in (
-            AGRUPADORES_DIGIP.values()
-        )
-        for nombre in agrupadores
-    }
-
-    preparacion_activa = (
-        tabla_pedidos["PreparacionID"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .ne("")
-    )
-
-    despachos = (
-        tabla_pedidos.loc[
-            preparacion_activa,
-            "DespachoDescripcion"
-        ]
-        .fillna("")
-        .astype(str)
-        .str.upper()
-        .str.strip()
-    )
-
-    return {
-        despacho
-        for despacho in despachos.tolist()
-        if despacho in nombres_validos
-    }
-
-
-def asignar_agrupadores_disponibles(
-    asignacion: pd.DataFrame,
-    agrupadores_ocupados: set[str],
-) -> pd.DataFrame:
-    """
-    Asigna nombres reales de agrupadores DIGIP.
-
-    - LUNES usa CAMIONETA LUN N.
-    - MARTES usa CAMIONETA MAR N.
-    - etc.
-    - CABA SUR, CABA NORTE y demás zonas comparten
-      CAMIONETA EXP N.
-    """
-
-    if asignacion.empty:
-        return asignacion.copy()
-
-    resultado = asignacion.copy()
-
-    resultado["PoolAgrupador"] = (
-        resultado["Planificacion"]
-        .apply(obtener_pool_agrupador)
-    )
-
-    vehiculos_logicos = (
-        resultado[
-            [
-                "PoolAgrupador",
-                "Planificacion",
-                "NumeroCamioneta",
-            ]
-        ]
-        .drop_duplicates()
-        .sort_values(
-            by=[
-                "PoolAgrupador",
-                "Planificacion",
-                "NumeroCamioneta",
-            ]
-        )
-        .reset_index(drop=True)
-    )
-
-    asignaciones_reales = []
-
-    for pool, bloque in (
-        vehiculos_logicos.groupby(
-            "PoolAgrupador",
-            sort=False
-        )
-    ):
-        disponibles = [
-            nombre
-            for nombre in AGRUPADORES_DIGIP[
-                pool
-            ]
-            if nombre not in agrupadores_ocupados
-        ]
-
-        cantidad_necesaria = len(bloque)
-
-        cantidad_faltante = max(
-            cantidad_necesaria - len(disponibles),
-            0
-        )
-
-        agrupadores_nuevos = []
-
-        if cantidad_faltante > 0:
-
-            numeros_existentes = []
-
-            for nombre in AGRUPADORES_DIGIP[pool]:
-
-                coincidencia = re.search(
-                    r"(\d+)$",
-                    str(nombre).strip()
+            try:
+                resultado = actualizar_reclamo(
+                    reclamo_id=reclamo_id,
+                    estado_reclamo=nuevo_estado_reclamo,
+                    resolucion=resolucion_reclamo,
+                    responsable=usuario_logistica,
                 )
 
-                if coincidencia:
-                    numeros_existentes.append(
-                        int(coincidencia.group(1))
-                    )
+                st.toast("Reclamo actualizado.", icon="✅")
 
-            siguiente_numero = (
-                max(numeros_existentes) + 1
-                if numeros_existentes
-                else 1
+                # Fuerza el rerun completo de la aplicación para cerrar
+                # el diálogo después de guardar la gestión.
+                st.rerun(scope="app")
+
+            except Exception as error:
+                st.error("No se pudo actualizar el reclamo.")
+                st.exception(error)
+
+
+    @st.dialog(
+        "📚 Histórico de reclamos",
+        width="large",
+    )
+    def abrir_historico_reclamos() -> None:
+        """
+        Muestra todos los reclamos guardados en Google Sheets,
+        tanto abiertos como cerrados, sin permitir su modificación.
+        """
+
+        reclamos_historicos = leer_reclamos()
+
+        if reclamos_historicos is None or reclamos_historicos.empty:
+            st.info(
+                "Todavía no hay reclamos registrados.",
+                icon="🧾",
             )
+            return
 
-            for numero in range(
-                siguiente_numero,
-                siguiente_numero
-                + cantidad_faltante
-            ):
+        tabla_historica = reclamos_historicos.copy()
 
-                if pool == "EXPRESOS":
-                    nombre_nuevo = (
-                        f"CAMIONETA EXP {numero}"
-                    )
+        columnas_requeridas = [
+            "ReclamoID",
+            "Pedido",
+            "Remito",
+            "Cliente",
+            "TipoReclamo",
+            "Descripcion",
+            "Responsable",
+            "EstadoReclamo",
+            "Resolucion",
+            "UsuarioCreador",
+            "FechaCreacion",
+            "FechaCierre",
+        ]
 
-                elif pool == "LUNES":
-                    nombre_nuevo = (
-                        f"CAMIONETA LUN {numero}"
-                    )
+        for columna in columnas_requeridas:
+            if columna not in tabla_historica.columns:
+                tabla_historica[columna] = ""
 
-                elif pool == "MARTES":
-                    nombre_nuevo = (
-                        f"CAMIONETA MAR {numero}"
-                    )
-
-                elif pool == "MIERCOLES":
-                    nombre_nuevo = (
-                        f"CAMIONETA MIE {numero}"
-                    )
-
-                elif pool == "JUEVES":
-                    nombre_nuevo = (
-                        f"CAMIONETA JUE {numero}"
-                    )
-
-                elif pool == "VIERNES":
-                    nombre_nuevo = (
-                        f"CAMIONETA VIE {numero}"
-                    )
-
-                elif pool == "DIARIOS":
-                    nombre_nuevo = (
-                        f"CAMIONETA DIARIOS {numero}"
-                    )
-
-                else:
-                    nombre_nuevo = (
-                        f"CAMIONETA {pool} {numero}"
-                    )
-
-                agrupadores_nuevos.append(
-                    nombre_nuevo
-                )
-
-            disponibles.extend(
-                agrupadores_nuevos
-            )
-
-        bloque = bloque.copy()
-
-        bloque["DespachoDIGIP"] = (
-            disponibles[:cantidad_necesaria]
-        )
-
-        bloque["AgrupadorNuevo"] = (
-            bloque["DespachoDIGIP"].isin(
-                agrupadores_nuevos
-            )
-        )
-
-        asignaciones_reales.append(bloque)
-
-    mapa_agrupadores = pd.concat(
-        asignaciones_reales,
-        ignore_index=True
-    )
-
-    resultado = resultado.merge(
-        mapa_agrupadores,
-        on=[
-            "PoolAgrupador",
-            "Planificacion",
-            "NumeroCamioneta",
-        ],
-        how="left",
-        validate="many_to_one",
-    )
-
-    resultado[
-        "NumeroCamionetaLogica"
-    ] = resultado["NumeroCamioneta"]
-
-    # El número visible se extrae del nombre real.
-    resultado["NumeroCamioneta"] = (
-        resultado["DespachoDIGIP"]
-        .str.extract(
-            r"(\d+)$",
-            expand=False
-        )
-        .astype(int)
-    )
-
-    resultado["Camioneta"] = (
-        resultado["Planificacion"]
-        .astype(str)
-        .str.strip()
-        + " - "
-        + resultado["DespachoDIGIP"]
-    )
-
-    return resultado
-
-
-# =====================================================
-# PLANIFICACIÓN DE CAMIONETAS
-# =====================================================
-
-st.markdown("---")
-
-st.subheader("🚚 Planificación de Camionetas")
-
-st.caption(
-    "Asignación propuesta respetando planificación, "
-    "antigüedad y cliente completo."
-)
-
-if pedidos_bloqueados_gestion:
-
-    detalle_bloqueos = " · ".join(
-        f"{tipo}: {len(pedidos)}"
-        for tipo, pedidos in pedidos_por_tipo_gestion.items()
-        if pedidos
-    )
-
-    st.warning(
-        (
-            f"Hay {len(pedidos_bloqueados_gestion)} pedidos "
-            "bloqueados para planificación porque tienen una "
-            "gestión comercial abierta. "
-            f"{detalle_bloqueos}"
-        ),
-        icon="🔒",
-    )
-
-
-# =====================================================
-# FORMULARIO DE CONFIGURACIÓN
-# =====================================================
-
-with st.form(
-    key="formulario_planificacion_camionetas",
-    clear_on_submit=False
-):
-
-    col_plan1, col_plan2, col_plan3 = st.columns(
-        [1, 1, 1]
-    )
-
-    with col_plan1:
-
-        capacidad_camioneta = st.number_input(
-            "Capacidad por camioneta (m³)",
-            min_value=0.1,
-            value=12.0,
-            step=0.5,
-            format="%.1f"
-        )
-
-    with col_plan2:
-
-        opciones_planificacion_camionetas = sorted(
-            tabla_filtrada["Planificacion"]
-            .dropna()
-            .astype(str)
-            .loc[
-                lambda serie:
-                serie.str.strip().ne("")
-            ]
-            .unique()
-            .tolist()
-        )
-
-        planificaciones_camionetas = st.multiselect(
-            "Planificaciones a procesar",
-            options=opciones_planificacion_camionetas,
-            default=[],
-            placeholder="Seleccionar planificaciones..."
-        )
-
-    with col_plan3:
-
-        incluir_preparados = st.checkbox(
-            "Incluir pedidos con preparación",
-            value=True
-        )
-
-    generar_planificacion = st.form_submit_button(
-        "🚚 Generar propuesta de camionetas",
-        type="primary",
-        width="stretch"
-    )
-
-
-# =====================================================
-# GENERAR PLANIFICACIÓN
-# =====================================================
-
-if generar_planificacion:
-
-    if not planificaciones_camionetas:
-        st.warning(
-            "Seleccioná al menos una planificación para generar "
-            "la propuesta de camionetas."
-        )
-        st.stop()
-
-    base_planificacion = tabla_filtrada.copy()
-
-    # Los pedidos con cualquier gestión comercial abierta
-    # requieren revisión y no pueden asignarse a camionetas.
-    if pedidos_bloqueados_gestion:
-
-        base_planificacion["Pedido"] = (
-            base_planificacion["Pedido"]
+        tabla_historica["Pedido"] = (
+            tabla_historica["Pedido"]
             .fillna("")
             .astype(str)
             .str.strip()
             .str.replace(r"\.0$", "", regex=True)
         )
 
-        base_planificacion = base_planificacion[
-            ~base_planificacion["Pedido"].isin(
-                pedidos_bloqueados_gestion
+        tabla_historica["FechaCreacionOrden"] = pd.to_datetime(
+            tabla_historica["FechaCreacion"],
+            errors="coerce",
+        )
+
+        tabla_historica["FechaVisible"] = (
+            tabla_historica["FechaCreacionOrden"]
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna(
+                tabla_historica["FechaCreacion"]
+                .fillna("")
+                .astype(str)
             )
-        ].copy()
+        )
 
-    if planificaciones_camionetas:
-
-        base_planificacion = base_planificacion[
-            base_planificacion["Planificacion"].isin(
-                planificaciones_camionetas
+        tabla_historica["FechaCierreVisible"] = (
+            pd.to_datetime(
+                tabla_historica["FechaCierre"],
+                errors="coerce",
             )
-        ].copy()
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna(
+                tabla_historica["FechaCierre"]
+                .fillna("")
+                .astype(str)
+            )
+            .replace("", "Abierto")
+        )
 
-    if not incluir_preparados:
+        tabla_historica = (
+            tabla_historica
+            .sort_values(
+                "FechaCreacionOrden",
+                ascending=False,
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
 
-        base_planificacion = base_planificacion[
-            base_planificacion["PreparacionID"]
+        estados = sorted(
+            estado
+            for estado in tabla_historica["EstadoReclamo"]
             .fillna("")
             .astype(str)
             .str.strip()
-            .eq("")
-        ].copy()
-
-    if base_planificacion.empty:
-
-        st.warning(
-            "No quedaron pedidos disponibles para planificar. "
-            "Todos los pedidos seleccionados tienen una gestión "
-            "comercial abierta o fueron excluidos por los filtros."
-        )
-
-        st.stop()
-
-    resumen_clientes = (
-        construir_resumen_clientes_planificacion(
-            base_planificacion
-        )
-    )
-
-    asignacion_logica = asignar_camionetas(
-        resumen_clientes,
-        capacidad_camioneta
-    )
-
-    agrupadores_ocupados = (
-        obtener_agrupadores_ocupados(
-            tabla
-        )
-    )
-
-    try:
-
-        asignacion_camionetas = (
-            asignar_agrupadores_disponibles(
-                asignacion=asignacion_logica,
-                agrupadores_ocupados=(
-                    agrupadores_ocupados
-                ),
-            )
-        )
-
-    except ValueError as error:
-
-        st.error(str(error))
-        st.stop()
-
-    agrupadores_a_crear = []
-
-    if (
-        not asignacion_camionetas.empty
-        and "AgrupadorNuevo"
-        in asignacion_camionetas.columns
-    ):
-
-        agrupadores_a_crear = sorted(
-            asignacion_camionetas.loc[
-                asignacion_camionetas[
-                    "AgrupadorNuevo"
-                ],
-                "DespachoDIGIP"
-            ]
-            .dropna()
-            .astype(str)
             .unique()
             .tolist()
+            if estado
         )
 
-    st.session_state[
-        "agrupadores_a_crear"
-    ] = agrupadores_a_crear
+        filtro_1, filtro_2 = st.columns([2, 1])
 
-    pedidos_planificados = asignar_camioneta_a_pedidos(
-        base_planificacion,
-        asignacion_camionetas
-    )
+        with filtro_1:
+            busqueda = st.text_input(
+                "Buscar",
+                placeholder="Pedido, remito, cliente, incidencia o ID...",
+                key="buscar_historico_reclamos_pedidos",
+            )
 
-    st.session_state[
-        "asignacion_camionetas"
-    ] = asignacion_camionetas
+        with filtro_2:
+            estado_filtro = st.selectbox(
+                "Estado",
+                options=["Todos"] + estados,
+                key="estado_historico_reclamos_pedidos",
+            )
 
-    st.session_state[
-        "pedidos_planificados"
-    ] = pedidos_planificados
+        reclamos_filtrados = tabla_historica.copy()
 
-    st.session_state[
-        "capacidad_camioneta"
-    ] = capacidad_camioneta
+        if busqueda.strip():
+            texto_busqueda = busqueda.strip()
+            mascara = pd.Series(False, index=reclamos_filtrados.index)
 
-    st.session_state[
-        "agrupadores_ocupados"
-    ] = sorted(
-        agrupadores_ocupados
-    )
+            for columna in [
+                "ReclamoID",
+                "Pedido",
+                "Remito",
+                "Cliente",
+                "TipoReclamo",
+            ]:
+                mascara = mascara | (
+                    reclamos_filtrados[columna]
+                    .fillna("")
+                    .astype(str)
+                    .str.contains(
+                        texto_busqueda,
+                        case=False,
+                        na=False,
+                        regex=False,
+                    )
+                )
 
+            reclamos_filtrados = reclamos_filtrados.loc[mascara].copy()
 
-# =====================================================
-# VALIDAR VERSIÓN DE LA PLANIFICACIÓN GUARDADA
-# =====================================================
+        if estado_filtro != "Todos":
+            reclamos_filtrados = reclamos_filtrados[
+                reclamos_filtrados["EstadoReclamo"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq(estado_filtro)
+            ].copy()
 
-COLUMNAS_PLANIFICACION_ACTUAL = {
-    "DespachoDIGIP",
-    "PoolAgrupador",
-}
-
-asignacion_guardada = st.session_state.get(
-    "asignacion_camionetas"
-)
-
-if (
-    isinstance(
-        asignacion_guardada,
-        pd.DataFrame
-    )
-    and not asignacion_guardada.empty
-    and not COLUMNAS_PLANIFICACION_ACTUAL.issubset(
-        asignacion_guardada.columns
-    )
-):
-
-    # La propuesta fue creada con una versión anterior
-    # del módulo y no contiene los agrupadores reales.
-    claves_planificacion_anterior = [
-        "asignacion_camionetas",
-        "pedidos_planificados",
-        "capacidad_camioneta",
-        "agrupadores_ocupados",
-    ]
-
-    for clave in claves_planificacion_anterior:
-        st.session_state.pop(
-            clave,
-            None
+        tabla_visible = (
+            reclamos_filtrados[
+                [
+                    "ReclamoID",
+                    "Pedido",
+                    "Remito",
+                    "Cliente",
+                    "TipoReclamo",
+                    "EstadoReclamo",
+                    "Responsable",
+                    "FechaVisible",
+                    "FechaCierreVisible",
+                ]
+            ]
+            .rename(
+                columns={
+                    "ReclamoID": "ID",
+                    "TipoReclamo": "Incidencia",
+                    "EstadoReclamo": "Estado",
+                    "FechaVisible": "Fecha alta",
+                    "FechaCierreVisible": "Fecha cierre",
+                }
+            )
+            .reset_index(drop=True)
         )
 
-    claves_ejecucion_anterior = [
-        clave
-        for clave in list(
-            st.session_state.keys()
-        )
-        if str(clave).startswith(
-            "resultado_digip_"
-        )
-    ]
-
-    for clave in claves_ejecucion_anterior:
-        st.session_state.pop(
-            clave,
-            None
+        st.caption(
+            f"{len(tabla_visible):,} reclamo(s) registrado(s)"
+            .replace(",", ".")
         )
 
-    st.warning(
-        "La planificación guardada pertenecía a una versión "
-        "anterior. Fue eliminada para incorporar los nombres "
-        "reales de los agrupadores DIGIP. Generá nuevamente "
-        "la propuesta."
-    )
-
-
-# =====================================================
-# MOSTRAR RESULTADO GUARDADO
-# =====================================================
-
-if (
-    "asignacion_camionetas"
-    in st.session_state
-):
-
-    asignacion_camionetas = st.session_state[
-        "asignacion_camionetas"
-    ]
-
-    if asignacion_camionetas.empty:
-
-        st.warning(
-            "No existen pedidos disponibles para generar "
-            "la planificación."
+        evento = st.dataframe(
+            tabla_visible,
+            width="stretch",
+            hide_index=True,
+            height=min(420, 85 + len(tabla_visible) * 35),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tabla_historico_reclamos_pedidos",
+            column_config={
+                "ID": None,
+                "Pedido": st.column_config.TextColumn(width="small"),
+                "Remito": st.column_config.TextColumn(width="small"),
+                "Cliente": st.column_config.TextColumn(width="large"),
+                "Incidencia": st.column_config.TextColumn(width="medium"),
+                "Estado": st.column_config.TextColumn(width="small"),
+                "Responsable": st.column_config.TextColumn(width="small"),
+                "Fecha alta": st.column_config.TextColumn(width="small"),
+                "Fecha cierre": st.column_config.TextColumn(width="small"),
+            },
         )
+
+        filas = evento.selection.rows if evento is not None else []
+
+        if not filas:
+            st.caption(
+                "Seleccioná un registro para ver su descripción y resolución."
+            )
+            return
+
+        reclamo = (
+            reclamos_filtrados
+            .reset_index(drop=True)
+            .iloc[filas[0]]
+        )
+
+        st.divider()
+
+        detalle_1, detalle_2, detalle_3 = st.columns([1, 2.3, 1])
+        detalle_1.metric("Pedido", str(reclamo.get("Pedido", "")) or "Sin dato")
+
+        with detalle_2:
+            st.markdown(
+                f"**{str(reclamo.get('Cliente', '')).strip() or 'Cliente sin identificar'}**"
+            )
+            st.caption(
+                f"{str(reclamo.get('TipoReclamo', '')).strip() or 'Reclamo'} · "
+                f"Remito {str(reclamo.get('Remito', '')).strip() or 'Sin dato'}"
+            )
+
+        detalle_3.metric(
+            "Estado",
+            str(reclamo.get("EstadoReclamo", "")).strip() or "Sin estado",
+        )
+
+        st.info(
+            str(reclamo.get("Descripcion", "")).strip()
+            or "El reclamo no tiene descripción.",
+            icon="📝",
+        )
+
+        resolucion = str(reclamo.get("Resolucion", "")).strip()
+
+        if resolucion:
+            st.success(resolucion, icon="✅")
+        else:
+            st.warning(
+                "El reclamo todavía no tiene una resolución registrada.",
+                icon="⏳",
+            )
+
+        info_1, info_2, info_3 = st.columns(3)
+        info_1.caption(
+            f"**Registrado por**  \n"
+            f"{str(reclamo.get('UsuarioCreador', '')).strip() or 'Sin dato'}"
+        )
+        info_2.caption(
+            f"**Fecha de alta**  \n"
+            f"{str(reclamo.get('FechaVisible', '')).strip() or 'Sin dato'}"
+        )
+        info_3.caption(
+            f"**Fecha de cierre**  \n"
+            f"{str(reclamo.get('FechaCierreVisible', '')).strip() or 'Abierto'}"
+        )
+
+        reclamo_id = str(reclamo.get("ReclamoID", "")).strip()
+        detalle_reclamos = leer_reclamos_detalle()
+
+        if detalle_reclamos is not None and not detalle_reclamos.empty:
+            detalle_seleccionado = detalle_reclamos.loc[
+                detalle_reclamos["ReclamoID"]
+                .astype(str)
+                .eq(reclamo_id)
+            ].copy()
+
+            if not detalle_seleccionado.empty:
+                st.markdown("#### Artículos reclamados")
+                columnas_detalle = [
+                    "CodigoArticulo",
+                    "DescripcionArticulo",
+                    "Cantidad",
+                    "Observacion",
+                ]
+
+                for columna in columnas_detalle:
+                    if columna not in detalle_seleccionado.columns:
+                        detalle_seleccionado[columna] = ""
+
+                st.dataframe(
+                    detalle_seleccionado[columnas_detalle].rename(
+                        columns={
+                            "CodigoArticulo": "Código",
+                            "DescripcionArticulo": "Descripción",
+                            "Cantidad": "Cantidad reclamada",
+                            "Observacion": "Detalle de cantidades",
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+        fotos_reclamos = leer_reclamos_fotos()
+
+        if fotos_reclamos is not None and not fotos_reclamos.empty:
+            fotos_seleccionadas = fotos_reclamos.loc[
+                fotos_reclamos["ReclamoID"]
+                .astype(str)
+                .eq(reclamo_id)
+            ].copy()
+
+            if not fotos_seleccionadas.empty:
+                st.markdown("#### Fotografías")
+
+                for posicion, (_, foto) in enumerate(
+                    fotos_seleccionadas.iterrows(),
+                    start=1,
+                ):
+                    nombre = str(
+                        foto.get("NombreArchivo", f"Fotografía {posicion}")
+                    ).strip()
+                    url = str(foto.get("URLArchivo", "")).strip()
+
+                    if url:
+                        st.link_button(
+                            f"📷 {nombre or f'Fotografía {posicion}'}",
+                            url,
+                            width="stretch",
+                        )
+
+
+    reclamos_totales_historial = leer_reclamos()
+
+    if reclamos_totales_historial is None:
+        reclamos_totales_historial = pd.DataFrame()
+
+    if not reclamos_abiertos.empty:
+
+        cantidad_reclamos_abiertos = len(reclamos_abiertos)
+        pedidos_con_reclamo = (
+            reclamos_abiertos["Pedido"].nunique()
+            if "Pedido" in reclamos_abiertos.columns
+            else 0
+        )
+
+        aviso_reclamo, boton_reclamo, boton_historico = st.columns(
+            [4.6, 1.25, 1.15],
+            vertical_alignment="center",
+        )
+
+        with aviso_reclamo:
+            st.warning(
+                (
+                    f"Hay {cantidad_reclamos_abiertos} reclamo(s) "
+                    f"pendiente(s) de revisión sobre "
+                    f"{pedidos_con_reclamo} pedido(s)."
+                ),
+                icon="🧾",
+            )
+
+        with boton_reclamo:
+            ver_reclamos_pendientes = st.button(
+                "Gestionar reclamos",
+                icon="🧾",
+                type="primary",
+                width="stretch",
+                key="btn_ver_reclamos_pendientes",
+            )
+
+        with boton_historico:
+            ver_historico_reclamos = st.button(
+                "Histórico",
+                icon="📚",
+                width="stretch",
+                key="btn_historico_reclamos_pedidos",
+            )
+
+        if ver_reclamos_pendientes:
+            abrir_reclamos_pendientes()
+
+        if ver_historico_reclamos:
+            abrir_historico_reclamos()
 
     else:
-
-        agrupadores_a_crear = (
-            st.session_state.get(
-                "agrupadores_a_crear",
-                []
-            )
+        aviso_sin_reclamos, boton_historico = st.columns(
+            [5.85, 1.15],
+            vertical_alignment="center",
         )
 
-        if agrupadores_a_crear:
-
-            st.warning(
-                "La propuesta utiliza agrupadores que todavía "
-                "no existen en DIGIP: "
-                + ", ".join(agrupadores_a_crear)
-                + ". Podés continuar con la planificación y "
-                "crearlos antes de ejecutar."
+        with aviso_sin_reclamos:
+            st.success(
+                "No hay reclamos pendientes de revisión.",
+                icon="✅",
             )
 
-        capacidad_utilizada = st.session_state.get(
-            "capacidad_camioneta",
-            0
-        )
-
-        resumen_camionetas = (
-            asignacion_camionetas[
-                [
-                    "Planificacion",
-                    "NumeroCamioneta",
-                    "Camioneta",
-                    "DespachoDIGIP",
-                    "PoolAgrupador",
-                    "CapacidadM3",
-                    "VolumenCamionetaM3",
-                    "OcupacionCamionetaPct",
-                    "DisponibleM3",
-                    "ClientesCamioneta",
-                    "PedidosCamioneta",
-                    "UnidadesCamioneta",
-                    "EstadoCapacidad",
-                ]
-            ]
-            .drop_duplicates(
-                subset=[
-                    "Planificacion",
-                    "NumeroCamioneta",
-                ]
+        with boton_historico:
+            ver_historico_reclamos = st.button(
+                "Histórico",
+                icon="📚",
+                width="stretch",
+                disabled=reclamos_totales_historial.empty,
+                key="btn_historico_reclamos_pedidos_sin_abiertos",
             )
-            .sort_values(
-                by=[
-                    "Planificacion",
-                    "NumeroCamioneta",
-                ]
-            )
-        )
 
-        total_camionetas = len(
-            resumen_camionetas
-        )
+        if ver_historico_reclamos:
+            abrir_historico_reclamos()
 
-        total_clientes_planificados = (
-            asignacion_camionetas[
-                "ClienteCodigo"
-            ].nunique()
-        )
 
-        total_pedidos_planificados = int(
-            asignacion_camionetas[
-                "CantidadPedidos"
-            ].sum()
-        )
+    @st.dialog(
+        "📩 Gestionar solicitud comercial",
+        width="large",
+    )
+    def abrir_gestion_solicitud(
+        solicitud_id: str,
+    ) -> None:
+        """
+        Abre una ventana modal para gestionar una solicitud sin
+        ocupar espacio permanente en la pantalla principal.
+        """
 
-        volumen_planificado = float(
-            asignacion_camionetas[
-                "TotalM3"
-            ].sum()
-        )
-
-        ocupacion_promedio = float(
-            resumen_camionetas[
-                "OcupacionCamionetaPct"
-            ].mean()
-        )
-
-        # -------------------------------------------------
-        # DISPONIBILIDAD DE AGRUPADORES
-        # -------------------------------------------------
-
-        agrupadores_ocupados_guardados = set(
-            st.session_state.get(
-                "agrupadores_ocupados",
-                []
-            )
-        )
-
-        agrupadores_asignados = sorted(
-            resumen_camionetas[
-                "DespachoDIGIP"
-            ]
-            .dropna()
+        coincidencia = solicitudes_abiertas.loc[
+            solicitudes_abiertas["SolicitudID"]
             .astype(str)
-            .unique()
-            .tolist()
+            .eq(str(solicitud_id))
+        ].copy()
+
+        if coincidencia.empty:
+            st.error("No se encontró la solicitud seleccionada.")
+            return
+
+        solicitud = coincidencia.iloc[0]
+
+        pedido = str(
+            solicitud.get("Pedido", "")
+        ).strip()
+
+        cliente = str(
+            solicitud.get("Cliente", "")
+        ).strip()
+
+        tipo_solicitud = str(
+            solicitud.get("TipoSolicitud", "")
+        ).strip()
+
+        prioridad = str(
+            solicitud.get("Prioridad", "")
+        ).strip()
+
+        descripcion = str(
+            solicitud.get("Descripcion", "")
+        ).strip()
+
+        solicitado_por = str(
+            solicitud.get("UsuarioSolicitante", "")
+        ).strip()
+
+        fecha_solicitud = str(
+            solicitud.get("FechaSolicitudVisible", "")
+        ).strip()
+
+        responsable_actual = str(
+            solicitud.get("Responsable", "")
+        ).strip()
+
+        unidades_pedido = int(
+            pd.to_numeric(
+                solicitud.get("TotalUnidades", 0),
+                errors="coerce",
+            )
+            if pd.notna(
+                pd.to_numeric(
+                    solicitud.get("TotalUnidades", 0),
+                    errors="coerce",
+                )
+            )
+            else 0
         )
 
-        todos_los_agrupadores = [
-            nombre
-            for lista in AGRUPADORES_DIGIP.values()
-            for nombre in lista
-        ]
-
-        agrupadores_libres_restantes = [
-            nombre
-            for nombre in todos_los_agrupadores
-            if (
-                nombre
-                not in agrupadores_ocupados_guardados
-                and nombre
-                not in set(
-                    agrupadores_asignados
+        volumen_pedido = float(
+            pd.to_numeric(
+                solicitud.get("TotalM3", 0),
+                errors="coerce",
+            )
+            if pd.notna(
+                pd.to_numeric(
+                    solicitud.get("TotalM3", 0),
+                    errors="coerce",
                 )
             )
-        ]
-
-        with st.expander(
-            "🚦 Disponibilidad de agrupadores DIGIP",
-            expanded=False
-        ):
-
-            disp_col1, disp_col2, disp_col3 = (
-                st.columns(3)
-            )
-
-            with disp_col1:
-                st.metric(
-                    "Ocupados",
-                    len(
-                        agrupadores_ocupados_guardados
-                    )
-                )
-
-                st.caption(
-                    ", ".join(
-                        sorted(
-                            agrupadores_ocupados_guardados
-                        )
-                    )
-                    or "Ninguno"
-                )
-
-            with disp_col2:
-                st.metric(
-                    "Asignados a la propuesta",
-                    len(agrupadores_asignados)
-                )
-
-                st.caption(
-                    ", ".join(
-                        agrupadores_asignados
-                    )
-                    or "Ninguno"
-                )
-
-            with disp_col3:
-                st.metric(
-                    "Libres restantes",
-                    len(
-                        agrupadores_libres_restantes
-                    )
-                )
-
-                st.caption(
-                    ", ".join(
-                        agrupadores_libres_restantes
-                    )
-                    or "Ninguno"
-                )
-
-        # -------------------------------------------------
-        # KPIs DE PLANIFICACIÓN
-        # -------------------------------------------------
-
-        plan_kpi1, plan_kpi2, plan_kpi3, plan_kpi4, plan_kpi5 = (
-            st.columns(5)
+            else 0
         )
 
-        with plan_kpi1:
+        estado_actual = str(
+            solicitud.get(
+                "EstadoSolicitud",
+                "Pendiente",
+            )
+        ).strip()
 
+        if estado_actual not in ESTADOS_SOLICITUD:
+            estado_actual = "Pendiente"
+
+        prioridad_icono = {
+            "ALTA": "🔴",
+            "NORMAL": "🟡",
+            "BAJA": "🟢",
+        }.get(
+            prioridad.upper(),
+            "⚪",
+        )
+
+        cabecera_1, cabecera_2, cabecera_3, cabecera_4 = st.columns(
+            [0.9, 2.1, 0.9, 0.9],
+            vertical_alignment="center",
+        )
+
+        with cabecera_1:
             st.metric(
-                "🚚 Camionetas",
-                total_camionetas
+                "Pedido",
+                pedido or "Sin dato",
             )
 
-        with plan_kpi2:
-
-            st.metric(
-                "👥 Clientes",
-                total_clientes_planificados
+        with cabecera_2:
+            st.markdown(f"**{cliente or 'Cliente sin identificar'}**")
+            st.caption(
+                f"{tipo_solicitud or 'Solicitud'} · "
+                f"{prioridad_icono} {prioridad or 'Sin prioridad'}"
             )
 
-        with plan_kpi3:
-
+        with cabecera_3:
             st.metric(
-                "📦 Pedidos",
-                total_pedidos_planificados
+                "Unidades",
+                f"{unidades_pedido:,}".replace(",", "."),
             )
 
-        with plan_kpi4:
-
-            st.metric(
-                "📐 Volumen",
-                f"{volumen_planificado:,.3f} m³"
+        with cabecera_4:
+            volumen_formateado = (
+                f"{volumen_pedido:,.3f} m³"
                 .replace(",", "X")
                 .replace(".", ",")
                 .replace("X", ".")
             )
 
-        with plan_kpi5:
-
             st.metric(
-                "📊 Ocupación promedio",
-                f"{ocupacion_promedio:.1f}%"
+                "Volumen",
+                volumen_formateado,
             )
-
-        # -------------------------------------------------
-        # RESUMEN DE CAMIONETAS
-        # -------------------------------------------------
-
-        st.markdown("#### Resumen de cargas")
-
-        st.dataframe(
-            resumen_camionetas,
-            width="stretch",
-            hide_index=True,
-            column_config={
-
-                "CapacidadM3": (
-                    st.column_config.NumberColumn(
-                        "Capacidad m³",
-                        format="%.2f"
-                    )
-                ),
-
-                "VolumenCamionetaM3": (
-                    st.column_config.NumberColumn(
-                        "Volumen asignado",
-                        format="%.3f"
-                    )
-                ),
-
-                "OcupacionCamionetaPct": (
-                    st.column_config.ProgressColumn(
-                        "Ocupación",
-                        min_value=0,
-                        max_value=100,
-                        format="%.1f%%"
-                    )
-                ),
-
-                "DisponibleM3": (
-                    st.column_config.NumberColumn(
-                        "Disponible m³",
-                        format="%.3f"
-                    )
-                ),
-            }
-        )
-
-        # -------------------------------------------------
-        # EJECUCIÓN DIGIP
-        # -------------------------------------------------
-
-        st.markdown("#### 🚀 Ejecución DIGIP")
 
         st.caption(
-            "Revisá el resumen y ejecutá únicamente la "
-            "camioneta que quieras crear en DIGIP."
+            f"**Estado actual:** {estado_actual}"
         )
 
-        pedidos_planificados = st.session_state.get(
-            "pedidos_planificados",
-            pd.DataFrame()
+        st.info(
+            descripcion or "La solicitud no tiene detalle.",
+            icon="📝",
         )
 
-        # Estilo compacto del panel
-        st.markdown(
-            """
-            <style>
-            div[data-testid="stHorizontalBlock"] {
-                gap: 0.65rem;
-            }
+        datos_col_1, datos_col_2, datos_col_3 = st.columns(3)
 
-            div[data-testid="stButton"] > button {
-                min-height: 2.15rem;
-                padding-top: 0.25rem;
-                padding-bottom: 0.25rem;
-            }
-
-            div[data-testid="stAlert"] {
-                padding-top: 0.45rem;
-                padding-bottom: 0.45rem;
-                min-height: 2.15rem;
-            }
-
-            .digip-fila {
-                padding: 0.18rem 0;
-                line-height: 1.15;
-            }
-
-            .digip-nombre {
-                font-weight: 600;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-
-            .digip-numero {
-                text-align: center;
-                font-weight: 600;
-            }
-
-            .digip-volumen {
-                text-align: right;
-                white-space: nowrap;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True
-        )
-
-        # Encabezados
-        encabezado_1, encabezado_2, encabezado_3, \
-            encabezado_4, encabezado_5 = st.columns(
-                [3.2, 0.75, 1.05, 1.35, 1.15],
-                vertical_alignment="center"
+        with datos_col_1:
+            st.caption(
+                f"**Solicitado por**  \n"
+                f"{solicitado_por or 'Sin dato'}"
             )
 
-        with encabezado_1:
-            st.caption("**Camioneta**")
+        with datos_col_2:
+            st.caption(
+                f"**Fecha**  \n"
+                f"{fecha_solicitud or 'Sin dato'}"
+            )
 
-        with encabezado_2:
-            st.caption("**Pedidos**")
-
-        with encabezado_3:
-            st.caption("**Volumen**")
-
-        with encabezado_4:
-            st.caption("**Estado DIGIP**")
-
-        with encabezado_5:
-            st.caption("**Acción**")
+        with datos_col_3:
+            st.caption(
+                f"**Responsable actual**  \n"
+                f"{responsable_actual or 'Sin asignar'}"
+            )
 
         st.divider()
 
-        for _, fila_camioneta in resumen_camionetas.iterrows():
+        with st.form(
+            f"form_gestion_solicitud_{solicitud_id}",
+            clear_on_submit=False,
+        ):
 
-            planificacion_fila = str(
-                fila_camioneta["Planificacion"]
-            ).strip()
-
-            numero_camioneta = int(
-                fila_camioneta["NumeroCamioneta"]
+            formulario_1, formulario_2 = st.columns(
+                [1, 2],
             )
 
-            nombre_camioneta = str(
-                fila_camioneta["Camioneta"]
-            ).strip()
+            with formulario_1:
 
-            volumen_camioneta = float(
-                fila_camioneta["VolumenCamionetaM3"]
-            )
-
-            clave_ejecucion = (
-                f"{planificacion_fila}_"
-                f"{numero_camioneta}"
-            )
-
-            pedidos_camioneta = (
-                pedidos_planificados[
-                    (
-                        pedidos_planificados[
-                            "Planificacion"
-                        ].astype(str).str.strip()
-                        == planificacion_fila
-                    )
-                    &
-                    (
-                        pd.to_numeric(
-                            pedidos_planificados[
-                                "NumeroCamioneta"
-                            ],
-                            errors="coerce"
-                        )
-                        == numero_camioneta
-                    )
-                ]
-                .copy()
-            )
-
-            lista_pedidos = (
-                pedidos_camioneta["Pedido"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.replace(
-                    r"\.0$",
-                    "",
-                    regex=True
-                )
-                .loc[lambda serie: serie.ne("")]
-                .drop_duplicates()
-                .tolist()
-            )
-
-            codigos_despacho = (
-                pedidos_camioneta["CodigoDespacho"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.replace(
-                    r"\.0$",
-                    "",
-                    regex=True
-                )
-                .loc[lambda serie: serie.ne("")]
-                .drop_duplicates()
-                .tolist()
-            )
-
-            codigo_despacho = (
-                codigos_despacho[0]
-                if codigos_despacho
-                else ""
-            )
-
-            usar_filtro_codigo_despacho = (
-                len(codigos_despacho) == 1
-            )
-
-            despacho_digip = str(
-                fila_camioneta[
-                    "DespachoDIGIP"
-                ]
-            ).strip()
-
-            ejecucion_valida = bool(
-                lista_pedidos
-            )
-
-            clave_resultado_actual = (
-                f"resultado_digip_{clave_ejecucion}"
-            )
-
-            estado_guardado = st.session_state.get(
-                clave_resultado_actual
-            )
-
-            # Antes de dibujar la fila, sincroniza el estado
-            # guardado con la orden real de Google Sheets.
-            if (
-                estado_guardado
-                and estado_guardado.get("orden_id")
-            ):
-
-                orden_sincronizada = obtener_orden(
-                    estado_guardado["orden_id"]
+                nuevo_estado_solicitud = st.selectbox(
+                    "Estado",
+                    options=ESTADOS_SOLICITUD,
+                    index=ESTADOS_SOLICITUD.index(
+                        estado_actual
+                    ),
                 )
 
-                if orden_sincronizada:
+            with formulario_2:
 
-                    estado_worker = str(
-                        orden_sincronizada.get(
-                            "Estado",
+                observacion_logistica = st.text_area(
+                    "Observación / respuesta",
+                    value=str(
+                        solicitud.get(
+                            "Respuesta",
                             "",
                         )
-                    ).strip().upper()
-
-                    mensaje_worker = str(
-                        orden_sincronizada.get(
-                            "Mensaje",
-                            "",
-                        )
-                    ).strip()
-
-                    etapa_worker = str(
-                        orden_sincronizada.get(
-                            "Etapa",
-                            "",
-                        )
-                    ).strip()
-
-                    if estado_worker == "COMPLETADA":
-
-                        estado_guardado = {
-                            "exito": True,
-                            "pendiente": False,
-                            "orden_id": orden_sincronizada.get(
-                                "OrdenID"
-                            ),
-                            "mensaje": mensaje_worker,
-                            "etapa": etapa_worker,
-                            "estado_worker": estado_worker,
-                        }
-
-                    elif estado_worker == "ERROR":
-
-                        estado_guardado = {
-                            "exito": False,
-                            "pendiente": False,
-                            "orden_id": orden_sincronizada.get(
-                                "OrdenID"
-                            ),
-                            "mensaje": mensaje_worker,
-                            "etapa": etapa_worker,
-                            "estado_worker": estado_worker,
-                        }
-
-                    else:
-
-                        estado_guardado = {
-                            "exito": False,
-                            "pendiente": True,
-                            "orden_id": orden_sincronizada.get(
-                                "OrdenID"
-                            ),
-                            "mensaje": mensaje_worker,
-                            "etapa": etapa_worker,
-                            "estado_worker": estado_worker,
-                        }
-
-                    st.session_state[
-                        clave_resultado_actual
-                    ] = estado_guardado
-
-            fila_1, fila_2, fila_3, fila_4, fila_5 = (
-                st.columns(
-                    [3.2, 0.75, 1.05, 1.35, 1.15],
-                    vertical_alignment="center"
-                )
-            )
-
-            with fila_1:
-                st.markdown(
-                    (
-                        '<div class="digip-fila digip-nombre">'
-                        f'🚚 {nombre_camioneta}'
-                        '</div>'
                     ),
-                    unsafe_allow_html=True
-                )
-
-            with fila_2:
-                st.markdown(
-                    (
-                        '<div class="digip-fila digip-numero">'
-                        f'{len(lista_pedidos)}'
-                        '</div>'
+                    placeholder=(
+                        "Detalle de la revisión o acción "
+                        "realizada por Logística..."
                     ),
-                    unsafe_allow_html=True
+                    height=110,
                 )
 
-            with fila_3:
-                volumen_formateado = (
-                    f"{volumen_camioneta:,.3f} m³"
-                    .replace(",", "X")
-                    .replace(".", ",")
-                    .replace("X", ".")
-                )
-
-                st.markdown(
-                    (
-                        '<div class="digip-fila digip-volumen">'
-                        f'{volumen_formateado}'
-                        '</div>'
-                    ),
-                    unsafe_allow_html=True
-                )
-
-            with fila_4:
-
-                if len(codigos_despacho) > 1:
-
-                    st.info(
-                        f"{len(codigos_despacho)} códigos",
-                        icon="ℹ️"
-                    )
-
-                    st.caption(
-                        "Códigos encontrados: "
-                        + ", ".join(codigos_despacho)
-                    )
-
-                elif not codigo_despacho:
-                    st.warning(
-                        "Sin código",
-                        icon="⚠️"
-                    )
-
-                elif estado_guardado:
-
-                    if bool(
-                        estado_guardado.get(
-                            "exito",
-                            False
-                        )
-                    ):
-                        st.success(
-                            "Ejecutada",
-                            icon="✅"
-                        )
-
-                    elif bool(
-                        estado_guardado.get(
-                            "pendiente",
-                            False
-                        )
-                    ):
-                        st.info(
-                            "En proceso",
-                            icon="⚙️"
-                        )
-
-                    else:
-                        st.error(
-                            "Error",
-                            icon="❌"
-                        )
-
-                else:
-                    st.info(
-                        "Pendiente",
-                        icon="⏳"
-                    )
-
-            with fila_5:
-
-                texto_boton = (
-                    "🔄 Reintentar"
-                    if (
-                        estado_guardado
-                        and not bool(
-                            estado_guardado.get(
-                                "exito",
-                                False
-                            )
-                        )
-                        and not bool(
-                            estado_guardado.get(
-                                "pendiente",
-                                False
-                            )
-                        )
-                    )
-                    else (
-                        "✅ Ejecutada"
-                        if (
-                            estado_guardado
-                            and bool(
-                                estado_guardado.get(
-                                    "exito",
-                                    False
-                                )
-                            )
-                        )
-                        else "🚀 Ejecutar"
-                    )
-                )
-
-                ejecutar = st.button(
-                    texto_boton,
-                    key=(
-                        f"ejecutar_digip_"
-                        f"{clave_ejecucion}"
-                    ),
-                    width="stretch",
+            guardar_estado_solicitud = (
+                st.form_submit_button(
+                    "💾 Guardar actualización",
                     type="primary",
-                    disabled=bool(
-                        (not ejecucion_valida)
-                        or (
-                            bool(estado_guardado)
-                            and bool(
-                                estado_guardado.get(
-                                    "exito",
-                                    False
-                                )
-                            )
-                        )
-                    )
-                )
-
-            # -------------------------------------------------
-            # DETALLE EXPANDIBLE DE LA CAMIONETA
-            # -------------------------------------------------
-
-            with st.expander(
-                f"🔎 Abrir detalle · {nombre_camioneta}",
-                expanded=False,
-            ):
-
-                detalle_camioneta = pedidos_camioneta.copy()
-
-                # Una fila por pedido para evitar duplicaciones
-                # en los indicadores y en la tabla visible.
-                if "Pedido" in detalle_camioneta.columns:
-                    detalle_camioneta = (
-                        detalle_camioneta
-                        .drop_duplicates(
-                            subset=["Pedido"],
-                            keep="first",
-                        )
-                        .reset_index(drop=True)
-                    )
-
-                cantidad_clientes_detalle = (
-                    detalle_camioneta["ClienteCodigo"].nunique()
-                    if "ClienteCodigo" in detalle_camioneta.columns
-                    else 0
-                )
-
-                cantidad_pedidos_detalle = (
-                    detalle_camioneta["Pedido"].nunique()
-                    if "Pedido" in detalle_camioneta.columns
-                    else len(detalle_camioneta)
-                )
-
-                total_unidades_detalle = int(
-                    pd.to_numeric(
-                        detalle_camioneta.get(
-                            "TotalUnidades",
-                            pd.Series(dtype=float),
-                        ),
-                        errors="coerce",
-                    )
-                    .fillna(0)
-                    .sum()
-                )
-
-                total_m3_detalle = float(
-                    pd.to_numeric(
-                        detalle_camioneta.get(
-                            "TotalM3",
-                            pd.Series(dtype=float),
-                        ),
-                        errors="coerce",
-                    )
-                    .fillna(0)
-                    .sum()
-                )
-
-                detalle_kpi_1, detalle_kpi_2, \
-                    detalle_kpi_3, detalle_kpi_4 = st.columns(4)
-
-                detalle_kpi_1.metric(
-                    "👥 Clientes",
-                    cantidad_clientes_detalle,
-                )
-
-                detalle_kpi_2.metric(
-                    "📦 Pedidos",
-                    cantidad_pedidos_detalle,
-                )
-
-                detalle_kpi_3.metric(
-                    "🔢 Unidades",
-                    f"{total_unidades_detalle:,}".replace(",", "."),
-                )
-
-                detalle_kpi_4.metric(
-                    "📐 Volumen",
-                    f"{total_m3_detalle:,.3f} m³"
-                    .replace(",", "X")
-                    .replace(".", ",")
-                    .replace("X", "."),
-                )
-
-                columnas_detalle_preferidas = [
-                    "Pedido",
-                    "ClienteCodigo",
-                    "ClienteDescripcion",
-                    "TotalUnidades",
-                    "TotalM3",
-                    "TotalSKUs",
-                    "DetalleFamilias",
-                    "CodigoDespacho",
-                    "DespachoDescripcion",
-                    "Planificacion",
-                ]
-
-                columnas_detalle_disponibles = [
-                    columna
-                    for columna in columnas_detalle_preferidas
-                    if columna in detalle_camioneta.columns
-                ]
-
-                tabla_detalle_camioneta = detalle_camioneta[
-                    columnas_detalle_disponibles
-                ].copy()
-
-                tabla_detalle_camioneta = (
-                    tabla_detalle_camioneta.rename(
-                        columns={
-                            "ClienteCodigo": "Código cliente",
-                            "ClienteDescripcion": "Cliente",
-                            "TotalUnidades": "Unidades",
-                            "TotalM3": "Volumen m³",
-                            "TotalSKUs": "SKUs",
-                            "DetalleFamilias": "Familias",
-                            "CodigoDespacho": "Código despacho",
-                            "DespachoDescripcion": "Despacho actual",
-                            "Planificacion": "Planificación",
-                        }
-                    )
-                )
-
-                st.dataframe(
-                    tabla_detalle_camioneta,
                     width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Volumen m³": st.column_config.NumberColumn(
-                            "Volumen m³",
-                            format="%.3f",
-                        ),
-                        "Unidades": st.column_config.NumberColumn(
-                            "Unidades",
-                            format="%d",
-                        ),
-                        "SKUs": st.column_config.NumberColumn(
-                            "SKUs",
-                            format="%d",
-                        ),
-                    },
                 )
-
-            if (
-                estado_guardado
-                and not bool(
-                    estado_guardado.get(
-                        "exito",
-                        False
-                    )
-                )
-                and not bool(
-                    estado_guardado.get(
-                        "pendiente",
-                        False
-                    )
-                )
-            ):
-
-                with st.expander(
-                    f"❌ Ver error de {nombre_camioneta}",
-                    expanded=True,
-                ):
-
-                    st.error(
-                        estado_guardado.get(
-                            "mensaje",
-                            "Error sin detalle."
-                        )
-                    )
-
-                    detalle_guardado = estado_guardado.get(
-                        "detalle",
-                        ""
-                    )
-
-                    if detalle_guardado:
-
-                        st.code(
-                            detalle_guardado,
-                            language="text",
-                        )
-
-            if ejecutar:
-
-                clave_resultado = (
-                    f"resultado_digip_{clave_ejecucion}"
-                )
-
-                usuario_ejecucion = (
-                    st.session_state.get("usuario")
-                    or st.session_state.get("nombre_usuario")
-                    or "Usuario app"
-                )
-
-                try:
-
-                    orden_id = crear_orden_agrupacion(
-                        camioneta=despacho_digip,
-                        codigo_despacho=codigo_despacho,
-                        codigos_despacho=codigos_despacho,
-                        usar_filtro_codigo_despacho=(
-                            usar_filtro_codigo_despacho
-                        ),
-                        pedidos=lista_pedidos,
-                        usuario=usuario_ejecucion,
-                    )
-
-                    st.session_state[
-                        clave_resultado
-                    ] = {
-                        "exito": False,
-                        "pendiente": True,
-                        "orden_id": orden_id,
-                        "mensaje": (
-                            "Orden enviada al worker de la PC."
-                        ),
-                    }
-
-                    st.success(
-                        f"Orden {orden_id} enviada al worker."
-                    )
-
-                    st.rerun()
-
-                except Exception as error:
-
-                    st.session_state[
-                        clave_resultado
-                    ] = {
-                        "exito": False,
-                        "pendiente": False,
-                        "mensaje": str(error),
-                    }
-
-                    st.error(
-                        "No se pudo enviar la orden al worker: "
-                        f"{error}"
-                    )
-
-            estado_cola = st.session_state.get(
-                f"resultado_digip_{clave_ejecucion}"
             )
 
-            if estado_cola and estado_cola.get("orden_id"):
+        if guardar_estado_solicitud:
 
-                orden_actual = obtener_orden(
-                    estado_cola["orden_id"]
+            usuario_logistica = (
+                st.session_state.get("usuario")
+                or st.session_state.get("nombre_usuario")
+                or "Logística"
+            )
+
+            try:
+
+                resultado_actualizacion = actualizar_solicitud(
+                    solicitud_id=solicitud_id,
+                    estado_solicitud=nuevo_estado_solicitud,
+                    responsable=usuario_logistica,
+                    respuesta=observacion_logistica,
                 )
 
-                if orden_actual:
+                st.success(
+                    resultado_actualizacion["mensaje"]
+                )
 
-                    estado_orden = str(
-                        orden_actual.get("Estado", "")
-                    ).strip().upper()
+                st.toast(
+                    "Solicitud actualizada.",
+                    icon="✅",
+                )
 
-                    mensaje_orden = str(
-                        orden_actual.get("Mensaje", "")
-                    ).strip()
+                st.rerun()
 
-                    etapa_orden = str(
-                        orden_actual.get("Etapa", "")
-                    ).strip()
+            except Exception as error:
 
-                    if estado_orden == "COMPLETADA":
+                st.error(
+                    "No se pudo actualizar la solicitud."
+                )
 
-                        st.session_state[
-                            f"resultado_digip_{clave_ejecucion}"
-                        ] = {
-                            "exito": True,
-                            "pendiente": False,
-                            "orden_id": orden_actual.get("OrdenID"),
-                            "mensaje": mensaje_orden,
-                        }
-
-                        st.success(
-                            f"✅ {nombre_camioneta}: "
-                            f"{mensaje_orden}"
-                        )
-
-                    elif estado_orden == "ERROR":
-
-                        st.error(
-                            f"❌ {nombre_camioneta}: "
-                            f"{mensaje_orden}"
-                        )
-
-                    elif estado_orden == "EN_PROCESO":
-
-                        st.info(
-                            f"⚙️ {nombre_camioneta} en proceso — "
-                            f"{etapa_orden}: {mensaje_orden}"
-                        )
-
-                    else:
-
-                        st.warning(
-                            f"🕒 {nombre_camioneta} pendiente "
-                            "de ser tomada por el worker."
-                        )
-
-                    if estado_orden not in {
-                        "COMPLETADA",
-                        "ERROR",
-                        "CANCELADA",
-                    }:
-
-                        if st.button(
-                            "🔄 Consultar estado",
-                            key=(
-                                "consultar_worker_"
-                                f"{clave_ejecucion}"
-                            ),
-                        ):
-                            st.rerun()
+                st.exception(error)
 
 
-# =====================================================
-# FILTROS DE LA TABLA OPERATIVA
-# Se muestran después de la planificación de camionetas.
-# Los filtros guardados ya fueron aplicados previamente
-# para calcular los KPIs y la propuesta de planificación.
-# =====================================================
+    if solicitudes_abiertas.empty:
 
-st.markdown("---")
-
-st.subheader("🔎 Filtros de la Tabla Operativa")
-
-with st.form(
-    key="formulario_filtros_pedidos",
-    clear_on_submit=False
-):
-
-    filtro1, filtro2, filtro3, filtro4 = st.columns(4)
-
-    with filtro1:
-
-        estados_form = st.multiselect(
-            "Estado",
-            options=opciones_estado,
-            default=filtros_aplicados["estados"]
+        st.success(
+            "No hay solicitudes comerciales pendientes.",
+            icon="✅",
         )
-
-    with filtro2:
-
-        preparaciones_form = st.multiselect(
-            "Estado preparación",
-            options=opciones_preparacion,
-            default=filtros_aplicados["preparaciones"]
-        )
-
-    with filtro3:
-
-        planificaciones_form = st.multiselect(
-            "Planificación",
-            options=opciones_planificacion,
-            default=filtros_aplicados["planificaciones"]
-        )
-
-    with filtro4:
-
-        despachos_form = st.multiselect(
-            "Despacho",
-            options=opciones_despacho,
-            default=filtros_aplicados["despachos"]
-        )
-
-    filtro5, filtro6 = st.columns([1, 2])
-
-    with filtro5:
-
-        if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
-
-            rango_fechas_form = st.date_input(
-                "Rango de fechas",
-                value=(
-                    filtros_aplicados["fecha_desde"],
-                    filtros_aplicados["fecha_hasta"]
-                ),
-                min_value=fecha_minima.date(),
-                max_value=fecha_maxima.date()
-            )
-
-        else:
-
-            rango_fechas_form = None
-
-    with filtro6:
-
-        busqueda_form = st.text_input(
-            "Buscar pedido o cliente",
-            value=filtros_aplicados["busqueda"],
-            placeholder=(
-                "Número de pedido, código "
-                "o nombre del cliente..."
-            )
-        )
-
-        boton1, boton2 = st.columns(2)
-
-        with boton1:
-
-            aplicar_filtros = st.form_submit_button(
-                "🔎 Aplicar filtros",
-                width="stretch",
-                type="primary"
-            )
-
-        with boton2:
-
-            quitar_filtros = st.form_submit_button(
-                "🧹 Quitar filtros",
-                width="stretch"
-            )
-
-
-# =====================================================
-# GUARDAR O QUITAR FILTROS
-# =====================================================
-
-if quitar_filtros:
-
-    st.session_state["filtros_pedidos"] = {
-        "estados": [],
-        "preparaciones": [],
-        "planificaciones": [],
-        "despachos": [],
-        "fecha_desde": (
-            fecha_minima.date()
-            if pd.notna(fecha_minima)
-            else None
-        ),
-        "fecha_hasta": (
-            fecha_maxima.date()
-            if pd.notna(fecha_maxima)
-            else None
-        ),
-        "busqueda": ""
-    }
-
-    st.rerun()
-
-
-if aplicar_filtros:
-
-    if (
-        rango_fechas_form
-        and len(rango_fechas_form) == 2
-    ):
-
-        fecha_desde_form = rango_fechas_form[0]
-        fecha_hasta_form = rango_fechas_form[1]
 
     else:
 
-        fecha_desde_form = None
-        fecha_hasta_form = None
+        total_solicitudes_abiertas = len(solicitudes_abiertas)
+        pedidos_con_solicitud = solicitudes_abiertas["Pedido"].nunique()
 
-    st.session_state["filtros_pedidos"] = {
-        "estados": estados_form,
-        "preparaciones": preparaciones_form,
-        "planificaciones": planificaciones_form,
-        "despachos": despachos_form,
-        "fecha_desde": fecha_desde_form,
-        "fecha_hasta": fecha_hasta_form,
-        "busqueda": busqueda_form.strip()
-    }
+        prioridad_alta = int(
+            solicitudes_abiertas["Prioridad"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .eq("ALTA")
+            .sum()
+        )
 
-    # La planificación y la tabla fueron calculadas antes de
-    # renderizar este formulario. Se relanza la página para que
-    # ambos bloques utilicen inmediatamente los nuevos filtros.
-    st.rerun()
+        cantidad_cancelaciones = int(
+            solicitudes_abiertas["TipoSolicitud"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .isin({"CANCELACIÓN", "CANCELACION"})
+            .sum()
+        )
+
+        st.warning(
+            (
+                f"Hay {total_solicitudes_abiertas} solicitudes "
+                f"comerciales pendientes sobre "
+                f"{pedidos_con_solicitud} pedidos."
+            ),
+            icon="📩",
+        )
+
+        with st.expander(
+            (
+                f"📩 Solicitudes comerciales "
+                f"({total_solicitudes_abiertas})"
+            ),
+            expanded=False,
+        ):
+
+            (
+                resumen_col_1,
+                resumen_col_2,
+                resumen_col_3,
+                resumen_col_4,
+            ) = st.columns(4)
+
+            resumen_col_1.metric(
+                "Abiertas",
+                total_solicitudes_abiertas,
+            )
+
+            resumen_col_2.metric(
+                "Pedidos",
+                pedidos_con_solicitud,
+            )
+
+            resumen_col_3.metric(
+                "Prioridad alta",
+                prioridad_alta,
+            )
+
+            resumen_col_4.metric(
+                "Cancelaciones",
+                cantidad_cancelaciones,
+                help=(
+                    "Solicitudes abiertas de Cancelación que "
+                    "requieren revisión prioritaria."
+                ),
+            )
+
+            solicitudes_abiertas_ordenadas = (
+                solicitudes_abiertas
+                .assign(
+                    EsCancelacion=(
+                        solicitudes_abiertas["TipoSolicitud"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                        .isin({"CANCELACIÓN", "CANCELACION"})
+                        .astype(int)
+                    ),
+                    EsPrioridadAlta=(
+                        solicitudes_abiertas["Prioridad"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                        .eq("ALTA")
+                        .astype(int)
+                    ),
+                )
+                .sort_values(
+                    by=[
+                        "EsCancelacion",
+                        "EsPrioridadAlta",
+                        "FechaSolicitudOrden",
+                    ],
+                    ascending=[False, False, False],
+                    na_position="last",
+                )
+                .reset_index(drop=True)
+            )
+
+            tabla_solicitudes_visible = (
+                solicitudes_abiertas_ordenadas[
+                    [
+                        "SolicitudID",
+                        "Pedido",
+                        "Cliente",
+                        "TipoSolicitud",
+                        "Prioridad",
+                        "TotalUnidades",
+                        "TotalM3",
+                        "Descripcion",
+                        "FechaSolicitudVisible",
+                        "EstadoSolicitud",
+                        "Responsable",
+                    ]
+                ]
+                .rename(
+                    columns={
+                        "SolicitudID": "ID",
+                        "TipoSolicitud": "Tipo",
+                        "Descripcion": "Detalle",
+                        "FechaSolicitudVisible": "Fecha",
+                        "EstadoSolicitud": "Estado",
+                    }
+                )
+                .reset_index(drop=True)
+            )
+
+            evento_solicitudes = st.dataframe(
+                tabla_solicitudes_visible,
+                width="stretch",
+                hide_index=True,
+                height=min(
+                    340,
+                    85 + len(tabla_solicitudes_visible) * 35,
+                ),
+                on_select="rerun",
+                selection_mode="single-row",
+                key="tabla_solicitudes_comerciales",
+                column_config={
+                    "ID": None,
+                    "Pedido": st.column_config.TextColumn(
+                        "Pedido",
+                        width="small",
+                    ),
+                    "Cliente": st.column_config.TextColumn(
+                        "Cliente",
+                        width="medium",
+                    ),
+                    "Tipo": st.column_config.TextColumn(
+                        "Solicitud",
+                        width="medium",
+                    ),
+                    "Prioridad": st.column_config.TextColumn(
+                        "Prioridad",
+                        width="small",
+                    ),
+                    "Detalle": st.column_config.TextColumn(
+                        "Detalle",
+                        width="large",
+                    ),
+                    "Fecha": st.column_config.TextColumn(
+                        "Fecha",
+                        width="small",
+                    ),
+                    "Estado": st.column_config.TextColumn(
+                        "Estado",
+                        width="small",
+                    ),
+                    "Responsable": st.column_config.TextColumn(
+                        "Responsable",
+                        width="small",
+                    ),
+                },
+            )
+
+            filas_seleccionadas = (
+                evento_solicitudes.selection.rows
+                if evento_solicitudes is not None
+                else []
+            )
+
+            accion_col_1, accion_col_2 = st.columns(
+                [4, 1],
+                vertical_alignment="center",
+            )
+
+            with accion_col_1:
+
+                if filas_seleccionadas:
+
+                    fila_seleccionada = filas_seleccionadas[0]
+
+                    solicitud_seleccionada = (
+                        tabla_solicitudes_visible.iloc[
+                            fila_seleccionada
+                        ]
+                    )
+
+                    st.caption(
+                        f"Seleccionada: pedido "
+                        f"**{solicitud_seleccionada['Pedido']}** · "
+                        f"{solicitud_seleccionada['Tipo']}"
+                    )
+
+                else:
+
+                    st.caption(
+                        "Seleccioná una fila para gestionar la solicitud."
+                    )
+
+            with accion_col_2:
+
+                gestionar_solicitud = st.button(
+                    "Gestionar",
+                    icon="📩",
+                    type="primary",
+                    width="stretch",
+                    disabled=not bool(filas_seleccionadas),
+                    key="btn_gestionar_solicitud_seleccionada",
+                )
+
+            if gestionar_solicitud and filas_seleccionadas:
+
+                indice_seleccionado = filas_seleccionadas[0]
+
+                solicitud_id_seleccionada = str(
+                    tabla_solicitudes_visible.iloc[
+                        indice_seleccionado
+                    ]["ID"]
+                )
+
+                abrir_gestion_solicitud(
+                    solicitud_id_seleccionada
+                )
 
 
-# =====================================================
-# DESCARGA
-# =====================================================
+    st.markdown("---")
 
-csv_tabla_operativa = (
-    tabla_filtrada.to_csv(
-        index=False,
-        sep=";",
-        encoding="utf-8-sig",
-        date_format="%d/%m/%Y"
+
+    # =====================================================
+    # CONTENEDOR DE KPIs
+    # Se crea acá para que aparezca arriba de los filtros
+    # =====================================================
+
+    contenedor_kpis = st.container()
+
+    st.markdown("---")
+
+    # =====================================================
+    # OPCIONES DISPONIBLES PARA LOS FILTROS
+    # =====================================================
+
+    opciones_estado = sorted(
+        tabla["Estado"]
+        .dropna()
+        .astype(str)
+        .loc[lambda serie: serie.str.strip().ne("")]
+        .unique()
+        .tolist()
     )
-    .encode("utf-8-sig")
-)
 
-st.download_button(
-    label="⬇️ Descargar tabla operativa",
-    data=csv_tabla_operativa,
-    file_name="Tabla_Operativa_Pedidos.csv",
-    mime="text/csv",
-    width="stretch"
-)
+    opciones_preparacion = sorted(
+        tabla["PreparacionEstado"]
+        .dropna()
+        .astype(str)
+        .loc[lambda serie: serie.str.strip().ne("")]
+        .unique()
+        .tolist()
+    )
+
+    opciones_planificacion = sorted(
+        tabla["Planificacion"]
+        .dropna()
+        .astype(str)
+        .loc[lambda serie: serie.str.strip().ne("")]
+        .unique()
+        .tolist()
+    )
+
+    opciones_despacho = sorted(
+        tabla["DespachoDescripcion"]
+        .dropna()
+        .astype(str)
+        .loc[lambda serie: serie.str.strip().ne("")]
+        .unique()
+        .tolist()
+    )
+
+    fecha_minima = tabla["Fecha"].min()
+    fecha_maxima = tabla["Fecha"].max()
 
 
-# =====================================================
-# TABLA
-# =====================================================
+    # =====================================================
+    # ESTADO INICIAL DE LOS FILTROS
+    # =====================================================
 
-st.subheader("📋 Tabla Operativa")
+    if "filtros_pedidos" not in st.session_state:
 
-st.caption(
-    f"{len(tabla_filtrada):,} registros visibles · "
-    f"{tabla_filtrada['Pedido'].nunique():,} pedidos únicos · "
-    f"{len(tabla):,} registros totales"
-    .replace(",", ".")
-)
+        st.session_state["filtros_pedidos"] = {
+            "estados": [],
+            "preparaciones": [],
+            "planificaciones": [],
+            "despachos": [],
+            "fecha_desde": (
+                fecha_minima.date()
+                if pd.notna(fecha_minima)
+                else None
+            ),
+            "fecha_hasta": (
+                fecha_maxima.date()
+                if pd.notna(fecha_maxima)
+                else None
+            ),
+            "busqueda": ""
+        }
+    # Ajustar las fechas guardadas al rango actual de los datos
+    if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
 
-st.dataframe(
-    tabla_filtrada,
-    width="stretch",
-    hide_index=True,
-    height=750,
-    column_config={
+        fecha_minima_actual = fecha_minima.date()
+        fecha_maxima_actual = fecha_maxima.date()
 
-        "Fecha": st.column_config.DateColumn(
-            "Fecha",
-            format="DD/MM/YYYY"
-        ),
+        fecha_desde_guardada = st.session_state[
+            "filtros_pedidos"
+        ].get("fecha_desde")
 
-        "FechaTransmisionERP": st.column_config.DateColumn(
-            "Fecha transmisión",
-            format="DD/MM/YYYY"
-        ),
+        fecha_hasta_guardada = st.session_state[
+            "filtros_pedidos"
+        ].get("fecha_hasta")
 
-        "HoraTransmisionERP": st.column_config.TextColumn(
-            "Hora transmisión"
-        ),
+        if (
+            fecha_desde_guardada is None
+            or fecha_desde_guardada < fecha_minima_actual
+            or fecha_desde_guardada > fecha_maxima_actual
+        ):
+            st.session_state[
+                "filtros_pedidos"
+            ]["fecha_desde"] = fecha_minima_actual
 
-        "TotalUnidades": st.column_config.NumberColumn(
-            "Unidades",
-            format="%d"
-        ),
-        "TotalM3": st.column_config.NumberColumn(
-         "M³",
-        format="%.3f"
-        ),
+        if (
+            fecha_hasta_guardada is None
+            or fecha_hasta_guardada > fecha_maxima_actual
+            or fecha_hasta_guardada < fecha_minima_actual
+        ):
+            st.session_state[
+                "filtros_pedidos"
+            ]["fecha_hasta"] = fecha_maxima_actual
 
-        "TotalSKUs": st.column_config.NumberColumn(
-            "SKUs",
-            format="%d"
-        ),
+    filtros_aplicados = st.session_state["filtros_pedidos"]
 
-        "ImporteERP": st.column_config.NumberColumn(
-            "Importe ERP",
-            format="$ %.0f"
-        ),
-    }
-)
+
+    # =====================================================
+    # APLICAR LOS FILTROS GUARDADOS
+    # =====================================================
+
+    tabla_filtrada = tabla.copy()
+
+    if filtros_aplicados["estados"]:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["Estado"].isin(
+                filtros_aplicados["estados"]
+            )
+        ]
+
+    if filtros_aplicados["preparaciones"]:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["PreparacionEstado"].isin(
+                filtros_aplicados["preparaciones"]
+            )
+        ]
+
+    if filtros_aplicados["planificaciones"]:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["Planificacion"].isin(
+                filtros_aplicados["planificaciones"]
+            )
+        ]
+
+    if filtros_aplicados["despachos"]:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["DespachoDescripcion"].isin(
+                filtros_aplicados["despachos"]
+            )
+        ]
+
+    fecha_desde = filtros_aplicados["fecha_desde"]
+    fecha_hasta = filtros_aplicados["fecha_hasta"]
+
+    if fecha_desde is not None:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["Fecha"].ge(
+                pd.Timestamp(fecha_desde)
+            )
+        ]
+
+    if fecha_hasta is not None:
+
+        tabla_filtrada = tabla_filtrada[
+            tabla_filtrada["Fecha"].lt(
+                pd.Timestamp(fecha_hasta)
+                + pd.Timedelta(days=1)
+            )
+        ]
+
+    texto_busqueda = filtros_aplicados["busqueda"]
+
+    if texto_busqueda:
+
+        mascara_busqueda = (
+            tabla_filtrada["Pedido"]
+            .astype(str)
+            .str.contains(
+                texto_busqueda,
+                case=False,
+                na=False
+            )
+            |
+            tabla_filtrada["ClienteCodigo"]
+            .astype(str)
+            .str.contains(
+                texto_busqueda,
+                case=False,
+                na=False
+            )
+            |
+            tabla_filtrada["ClienteDescripcion"]
+            .astype(str)
+            .str.contains(
+                texto_busqueda,
+                case=False,
+                na=False
+            )
+        )
+
+        tabla_filtrada = tabla_filtrada[
+            mascara_busqueda
+        ]
+
+
+    # =====================================================
+    # BASE ÚNICA PARA KPIs
+    # =====================================================
+
+    tabla_kpis = (
+        tabla_filtrada
+        .drop_duplicates(
+            subset=["Pedido"],
+            keep="first"
+        )
+        .copy()
+    )
+
+
+    # =====================================================
+    # CÁLCULO DE KPIs
+    # =====================================================
+
+    total_pedidos = tabla_kpis["Pedido"].nunique()
+
+    total_unidades = int(
+        tabla_kpis["TotalUnidades"].sum()
+    )
+
+    total_volumetria = float(
+        tabla_kpis["TotalM3"].sum()
+    )
+
+    total_importe = float(
+        tabla_kpis["ImporteERP"].sum()
+    )
+
+    pedidos_en_preparacion = int(
+        tabla_kpis["PreparacionEstado"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+        .sum()
+    )
+
+
+    # =====================================================
+    # MOSTRAR KPIs ARRIBA DE LOS FILTROS
+    # =====================================================
+
+    with contenedor_kpis:
+
+        st.subheader("📊 Resumen Operativo")
+
+        kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+
+        with kpi1:
+
+            st.metric(
+                "📦 Pedidos",
+                f"{total_pedidos:,}".replace(",", ".")
+            )
+
+        with kpi2:
+
+            st.metric(
+                "🔢 Unidades",
+                f"{total_unidades:,}".replace(",", ".")
+            )
+
+        with kpi3:
+
+            st.metric(
+                "📐 Volumen total",
+                f"{total_volumetria:,.3f} m³"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            )
+
+        with kpi4:
+
+            st.metric(
+                "🛒 Con preparación",
+                f"{pedidos_en_preparacion:,}"
+                .replace(",", ".")
+            )
+
+        with kpi5:
+
+            st.metric(
+                "📩 Solicitudes",
+                f"{len(solicitudes_abiertas):,}"
+                .replace(",", ".")
+            )
+
+        with kpi6:
+
+            st.metric(
+                "💰 Importe",
+                f"$ {total_importe:,.0f}"
+                .replace(",", ".")
+            )
+
+
+
+    # =====================================================
+    # AGRUPADORES REALES DE DIGIP
+    # El planificador de camionetas fue trasladado a 03_Despachos.py.
+
+    # =====================================================
+    # FILTROS DE LA TABLA OPERATIVA
+    # Se muestran después de la planificación de camionetas.
+    # Los filtros guardados ya fueron aplicados previamente
+    # para calcular los KPIs y la propuesta de planificación.
+    # =====================================================
+
+    st.markdown("---")
+
+    st.subheader("🔎 Filtros de la Tabla Operativa")
+
+    with st.form(
+        key="formulario_filtros_pedidos",
+        clear_on_submit=False
+    ):
+
+        filtro1, filtro2, filtro3, filtro4 = st.columns(4)
+
+        with filtro1:
+
+            estados_form = st.multiselect(
+                "Estado",
+                options=opciones_estado,
+                default=filtros_aplicados["estados"]
+            )
+
+        with filtro2:
+
+            preparaciones_form = st.multiselect(
+                "Estado preparación",
+                options=opciones_preparacion,
+                default=filtros_aplicados["preparaciones"]
+            )
+
+        with filtro3:
+
+            planificaciones_form = st.multiselect(
+                "Planificación",
+                options=opciones_planificacion,
+                default=filtros_aplicados["planificaciones"]
+            )
+
+        with filtro4:
+
+            despachos_form = st.multiselect(
+                "Despacho",
+                options=opciones_despacho,
+                default=filtros_aplicados["despachos"]
+            )
+
+        filtro5, filtro6 = st.columns([1, 2])
+
+        with filtro5:
+
+            if pd.notna(fecha_minima) and pd.notna(fecha_maxima):
+
+                rango_fechas_form = st.date_input(
+                    "Rango de fechas",
+                    value=(
+                        filtros_aplicados["fecha_desde"],
+                        filtros_aplicados["fecha_hasta"]
+                    ),
+                    min_value=fecha_minima.date(),
+                    max_value=fecha_maxima.date()
+                )
+
+            else:
+
+                rango_fechas_form = None
+
+        with filtro6:
+
+            busqueda_form = st.text_input(
+                "Buscar pedido o cliente",
+                value=filtros_aplicados["busqueda"],
+                placeholder=(
+                    "Número de pedido, código "
+                    "o nombre del cliente..."
+                )
+            )
+
+            boton1, boton2 = st.columns(2)
+
+            with boton1:
+
+                aplicar_filtros = st.form_submit_button(
+                    "🔎 Aplicar filtros",
+                    width="stretch",
+                    type="primary"
+                )
+
+            with boton2:
+
+                quitar_filtros = st.form_submit_button(
+                    "🧹 Quitar filtros",
+                    width="stretch"
+                )
+
+
+    # =====================================================
+    # GUARDAR O QUITAR FILTROS
+    # =====================================================
+
+    if quitar_filtros:
+
+        st.session_state["filtros_pedidos"] = {
+            "estados": [],
+            "preparaciones": [],
+            "planificaciones": [],
+            "despachos": [],
+            "fecha_desde": (
+                fecha_minima.date()
+                if pd.notna(fecha_minima)
+                else None
+            ),
+            "fecha_hasta": (
+                fecha_maxima.date()
+                if pd.notna(fecha_maxima)
+                else None
+            ),
+            "busqueda": ""
+        }
+
+        st.rerun()
+
+
+    if aplicar_filtros:
+
+        if (
+            rango_fechas_form
+            and len(rango_fechas_form) == 2
+        ):
+
+            fecha_desde_form = rango_fechas_form[0]
+            fecha_hasta_form = rango_fechas_form[1]
+
+        else:
+
+            fecha_desde_form = None
+            fecha_hasta_form = None
+
+        st.session_state["filtros_pedidos"] = {
+            "estados": estados_form,
+            "preparaciones": preparaciones_form,
+            "planificaciones": planificaciones_form,
+            "despachos": despachos_form,
+            "fecha_desde": fecha_desde_form,
+            "fecha_hasta": fecha_hasta_form,
+            "busqueda": busqueda_form.strip()
+        }
+
+        # La planificación y la tabla fueron calculadas antes de
+        # renderizar este formulario. Se relanza la página para que
+        # ambos bloques utilicen inmediatamente los nuevos filtros.
+        st.rerun()
+
+
+    # =====================================================
+    # DESCARGA
+    # =====================================================
+
+    csv_tabla_operativa = (
+        tabla_filtrada.to_csv(
+            index=False,
+            sep=";",
+            encoding="utf-8-sig",
+            date_format="%d/%m/%Y"
+        )
+        .encode("utf-8-sig")
+    )
+
+    st.download_button(
+        label="⬇️ Descargar tabla operativa",
+        data=csv_tabla_operativa,
+        file_name="Tabla_Operativa_Pedidos.csv",
+        mime="text/csv",
+        width="stretch"
+    )
+
+
+    # =====================================================
+    # TABLA
+    # =====================================================
+
+    st.subheader("📋 Tabla Operativa")
+
+    st.caption(
+        f"{len(tabla_filtrada):,} registros visibles · "
+        f"{tabla_filtrada['Pedido'].nunique():,} pedidos únicos · "
+        f"{len(tabla):,} registros totales"
+        .replace(",", ".")
+    )
+
+    st.dataframe(
+        tabla_filtrada,
+        width="stretch",
+        hide_index=True,
+        height=750,
+        column_config={
+
+            "Fecha": st.column_config.DateColumn(
+                "Fecha",
+                format="DD/MM/YYYY"
+            ),
+
+            "FechaTransmisionERP": st.column_config.DateColumn(
+                "Fecha transmisión",
+                format="DD/MM/YYYY"
+            ),
+
+            "HoraTransmisionERP": st.column_config.TextColumn(
+                "Hora transmisión"
+            ),
+
+            "TotalUnidades": st.column_config.NumberColumn(
+                "Unidades",
+                format="%d"
+            ),
+            "TotalM3": st.column_config.NumberColumn(
+             "M³",
+            format="%.3f"
+            ),
+
+            "TotalSKUs": st.column_config.NumberColumn(
+                "SKUs",
+                format="%d"
+            ),
+
+            "ImporteERP": st.column_config.NumberColumn(
+                "Importe ERP",
+                format="$ %.0f"
+            ),
+        }
+    )

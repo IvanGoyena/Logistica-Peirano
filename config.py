@@ -76,11 +76,11 @@ HEADLESS = True
 RESPONSABLES = {
     "Logistica": {
         "to": [
-            "igoyena@peirano.com.ar",
-            "control.gestion@queija.com.ar",
+            "igoyena@peirano.com",
+            "control.gestion@queija.com",
         ],
         "cc": [
-            "lvega@peirano.com.ar",
+            "lvega@peirano.com",
         ],
     },
 }

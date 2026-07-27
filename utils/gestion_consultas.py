@@ -14,6 +14,7 @@ from utils.google_sheets import (
     actualizar_registro,
     eliminar_registro,
     leer_hoja,
+    asegurar_hoja,
 )
 
 
@@ -84,6 +85,52 @@ def normalizar_pedido(
         .split("-")[0]
         .strip()
     )
+
+
+def normalizar_remito(remito: Any) -> str:
+    """Normaliza y valida uno o varios números de remito."""
+
+    remito_texto = limpiar_texto(remito)
+
+    if not remito_texto:
+        raise ValueError("Debe ingresar al menos un número de remito.")
+
+    # Permite cargar remitos separados por salto de línea, coma o punto y coma.
+    for separador in ["\r\n", "\r", ";", ","]:
+        remito_texto = remito_texto.replace(separador, "\n")
+
+    remitos_normalizados: list[str] = []
+    for valor in remito_texto.split("\n"):
+        remito_limpio = limpiar_texto(valor).upper()
+        if not remito_limpio:
+            continue
+        if remito_limpio.endswith(".0"):
+            remito_limpio = remito_limpio[:-2]
+        if remito_limpio not in remitos_normalizados:
+            remitos_normalizados.append(remito_limpio)
+
+    if not remitos_normalizados:
+        raise ValueError("Debe ingresar al menos un número de remito válido.")
+
+    return " | ".join(remitos_normalizados)
+
+
+def separar_remitos(remitos: Any) -> list[str]:
+    """Devuelve los remitos individuales de un valor almacenado."""
+
+    texto = limpiar_texto(remitos)
+    if not texto:
+        return []
+
+    for separador in ["\r\n", "\r", "\n", ";", ",", "|"]:
+        texto = texto.replace(separador, "\n")
+
+    resultado: list[str] = []
+    for valor in texto.split("\n"):
+        limpio = limpiar_texto(valor).upper()
+        if limpio and limpio not in resultado:
+            resultado.append(limpio)
+    return resultado
 
 
 
@@ -514,19 +561,21 @@ def editar_solicitud(
 
 def eliminar_solicitud(
     solicitud_id: str,
+    usuario_cancelacion: str = "",
+    motivo: str = "Cancelada desde Consultas Comerciales.",
 ) -> dict[str, Any]:
     """
-    Elimina una solicitud no finalizada.
+    Cancela lógicamente una solicitud no finalizada.
+
+    La fila permanece en Google Sheets para conservar el
+    histórico de la gestión.
     """
 
-    solicitud_id = limpiar_texto(
-        solicitud_id
-    )
+    solicitud_id = limpiar_texto(solicitud_id)
 
     if not solicitud_id:
         raise ValueError(
-            "El identificador de la solicitud "
-            "es obligatorio."
+            "El identificador de la solicitud es obligatorio."
         )
 
     registro = obtener_registro_por_id(
@@ -537,37 +586,48 @@ def eliminar_solicitud(
 
     if registro is None:
         raise ValueError(
-            f"No se encontró la solicitud "
-            f"{solicitud_id}."
+            f"No se encontró la solicitud {solicitud_id}."
         )
 
     estado_actual = limpiar_texto(
-        registro.get(
-            "EstadoSolicitud",
-            "",
-        )
+        registro.get("EstadoSolicitud", "")
     ).upper()
 
     if estado_actual in {
         "FINALIZADA",
         "FINALIZADO",
+        "CANCELADA",
+        "CANCELADO",
     }:
         raise ValueError(
-            "No se puede eliminar una solicitud "
-            "finalizada."
+            "La solicitud ya está finalizada o cancelada."
         )
 
-    eliminar_registro(
+    responsable = (
+        limpiar_texto(usuario_cancelacion)
+        or limpiar_texto(registro.get("Responsable", ""))
+        or "Usuario no identificado"
+    )
+
+    actualizar_registro(
         nombre_hoja="Solicitudes",
         columna_id="SolicitudID",
         valor_id=solicitud_id,
+        cambios={
+            "EstadoSolicitud": "Cancelada",
+            "Responsable": responsable,
+            "Respuesta": limpiar_texto(motivo),
+            "FechaResolucion": obtener_fecha_hora(),
+        },
     )
 
     return {
         "ok": True,
         "id": solicitud_id,
+        "estado": "Cancelada",
         "mensaje": (
-            "Solicitud eliminada correctamente."
+            "Solicitud cancelada correctamente. "
+            "El registro se conserva en el histórico."
         ),
     }
 
@@ -723,3 +783,255 @@ def guardar_anulacion(
             "El pedido quedó bloqueado preventivamente."
         ),
     }
+
+
+# ==========================================================
+# CANCELACIONES DE ENTREGA
+# ==========================================================
+
+ESTADOS_CANCELACION_CERRADA = {
+    "FINALIZADA",
+    "CANCELADA",
+}
+
+ESTADOS_CANCELACION_VALIDOS = {
+    "Pendiente de envío",
+    "Alerta enviada",
+    "Entrega detenida",
+    "Ya despachado",
+    "IR generado",
+    "Mercadería reingresada",
+    "Finalizada",
+    "Cancelada",
+}
+
+
+def guardar_cancelacion_entrega(
+    remito: Any,
+    cliente: str,
+    motivo: str,
+    observacion: str,
+    usuario_solicitante: str,
+    telefono_destino: str,
+) -> dict[str, Any]:
+    """Registra una cancelación de entrega por uno o varios remitos."""
+
+    asegurar_hoja("CancelacionesEntrega")
+
+    remito_normalizado = normalizar_remito(remito)
+    motivo_limpio = limpiar_texto(motivo)
+
+    if not motivo_limpio:
+        raise ValueError("El motivo de cancelación es obligatorio.")
+
+    tabla = leer_hoja("CancelacionesEntrega")
+
+    if tabla is not None and not tabla.empty and "Remito" in tabla.columns:
+        remitos_nuevos = set(separar_remitos(remito_normalizado))
+        coincidencia_indice = None
+        remitos_duplicados: set[str] = set()
+
+        for indice, fila in tabla.iterrows():
+            estado = limpiar_texto(fila.get("EstadoCancelacion", "")).upper()
+            if estado in ESTADOS_CANCELACION_CERRADA:
+                continue
+
+            existentes = set(separar_remitos(fila.get("Remito", "")))
+            repetidos = remitos_nuevos.intersection(existentes)
+            if repetidos:
+                coincidencia_indice = indice
+                remitos_duplicados.update(repetidos)
+                break
+
+        if coincidencia_indice is not None:
+            existente = tabla.loc[coincidencia_indice]
+            detalle = ", ".join(sorted(remitos_duplicados))
+            return {
+                "ok": True,
+                "duplicado": True,
+                "id": limpiar_texto(existente.get("CancelacionEntregaID", "")),
+                "remito": remito_normalizado,
+                "mensaje": f"Ya existe una cancelación activa para: {detalle}.",
+            }
+
+    registro = {
+        "CancelacionEntregaID": generar_id("CAN-ENT"),
+        "Remito": remito_normalizado,
+        "Cliente": limpiar_texto(cliente),
+        "Motivo": motivo_limpio,
+        "Observacion": limpiar_texto(observacion),
+        "UsuarioSolicitante": limpiar_texto(usuario_solicitante),
+        "FechaSolicitud": obtener_fecha_hora(),
+        "EstadoCancelacion": "Pendiente de envío",
+        "TelefonoDestino": limpiar_texto(telefono_destino),
+        "EstadoWhatsApp": "Pendiente de envío",
+        "FechaEnvioWhatsApp": "",
+        "ResponsableConfirmacion": "",
+        "FechaConfirmacion": "",
+        "ObservacionConfirmacion": "",
+        "NumeroIR": "",
+        "FechaIR": "",
+        "EstadoReingreso": "Pendiente",
+        "FechaReingreso": "",
+        "FechaCierre": "",
+    }
+
+    agregar_registro("CancelacionesEntrega", registro)
+
+    return {
+        "ok": True,
+        "duplicado": False,
+        "id": registro["CancelacionEntregaID"],
+        "remito": remito_normalizado,
+        "registro": registro,
+        "mensaje": "Cancelación de entrega registrada correctamente.",
+    }
+
+
+def actualizar_cancelacion_entrega(
+    cancelacion_id: Any,
+    cambios: dict[str, Any],
+) -> dict[str, Any]:
+    """Actualiza una cancelación de entrega existente."""
+
+    cancelacion_id_limpio = limpiar_texto(cancelacion_id)
+    if not cancelacion_id_limpio:
+        raise ValueError("El ID de cancelación es obligatorio.")
+
+    actualizar_registro(
+        nombre_hoja="CancelacionesEntrega",
+        columna_id="CancelacionEntregaID",
+        valor_id=cancelacion_id_limpio,
+        cambios=cambios,
+    )
+
+    return {"ok": True, "id": cancelacion_id_limpio}
+
+
+def marcar_whatsapp_cancelacion_enviado(
+    cancelacion_id: Any,
+    responsable: str = "",
+) -> dict[str, Any]:
+    """Confirma manualmente que el aviso preparado fue enviado por WhatsApp."""
+
+    ahora = obtener_fecha_hora()
+    return actualizar_cancelacion_entrega(
+        cancelacion_id,
+        {
+            "EstadoWhatsApp": "Enviado - confirmado manualmente",
+            "FechaEnvioWhatsApp": ahora,
+            "EstadoCancelacion": "Alerta enviada",
+            "ResponsableConfirmacion": limpiar_texto(responsable),
+            "FechaConfirmacion": ahora,
+            "ObservacionConfirmacion": "Aviso enviado por WhatsApp.",
+        },
+    )
+
+
+def confirmar_cancelacion_entrega(
+    cancelacion_id: Any,
+    estado: str,
+    responsable: str,
+    observacion: str = "",
+) -> dict[str, Any]:
+    """Registra la respuesta operativa recibida luego del aviso."""
+
+    estado_limpio = limpiar_texto(estado)
+    estados_validos = {
+        "Entrega detenida",
+        "Ya despachado",
+        "Cancelada",
+    }
+
+    if estado_limpio not in estados_validos:
+        raise ValueError("Estado de confirmación inválido.")
+
+    ahora = obtener_fecha_hora()
+    cambios = {
+        "EstadoCancelacion": estado_limpio,
+        "ResponsableConfirmacion": limpiar_texto(responsable),
+        "FechaConfirmacion": ahora,
+        "ObservacionConfirmacion": limpiar_texto(observacion),
+    }
+
+    if estado_limpio == "Cancelada":
+        cambios["FechaCierre"] = ahora
+
+    return actualizar_cancelacion_entrega(cancelacion_id, cambios)
+
+
+def registrar_ir_cancelacion(
+    cancelacion_id: Any,
+    numero_ir: str,
+    responsable: str,
+    observacion: str = "",
+) -> dict[str, Any]:
+    """Registra el IR generado para el reingreso de la mercadería."""
+
+    numero_ir_limpio = limpiar_texto(numero_ir)
+    if not numero_ir_limpio:
+        raise ValueError("El número de IR es obligatorio.")
+
+    return actualizar_cancelacion_entrega(
+        cancelacion_id,
+        {
+            "NumeroIR": numero_ir_limpio,
+            "FechaIR": obtener_fecha_hora(),
+            "EstadoCancelacion": "IR generado",
+            "ResponsableConfirmacion": limpiar_texto(responsable),
+            "ObservacionConfirmacion": limpiar_texto(observacion),
+        },
+    )
+
+
+def confirmar_reingreso_cancelacion(
+    cancelacion_id: Any,
+    responsable: str,
+    observacion: str = "",
+) -> dict[str, Any]:
+    """Confirma que la mercadería volvió a ingresar físicamente."""
+
+    ahora = obtener_fecha_hora()
+    return actualizar_cancelacion_entrega(
+        cancelacion_id,
+        {
+            "EstadoCancelacion": "Mercadería reingresada",
+            "EstadoReingreso": "Confirmado",
+            "FechaReingreso": ahora,
+            "ResponsableConfirmacion": limpiar_texto(responsable),
+            "ObservacionConfirmacion": limpiar_texto(observacion),
+        },
+    )
+
+
+def finalizar_cancelacion_entrega(
+    cancelacion_id: Any,
+    responsable: str,
+    observacion: str = "",
+) -> dict[str, Any]:
+    """Cierra definitivamente una cancelación ya regularizada."""
+
+    ahora = obtener_fecha_hora()
+    return actualizar_cancelacion_entrega(
+        cancelacion_id,
+        {
+            "EstadoCancelacion": "Finalizada",
+            "EstadoReingreso": "Finalizado",
+            "FechaCierre": ahora,
+            "ResponsableConfirmacion": limpiar_texto(responsable),
+            "ObservacionConfirmacion": limpiar_texto(observacion),
+        },
+    )
+
+
+# Compatibilidad con versiones anteriores del módulo.
+def finalizar_reingreso_cancelacion(
+    cancelacion_id: Any,
+    responsable: str,
+    observacion: str = "",
+) -> dict[str, Any]:
+    return confirmar_reingreso_cancelacion(
+        cancelacion_id,
+        responsable,
+        observacion,
+    )

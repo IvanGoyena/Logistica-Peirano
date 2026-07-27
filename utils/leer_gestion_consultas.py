@@ -8,12 +8,14 @@ import pandas as pd
 
 from utils.google_sheets import (
     COLUMNAS_ANULACIONES,
+    COLUMNAS_CANCELACIONES_ENTREGA,
     COLUMNAS_RECLAMOS,
     COLUMNAS_RECLAMOS_DETALLE,
     COLUMNAS_RECLAMOS_FOTOS,
     COLUMNAS_SOLICITUDES,
     COLUMNAS_URGENCIAS,
     leer_hoja,
+    asegurar_hoja,
 )
 
 
@@ -226,6 +228,43 @@ def leer_anulaciones() -> pd.DataFrame:
         columnas=COLUMNAS_ANULACIONES,
         columna_fecha="FechaSolicitud",
     )
+
+
+def leer_cancelaciones_entrega() -> pd.DataFrame:
+    """Lee todas las cancelaciones de entrega."""
+
+    asegurar_hoja("CancelacionesEntrega")
+
+    return leer_tabla_google(
+        nombre_hoja="CancelacionesEntrega",
+        columnas=COLUMNAS_CANCELACIONES_ENTREGA,
+        columna_fecha="FechaSolicitud",
+    )
+
+
+def obtener_cancelaciones_entrega_activas() -> pd.DataFrame:
+    """Devuelve las cancelaciones que todavía requieren seguimiento."""
+
+    tabla = leer_cancelaciones_entrega()
+    if tabla.empty:
+        return tabla
+
+    estados_cerrados = {"FINALIZADA", "CANCELADA"}
+    estados = (
+        tabla["EstadoCancelacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    return tabla.loc[~estados.isin(estados_cerrados)].reset_index(drop=True)
+
+
+def obtener_historial_cancelaciones_entrega() -> pd.DataFrame:
+    """Devuelve el histórico completo de cancelaciones de entrega."""
+
+    return leer_cancelaciones_entrega()
 
 
 def leer_reclamos() -> pd.DataFrame:
@@ -717,6 +756,28 @@ def pedido_tiene_reclamo_abierto(
         obtener_reclamos_abiertos(),
         pedido,
     ).empty
+
+
+# ==========================================================
+# HISTÓRICOS POR TIPO DE GESTIÓN
+# ==========================================================
+
+def obtener_historial_solicitudes() -> pd.DataFrame:
+    """Devuelve todas las solicitudes, abiertas y cerradas."""
+
+    return leer_solicitudes()
+
+
+def obtener_historial_urgencias() -> pd.DataFrame:
+    """Devuelve todas las urgencias, activas y finalizadas."""
+
+    return leer_urgencias()
+
+
+def obtener_historial_reclamos() -> pd.DataFrame:
+    """Devuelve todos los reclamos, abiertos y cerrados."""
+
+    return leer_reclamos()
 
 
 # ==========================================================
