@@ -68,7 +68,9 @@ from utils.cola_agrupaciones import (
 )
 
 import pandas as pd
+import altair as alt
 import re
+import math
 
 # =====================================================
 # CONFIGURACIÓN
@@ -636,7 +638,9 @@ pendientes_planificacion = (
             "Pedido",
             "CodigoSucursal",
             "CodigoExpreso",
-            "ImporteERP"
+            "UnidadesPendientesERP",
+            "VolumenPendienteERP",
+            "ImporteERP",
         ]
     ]
     .drop_duplicates(
@@ -652,6 +656,59 @@ tabla = tabla.merge(
     how="left",
     validate="many_to_one"
 )
+
+
+# =====================================================
+# CARGA OPERATIVA PENDIENTE ERP
+# =====================================================
+
+# Guardamos los valores originales calculados desde
+# el detalle y la volumetría de los artículos.
+unidades_totales_originales = (
+    pd.to_numeric(
+        tabla["TotalUnidades"],
+        errors="coerce",
+    )
+    .fillna(0)
+)
+
+volumen_total_original = (
+    pd.to_numeric(
+        tabla["TotalM3"],
+        errors="coerce",
+    )
+    .fillna(0)
+)
+
+# Unidades pendientes reales informadas por ERP.
+tabla["UnidadesPendientesERP"] = (
+    pd.to_numeric(
+        tabla["UnidadesPendientesERP"],
+        errors="coerce",
+    )
+    .fillna(0)
+    .astype(int)
+)
+
+# Porcentaje del pedido que continúa pendiente.
+proporcion_pendiente = (
+    tabla["UnidadesPendientesERP"]
+    .div(
+        unidades_totales_originales.replace(0, pd.NA)
+    )
+    .fillna(0)
+    .clip(lower=0, upper=1)
+)
+
+# Reemplazamos las unidades totales por las pendientes ERP.
+tabla["TotalUnidades"] = tabla["UnidadesPendientesERP"]
+
+# Ajustamos proporcionalmente la volumetría original
+# para que represente únicamente las unidades pendientes.
+tabla["TotalM3"] = (
+    volumen_total_original
+    * proporcion_pendiente
+).round(3)
 
 
 # =====================================================
@@ -794,7 +851,13 @@ frecuencia_entrega = (
     .str.upper()
 )
 
-tabla["DiaEntrega"] = frecuencia_entrega
+# RETIRA tiene prioridad absoluta sobre la frecuencia y el código de despacho.
+es_retira = zona_expreso.eq("RETIRA")
+
+tabla["DiaEntrega"] = frecuencia_entrega.where(
+    ~es_retira,
+    "RETIRA"
+)
 tabla["ZonaExpreso"] = zona_expreso
 
 # =====================================================
@@ -828,11 +891,20 @@ es_entrega_semanal = frecuencia_entrega.isin(
     dias_entrega_semanal
 )
 
-tabla["Planificacion"] = frecuencia_entrega.where(
-    es_entrega_semanal,
-    zona_expreso.where(
-        zona_expreso.ne(""),
-        frecuencia_entrega
+tabla["Planificacion"] = ""
+
+# 1. RETIRA siempre prevalece.
+tabla.loc[es_retira, "Planificacion"] = "RETIRA"
+
+# 2. Para el resto, aplicar la lógica semanal / expreso.
+mascara_no_retira = ~es_retira
+tabla.loc[mascara_no_retira, "Planificacion"] = (
+    frecuencia_entrega.loc[mascara_no_retira].where(
+        es_entrega_semanal.loc[mascara_no_retira],
+        zona_expreso.loc[mascara_no_retira].where(
+            zona_expreso.loc[mascara_no_retira].ne(""),
+            frecuencia_entrega.loc[mascara_no_retira]
+        )
     )
 )
 
@@ -874,15 +946,27 @@ for columna in columnas_texto:
 
 
 # -----------------------------------------------------
-# FECHA
+# FECHAS
 # -----------------------------------------------------
 
-tabla["Fecha"] = pd.to_datetime(
-    tabla["Fecha"],
-    errors="coerce",
-    utc=True
-).dt.tz_localize(None)
+# Fecha del pedido
+tabla["Fecha"] = (
+    pd.to_datetime(
+        tabla["Fecha"],
+        errors="coerce",
+        utc=True,
+    )
+    .dt.tz_localize(None)
+)
 
+# Fecha de transmisión ERP (solo fecha)
+tabla["FechaTransmisionERP"] = (
+    pd.to_datetime(
+        tabla["FechaTransmisionERP"],
+        errors="coerce",
+    )
+    .dt.date
+)
 
 # -----------------------------------------------------
 # ENTEROS
@@ -1022,72 +1106,870 @@ st.caption(
 
 tabla_filtrada = tabla.copy()
 
-tab_dashboard, tab_planificador = st.tabs(
-    ["📊 Resumen", "🚐 Planificador de camionetas"]
+# =====================================================
+# PEDIDOS DISPONIBLES PARA DASHBOARD Y PLANIFICADOR
+# =====================================================
+#
+# Un pedido deja de estar disponible cuando ya tiene una
+# preparación asignada en DIGIP. De esta manera:
+#
+# - no vuelve a consumir capacidad en el Dashboard;
+# - no puede asignarse nuevamente desde el Planificador.
+# =====================================================
+
+mascara_sin_preparacion = (
+    tabla_filtrada["PreparacionID"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+    .eq("")
 )
 
-with tab_dashboard:
-    st.subheader("📊 Resumen para planificación")
+tabla_disponible_planificacion = tabla_filtrada.loc[
+    mascara_sin_preparacion
+].copy()
 
-    total_pedidos = int(tabla["Pedido"].nunique())
-    total_unidades = int(
-        pd.to_numeric(
-            tabla["TotalUnidades"],
-            errors="coerce",
-        ).fillna(0).sum()
+tab_dashboard, tab_planificador = st.tabs(
+    [
+        "📊 Dashboard",
+        "🚐 Planificador de camionetas",
+    ]
+)
+
+
+# =====================================================
+# DASHBOARD EJECUTIVO DE DESPACHOS
+# =====================================================
+
+with tab_dashboard:
+
+    st.subheader("📊 Dashboard operativo")
+    st.caption(
+        "Estimación de vehículos sobre pedidos todavía sin preparación. "
+        "Los pedidos RETIRA no consumen capacidad de reparto."
     )
-    total_volumen = float(
-        pd.to_numeric(
-            tabla["TotalM3"],
-            errors="coerce",
-        ).fillna(0).sum()
+
+    CAPACIDAD_CAMIONETA_M3 = 8.0
+    CAPACIDAD_CAMION_M3 = 15.0
+
+    # -----------------------------------------------------
+    # ESTILO VISUAL DEL DASHBOARD
+    # -----------------------------------------------------
+    st.markdown(
+        """
+        <style>
+        .despachos-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin: 0.75rem 0 1rem 0;
+        }
+        .despachos-kpi {
+            min-height: 128px;
+            padding: 0.95rem 1rem;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 12px;
+            background: linear-gradient(
+                145deg,
+                rgba(25, 32, 43, 0.96),
+                rgba(14, 20, 29, 0.98)
+            );
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .despachos-kpi-cabecera {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            font-size: 0.86rem;
+            font-weight: 650;
+            color: rgba(240, 244, 248, 0.95);
+        }
+        .despachos-kpi-icono {
+            font-size: 1.35rem;
+        }
+        .despachos-kpi-valor {
+            margin-top: 0.4rem;
+            font-size: 1.85rem;
+            line-height: 1;
+            font-weight: 750;
+            color: #f8fafc;
+        }
+        .despachos-kpi-detalle {
+            margin-top: 0.45rem;
+            font-size: 0.76rem;
+            color: rgba(203, 213, 225, 0.82);
+        }
+        .despachos-panel {
+            border: 1px solid rgba(148, 163, 184, 0.20);
+            border-radius: 12px;
+            padding: 0.55rem 0.8rem 0.3rem 0.8rem;
+            background: rgba(17, 24, 34, 0.72);
+        }
+        @media (max-width: 1200px) {
+            .despachos-kpi-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+        @media (max-width: 700px) {
+            .despachos-kpi-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    total_clientes = int(
-        tabla["ClienteCodigo"].nunique()
-    )
-    sin_planificacion = int(
-        tabla["Planificacion"]
+
+    base_dashboard = tabla_disponible_planificacion.copy()
+
+    base_dashboard["PlanificacionDashboard"] = (
+        base_dashboard["Planificacion"]
         .fillna("")
         .astype(str)
         .str.strip()
-        .eq("")
-        .sum()
+        .str.upper()
+        .replace("", "SIN PLANIFICACIÓN")
     )
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Pedidos", total_pedidos)
-    k2.metric("Unidades", f"{total_unidades:,}".replace(",", "."))
-    k3.metric("Volumen", f"{total_volumen:.2f} m³")
-    k4.metric("Clientes", total_clientes)
-    k5.metric("Sin planificación", sin_planificacion)
-
-    st.markdown("#### Carga por planificación")
-    resumen_planificacion_dashboard = (
-        tabla.assign(
-            PlanificacionVisible=(
-                tabla["Planificacion"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .replace("", "Sin planificación")
-            )
+    base_dashboard["VolumenDashboard"] = (
+        pd.to_numeric(
+            base_dashboard["TotalM3"],
+            errors="coerce",
         )
+        .fillna(0)
+        .clip(lower=0)
+    )
+
+    base_dashboard["UnidadesDashboard"] = (
+        pd.to_numeric(
+            base_dashboard["TotalUnidades"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    mascara_retira_dashboard = (
+        base_dashboard["PlanificacionDashboard"].eq("RETIRA")
+    )
+
+    base_retira_dashboard = base_dashboard.loc[
+        mascara_retira_dashboard
+    ].copy()
+
+    base_reparto_dashboard = base_dashboard.loc[
+        ~mascara_retira_dashboard
+    ].copy()
+
+    mascara_camion_dashboard = (
+        base_reparto_dashboard["VolumenDashboard"]
+        .gt(CAPACIDAD_CAMIONETA_M3)
+    )
+
+    base_camion_dashboard = base_reparto_dashboard.loc[
+        mascara_camion_dashboard
+    ].copy()
+
+    base_camioneta_dashboard = base_reparto_dashboard.loc[
+        ~mascara_camion_dashboard
+    ].copy()
+
+    volumen_camionetas_dashboard = float(
+        base_camioneta_dashboard["VolumenDashboard"].sum()
+    )
+    volumen_camiones_dashboard = float(
+        base_camion_dashboard["VolumenDashboard"].sum()
+    )
+
+    camionetas_estimadas_dashboard = (
+        int(math.ceil(
+            volumen_camionetas_dashboard / CAPACIDAD_CAMIONETA_M3
+        ))
+        if volumen_camionetas_dashboard > 0
+        else 0
+    )
+
+    camiones_estimados_dashboard = (
+        int(math.ceil(
+            volumen_camiones_dashboard / CAPACIDAD_CAMION_M3
+        ))
+        if volumen_camiones_dashboard > 0
+        else 0
+    )
+
+    pedidos_reparto_dashboard = int(
+        base_reparto_dashboard["Pedido"].nunique()
+    )
+    pedidos_retira_dashboard = int(
+        base_retira_dashboard["Pedido"].nunique()
+    )
+    pedidos_camion_dashboard = int(
+        base_camion_dashboard["Pedido"].nunique()
+    )
+    pedidos_camioneta_dashboard = int(
+        base_camioneta_dashboard["Pedido"].nunique()
+    )
+
+    unidades_reparto_dashboard = int(
+        base_reparto_dashboard["UnidadesDashboard"].sum()
+    )
+    unidades_retira_dashboard = int(
+        base_retira_dashboard["UnidadesDashboard"].sum()
+    )
+    unidades_camion_dashboard = int(
+        base_camion_dashboard["UnidadesDashboard"].sum()
+    )
+
+    volumen_reparto_dashboard = float(
+        base_reparto_dashboard["VolumenDashboard"].sum()
+    )
+
+    sin_planificacion_dashboard = int(
+        base_dashboard.loc[
+            base_dashboard["PlanificacionDashboard"]
+            .eq("SIN PLANIFICACIÓN"),
+            "Pedido",
+        ].nunique()
+    )
+    unidades_sin_planificacion = int(
+        base_dashboard.loc[
+            base_dashboard["PlanificacionDashboard"]
+            .eq("SIN PLANIFICACIÓN"),
+            "UnidadesDashboard",
+        ].sum()
+    )
+
+    def formato_entero(valor: int) -> str:
+        return f"{int(valor):,}".replace(",", ".")
+
+    tarjetas_html = f"""
+    <div class="despachos-kpi-grid">
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">🚚</span>
+                <span>Pedidos reparto</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(pedidos_reparto_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                {formato_entero(unidades_reparto_dashboard)} unidades
+            </div>
+        </div>
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">🚐</span>
+                <span>Camionetas estimadas</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(camionetas_estimadas_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                Capacidad: {CAPACIDAD_CAMIONETA_M3:.0f} m³
+            </div>
+        </div>
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">🚛</span>
+                <span>Camiones sugeridos</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(camiones_estimados_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                Capacidad: {CAPACIDAD_CAMION_M3:.0f} m³
+            </div>
+        </div>
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">📦</span>
+                <span>Pedidos &gt; 8 m³</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(pedidos_camion_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                {formato_entero(unidades_camion_dashboard)} unidades
+            </div>
+        </div>
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">🏬</span>
+                <span>RETIRA</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(pedidos_retira_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                {formato_entero(unidades_retira_dashboard)} unidades
+            </div>
+        </div>
+        <div class="despachos-kpi">
+            <div class="despachos-kpi-cabecera">
+                <span class="despachos-kpi-icono">⚠️</span>
+                <span>Sin planificación</span>
+            </div>
+            <div class="despachos-kpi-valor">
+                {formato_entero(sin_planificacion_dashboard)}
+            </div>
+            <div class="despachos-kpi-detalle">
+                {formato_entero(unidades_sin_planificacion)} unidades
+            </div>
+        </div>
+    </div>
+    """
+
+    st.markdown(tarjetas_html, unsafe_allow_html=True)
+
+    # -----------------------------------------------------
+    # GRÁFICOS
+    # -----------------------------------------------------
+    grafico_volumen, grafico_tipo = st.columns(
+        [1.05, 1],
+        vertical_alignment="top",
+    )
+
+    volumen_por_planificacion = (
+        base_reparto_dashboard
         .groupby(
-            "PlanificacionVisible",
+            "PlanificacionDashboard",
             as_index=False,
         )
         .agg(
+            Volumen=("VolumenDashboard", "sum"),
             Pedidos=("Pedido", "nunique"),
-            Unidades=("TotalUnidades", "sum"),
-            Volumen=("TotalM3", "sum"),
         )
         .sort_values("Volumen", ascending=False)
     )
+
+    with grafico_volumen:
+        st.markdown("#### Volumen por planificación (m³)")
+
+        if volumen_por_planificacion.empty:
+            st.info("No hay carga de reparto para graficar.")
+        else:
+            volumen_por_planificacion["ValorVisible"] = (
+                volumen_por_planificacion["Volumen"]
+                .map(lambda valor: f"{valor:.2f}")
+            )
+            volumen_maximo = float(
+                volumen_por_planificacion["Volumen"].max()
+            )
+            volumen_por_planificacion["EsMaximo"] = (
+                volumen_por_planificacion["Volumen"].eq(volumen_maximo)
+            )
+
+            barras = (
+                alt.Chart(volumen_por_planificacion)
+                .mark_bar(cornerRadiusEnd=5, height=19)
+                .encode(
+                    x=alt.X(
+                        "Volumen:Q",
+                        title="Volumen m³",
+                        axis=alt.Axis(
+                            grid=True,
+                            gridColor="#263241",
+                            labelColor="#cbd5e1",
+                            titleColor="#cbd5e1",
+                        ),
+                    ),
+                    y=alt.Y(
+                        "PlanificacionDashboard:N",
+                        title=None,
+                        sort="-x",
+                        axis=alt.Axis(labelColor="#e2e8f0"),
+                    ),
+                    color=alt.condition(
+                        alt.datum.EsMaximo,
+                        alt.value("#1d4ed8"),
+                        alt.value("#334f73"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip(
+                            "PlanificacionDashboard:N",
+                            title="Planificación",
+                        ),
+                        alt.Tooltip(
+                            "Pedidos:Q",
+                            title="Pedidos",
+                            format=",.0f",
+                        ),
+                        alt.Tooltip(
+                            "Volumen:Q",
+                            title="Volumen m³",
+                            format=".3f",
+                        ),
+                    ],
+                )
+            )
+
+            etiquetas = (
+                alt.Chart(volumen_por_planificacion)
+                .mark_text(
+                    align="left",
+                    baseline="middle",
+                    dx=6,
+                    color="#f8fafc",
+                    fontSize=12,
+                    fontWeight="bold",
+                )
+                .encode(
+                    x="Volumen:Q",
+                    y=alt.Y(
+                        "PlanificacionDashboard:N",
+                        sort="-x",
+                    ),
+                    text="ValorVisible:N",
+                )
+            )
+
+            chart_volumen = (
+                (barras + etiquetas)
+                .properties(height=330)
+                .configure_view(stroke=None)
+            )
+
+            st.altair_chart(
+                chart_volumen,
+                width="stretch",
+            )
+
+    total_pedidos_dashboard = (
+        pedidos_camioneta_dashboard
+        + pedidos_camion_dashboard
+        + pedidos_retira_dashboard
+    )
+
+    distribucion_transporte = pd.DataFrame({
+        "Tipo": ["Camioneta", "Camión", "RETIRA"],
+        "Pedidos": [
+            pedidos_camioneta_dashboard,
+            pedidos_camion_dashboard,
+            pedidos_retira_dashboard,
+        ],
+        "Orden": [1, 2, 3],
+    })
+
+    distribucion_transporte = distribucion_transporte.loc[
+        distribucion_transporte["Pedidos"].gt(0)
+    ].copy()
+
+    if total_pedidos_dashboard > 0:
+        distribucion_transporte["Porcentaje"] = (
+            distribucion_transporte["Pedidos"]
+            / total_pedidos_dashboard
+            * 100
+        )
+    else:
+        distribucion_transporte["Porcentaje"] = 0.0
+
+    distribucion_transporte["Etiqueta"] = (
+        distribucion_transporte["Pedidos"].astype(str)
+        + " ("
+        + distribucion_transporte["Porcentaje"]
+        .map(lambda valor: f"{valor:.1f}%")
+        + ")"
+    )
+
+    with grafico_tipo:
+        st.markdown("#### Pedidos por tipo de gestión")
+
+        if distribucion_transporte.empty:
+            st.info("No hay pedidos para graficar.")
+        else:
+            escala_colores = alt.Scale(
+                domain=["Camioneta", "Camión", "RETIRA"],
+                range=["#174f87", "#b45309", "#166534"],
+            )
+
+            donut = (
+                alt.Chart(distribucion_transporte)
+                .mark_arc(
+                    innerRadius=88,
+                    outerRadius=135,
+                    stroke="#0f1720",
+                    strokeWidth=2,
+                )
+                .encode(
+                    theta=alt.Theta(
+                        "Pedidos:Q",
+                        stack=True,
+                    ),
+                    color=alt.Color(
+                        "Tipo:N",
+                        scale=escala_colores,
+                        legend=alt.Legend(
+                            orient="right",
+                            title=None,
+                            labelColor="#e2e8f0",
+                            labelFontSize=12,
+                            symbolSize=180,
+                        ),
+                    ),
+                    order=alt.Order("Orden:Q"),
+                    tooltip=[
+                        alt.Tooltip("Tipo:N", title="Tipo"),
+                        alt.Tooltip(
+                            "Pedidos:Q",
+                            title="Pedidos",
+                            format=",.0f",
+                        ),
+                        alt.Tooltip(
+                            "Porcentaje:Q",
+                            title="Participación",
+                            format=".1f",
+                        ),
+                    ],
+                )
+            )
+
+            etiquetas_donut = (
+                alt.Chart(distribucion_transporte)
+                .mark_text(
+                    radius=155,
+                    color="#f8fafc",
+                    fontSize=12,
+                    fontWeight="bold",
+                )
+                .encode(
+                    theta=alt.Theta(
+                        "Pedidos:Q",
+                        stack=True,
+                    ),
+                    order=alt.Order("Orden:Q"),
+                    text="Etiqueta:N",
+                )
+            )
+
+            centro_total = (
+                alt.Chart(
+                    pd.DataFrame({
+                        "Texto": [
+                            str(total_pedidos_dashboard),
+                            "Pedidos totales",
+                        ],
+                        "Y": [-7, 16],
+                        "Tamanio": [30, 13],
+                    })
+                )
+                .mark_text(
+                    align="center",
+                    baseline="middle",
+                    color="#f8fafc",
+                    fontWeight="bold",
+                )
+                .encode(
+                    text="Texto:N",
+                    y=alt.Y(
+                        "Y:Q",
+                        axis=None,
+                        scale=alt.Scale(domain=[-100, 100]),
+                    ),
+                    size=alt.Size(
+                        "Tamanio:Q",
+                        legend=None,
+                        scale=None,
+                    ),
+                )
+            )
+
+            chart_tipo = (
+                (donut + etiquetas_donut + centro_total)
+                .properties(height=330)
+                .configure_view(stroke=None)
+            )
+
+            st.altair_chart(
+                chart_tipo,
+                width="stretch",
+            )
+
+    # -----------------------------------------------------
+    # CAPACIDAD POR PLANIFICACIÓN
+    # -----------------------------------------------------
+    st.markdown("#### Capacidad estimada por planificación")
+
+    def resumir_capacidad_planificacion(
+        bloque: pd.DataFrame,
+    ) -> pd.Series:
+
+        volumen_camioneta = float(
+            bloque.loc[
+                bloque["VolumenDashboard"]
+                .le(CAPACIDAD_CAMIONETA_M3),
+                "VolumenDashboard",
+            ].sum()
+        )
+
+        volumen_camion = float(
+            bloque.loc[
+                bloque["VolumenDashboard"]
+                .gt(CAPACIDAD_CAMIONETA_M3),
+                "VolumenDashboard",
+            ].sum()
+        )
+
+        camionetas = (
+            int(math.ceil(
+                volumen_camioneta / CAPACIDAD_CAMIONETA_M3
+            ))
+            if volumen_camioneta > 0
+            else 0
+        )
+
+        camiones = (
+            int(math.ceil(
+                volumen_camion / CAPACIDAD_CAMION_M3
+            ))
+            if volumen_camion > 0
+            else 0
+        )
+
+        capacidad_total = (
+            camionetas * CAPACIDAD_CAMIONETA_M3
+            + camiones * CAPACIDAD_CAMION_M3
+        )
+
+        ocupacion = (
+            (volumen_camioneta + volumen_camion)
+            / capacidad_total
+            * 100
+            if capacidad_total > 0
+            else 0
+        )
+
+        if ocupacion > 90:
+            estado_ocupacion = "🔴 Alta"
+        elif ocupacion >= 70:
+            estado_ocupacion = "🟡 Media"
+        else:
+            estado_ocupacion = "🟢 Baja"
+
+        return pd.Series({
+            "Pedidos": int(bloque["Pedido"].nunique()),
+            "Clientes": int(bloque["ClienteCodigo"].nunique()),
+            "Unidades": int(bloque["UnidadesDashboard"].sum()),
+            "Volumen m³": round(
+                float(bloque["VolumenDashboard"].sum()),
+                3,
+            ),
+            "Camionetas (8 m³)": camionetas,
+            "Pedidos camión (> 8 m³)": int(
+                bloque.loc[
+                    bloque["VolumenDashboard"]
+                    .gt(CAPACIDAD_CAMIONETA_M3),
+                    "Pedido",
+                ].nunique()
+            ),
+            "Camiones (15 m³)": camiones,
+            "Nivel": estado_ocupacion,
+            "Ocupación estimada %": round(ocupacion, 1),
+        })
+
+    resumen_capacidad_dashboard = (
+        base_reparto_dashboard
+        .groupby(
+            "PlanificacionDashboard",
+            dropna=False,
+            sort=False,
+        )
+        .apply(
+            resumir_capacidad_planificacion,
+            include_groups=False,
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "PlanificacionDashboard": "Planificación",
+            }
+        )
+        .sort_values(
+            ["Camiones (15 m³)", "Camionetas (8 m³)", "Volumen m³"],
+            ascending=[False, False, False],
+        )
+    )
+
     st.dataframe(
-        resumen_planificacion_dashboard,
+        resumen_capacidad_dashboard,
         width="stretch",
         hide_index=True,
+        height=min(
+            390,
+            80 + len(resumen_capacidad_dashboard) * 35,
+        ),
+        column_config={
+            "Pedidos": st.column_config.NumberColumn(
+                "Pedidos",
+                format="%d",
+            ),
+            "Clientes": st.column_config.NumberColumn(
+                "Clientes",
+                format="%d",
+            ),
+            "Unidades": st.column_config.NumberColumn(
+                "Unidades",
+                format="%d",
+            ),
+            "Volumen m³": st.column_config.NumberColumn(
+                "Volumen m³",
+                format="%.3f",
+            ),
+            "Camionetas (8 m³)": st.column_config.NumberColumn(
+                "Camionetas (8 m³)",
+                format="%d",
+            ),
+            "Pedidos camión (> 8 m³)": (
+                st.column_config.NumberColumn(
+                    "Pedidos camión (> 8 m³)",
+                    format="%d",
+                )
+            ),
+            "Camiones (15 m³)": st.column_config.NumberColumn(
+                "Camiones (15 m³)",
+                format="%d",
+            ),
+            "Ocupación estimada %": (
+                st.column_config.ProgressColumn(
+                    "Ocupación estimada",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f%%",
+                )
+            ),
+        },
     )
+
+    # -----------------------------------------------------
+    # DETALLE Y CONTROLES
+    # -----------------------------------------------------
+    panel_camion, panel_alertas = st.columns(
+        [1.15, 1],
+        vertical_alignment="top",
+    )
+
+    with panel_camion:
+
+        st.markdown("#### 🚛 Pedidos candidatos a camión (> 8 m³)")
+
+        if base_camion_dashboard.empty:
+            st.success(
+                "No hay pedidos individuales que superen 8 m³.",
+                icon="✅",
+            )
+        else:
+            columnas_camion_dashboard = [
+                "Pedido",
+                "ClienteCodigo",
+                "ClienteDescripcion",
+                "PlanificacionDashboard",
+                "VolumenDashboard",
+                "UnidadesDashboard",
+                "CodigoDespacho",
+            ]
+
+            columnas_camion_dashboard = [
+                columna
+                for columna in columnas_camion_dashboard
+                if columna in base_camion_dashboard.columns
+            ]
+
+            vista_camion_dashboard = (
+                base_camion_dashboard[
+                    columnas_camion_dashboard
+                ]
+                .sort_values(
+                    "VolumenDashboard",
+                    ascending=False,
+                )
+                .rename(
+                    columns={
+                        "ClienteCodigo": "Código cliente",
+                        "ClienteDescripcion": "Cliente",
+                        "PlanificacionDashboard": "Planificación",
+                        "VolumenDashboard": "Volumen m³",
+                        "UnidadesDashboard": "Unidades",
+                        "CodigoDespacho": "Código despacho",
+                    }
+                )
+            )
+
+            st.dataframe(
+                vista_camion_dashboard,
+                width="stretch",
+                hide_index=True,
+                height=min(
+                    330,
+                    80 + len(vista_camion_dashboard) * 35,
+                ),
+                column_config={
+                    "Volumen m³": st.column_config.NumberColumn(
+                        "Volumen m³",
+                        format="%.3f",
+                    ),
+                    "Unidades": st.column_config.NumberColumn(
+                        "Unidades",
+                        format="%d",
+                    ),
+                },
+            )
+
+    with panel_alertas:
+
+        st.markdown("#### Controles operativos")
+
+        if pedidos_retira_dashboard:
+            st.info(
+                f"{pedidos_retira_dashboard} pedido(s) RETIRA "
+                "se excluyen del cálculo de transporte.",
+                icon="🏬",
+            )
+
+        if pedidos_camion_dashboard:
+            st.warning(
+                f"{pedidos_camion_dashboard} pedido(s) superan "
+                "la capacidad individual de una camioneta de 8 m³.",
+                icon="🚛",
+            )
+
+        if sin_planificacion_dashboard:
+            st.error(
+                f"{sin_planificacion_dashboard} pedido(s) todavía "
+                "no tienen planificación.",
+                icon="⚠️",
+            )
+
+        if (
+            pedidos_retira_dashboard == 0
+            and pedidos_camion_dashboard == 0
+            and sin_planificacion_dashboard == 0
+        ):
+            st.success(
+                "La carga no presenta alertas operativas principales.",
+                icon="✅",
+            )
+
+        st.info(
+            "Capacidades de referencia: "
+            "Camioneta 8 m³ · Camión 15 m³.",
+            icon="📦",
+        )
+
+        st.metric(
+            "Volumen total de reparto",
+            f"{volumen_reparto_dashboard:,.2f} m³"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
+
+        st.caption(
+            "Estimación teórica con base en la planificación actual. "
+            "La asignación definitiva continúa en el Planificador."
+        )
+
+
 
 with tab_planificador:
     # =====================================================
@@ -1122,6 +2004,9 @@ with tab_planificador:
         "DIARIOS": [
             "CAMIONETA DIARIOS 1",
         ],
+        "RETIRA": [
+            "RETIRA",
+        ],
         "EXPRESOS": [
             "CAMIONETA EXP 1",
             "CAMIONETA EXP 2",
@@ -1140,6 +2025,7 @@ with tab_planificador:
         "JUEVES",
         "VIERNES",
         "DIARIOS",
+        "RETIRA",
     }
 
 
@@ -1443,6 +2329,20 @@ with tab_planificador:
         "antigüedad y cliente completo."
     )
 
+    pedidos_excluidos_preparacion = int(
+        tabla_filtrada.loc[
+            ~mascara_sin_preparacion,
+            "Pedido",
+        ].nunique()
+    )
+
+    if pedidos_excluidos_preparacion:
+        st.info(
+            f"{pedidos_excluidos_preparacion} pedido(s) con preparación "
+            "asignada se excluyen automáticamente del planificador.",
+            icon="🚫",
+        )
+
     if pedidos_bloqueados_gestion:
 
         detalle_bloqueos = " · ".join(
@@ -1471,8 +2371,8 @@ with tab_planificador:
         clear_on_submit=False
     ):
 
-        col_plan1, col_plan2, col_plan3 = st.columns(
-            [1, 1, 1]
+        col_plan1, col_plan2 = st.columns(
+            [1, 1]
         )
 
         with col_plan1:
@@ -1488,7 +2388,7 @@ with tab_planificador:
         with col_plan2:
 
             opciones_planificacion_camionetas = sorted(
-                tabla_filtrada["Planificacion"]
+                tabla_disponible_planificacion["Planificacion"]
                 .dropna()
                 .astype(str)
                 .loc[
@@ -1504,13 +2404,6 @@ with tab_planificador:
                 options=opciones_planificacion_camionetas,
                 default=[],
                 placeholder="Seleccionar planificaciones..."
-            )
-
-        with col_plan3:
-
-            incluir_preparados = st.checkbox(
-                "Incluir pedidos con preparación",
-                value=True
             )
 
         generar_planificacion = st.form_submit_button(
@@ -1533,7 +2426,7 @@ with tab_planificador:
             )
             st.stop()
 
-        base_planificacion = tabla_filtrada.copy()
+        base_planificacion = tabla_disponible_planificacion.copy()
 
         # Los pedidos con cualquier gestión comercial abierta
         # requieren revisión y no pueden asignarse a camionetas.
@@ -1561,22 +2454,12 @@ with tab_planificador:
                 )
             ].copy()
 
-        if not incluir_preparados:
-
-            base_planificacion = base_planificacion[
-                base_planificacion["PreparacionID"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .eq("")
-            ].copy()
-
         if base_planificacion.empty:
 
             st.warning(
                 "No quedaron pedidos disponibles para planificar. "
-                "Todos los pedidos seleccionados tienen una gestión "
-                "comercial abierta o fueron excluidos por los filtros."
+                "Los pedidos seleccionados ya tienen una preparación, "
+                "poseen una gestión comercial abierta o fueron excluidos."
             )
 
             st.stop()
@@ -2185,6 +3068,17 @@ with tab_planificador:
                     len(codigos_despacho) == 1
                 )
 
+                # RETIRA se agrupa por listado de pedidos, sin importar
+                # el CodigoDespacho de cada registro.
+                es_camioneta_retira = (
+                    normalizar_planificacion(planificacion_fila) == "RETIRA"
+                )
+
+                if es_camioneta_retira:
+                    codigo_despacho = ""
+                    codigos_despacho = []
+                    usar_filtro_codigo_despacho = False
+
                 despacho_digip = str(
                     fila_camioneta[
                         "DespachoDIGIP"
@@ -2523,6 +3417,7 @@ with tab_planificador:
 
                     columnas_detalle_preferidas = [
                         "Pedido",
+                        "FechaTransmisionERP",
                         "ClienteCodigo",
                         "ClienteDescripcion",
                         "TotalUnidades",

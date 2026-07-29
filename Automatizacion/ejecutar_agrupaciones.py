@@ -102,10 +102,24 @@ class Agrupacion:
                 self.codigo_despacho
             ]
 
-        if not self.codigo_despacho:
+        # El código de despacho solamente es obligatorio cuando
+        # la agrupación realmente utilizará ese filtro.
+        #
+        # Casos como RETIRA pueden llegar sin código de despacho y
+        # deben buscarse directamente por número de pedido.
+        if (
+            self.usar_filtro_codigo_despacho
+            and not self.codigo_despacho
+        ):
             raise ValueError(
-                "La agrupación no tiene código de despacho."
+                "La agrupación requiere filtro por código de despacho, "
+                "pero no tiene código informado."
             )
+
+        # Si el código vino vacío, se desactiva el filtro como medida
+        # de seguridad. Así la navegación abre la grilla completa.
+        if not self.codigo_despacho:
+            self.usar_filtro_codigo_despacho = False
 
         if not self.despacho:
             raise ValueError(
@@ -372,8 +386,9 @@ def ejecutar_agrupacion_en_pagina(
 
         abrir_nueva_preparacion(
             page=page,
-            codigo_despacho=(
-                agrupacion.codigo_despacho
+            codigo_despacho=agrupacion.codigo_despacho,
+            aplicar_filtro=(
+                agrupacion.usar_filtro_codigo_despacho
             ),
         )
 
@@ -384,14 +399,9 @@ def ejecutar_agrupacion_en_pagina(
                 "navegacion",
                 (
                     f"{agrupacion.identificador}: "
-                    "la camioneta contiene varios códigos "
-                    "de despacho; se buscarán los pedidos "
-                    "por número sin filtrar la grilla."
+                    "se buscarán los pedidos por número "
+                    "sin filtrar por CódigoDespacho."
                 ),
-            )
-
-            limpiar_filtro_codigo_despacho(
-                page=page
             )
 
         resultado.etapa = "seleccion_pedidos"

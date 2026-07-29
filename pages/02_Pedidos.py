@@ -59,9 +59,13 @@ from models.expresos import (
     construir_tabla_expresos
 )
 
+from utils.leer_fuente_flexible import leer_archivo_flexible
+from models.cobertura_pedidos import analizar_cobertura_pedidos_erp
+
 
 
 import pandas as pd
+import altair as alt
 import re
 
 from models.dashboard_pedidos import (
@@ -164,6 +168,15 @@ def cargar_datos_operativos():
             "Maestro Volumetria",
             cache=True
         ),
+        "stock_detallado": leer_archivo_flexible(
+            CARPETA_DATOS, ["stock_detallado"], cache=False
+        )[0],
+        "stock_recepcion": leer_archivo_flexible(
+            CARPETA_DATOS, ["stock_recepcion"], cache=False
+        )[0],
+        "disponible_digip": leer_archivo_flexible(
+            CARPETA_DATOS, ["Disponible Digip", "disponible_digip"], cache=False
+        )[0],
     }
 
 
@@ -256,6 +269,9 @@ df_transmisiones = datos_operativos[
 ].copy()
 df_expresos = datos_operativos["expresos"].copy()
 df_volumetria = datos_operativos["volumetria"].copy()
+df_stock_detallado = datos_operativos["stock_detallado"].copy()
+df_stock_recepcion = datos_operativos["stock_recepcion"].copy()
+df_disponible_digip = datos_operativos["disponible_digip"].copy()
 
 
 # =====================================================
@@ -816,25 +832,33 @@ frecuencia_entrega = (
     .str.upper()
 )
 
-tabla["DiaEntrega"] = frecuencia_entrega
+# =====================================================
+# REGLA DE PRIORIDAD ABSOLUTA: RETIRA
+# =====================================================
+#
+# La referencia RETIRA proviene del agrupador de expresos.
+# Si ZonaAgrupadorExpreso indica RETIRA, debe prevalecer sobre
+# cualquier frecuencia semanal, zona o código de despacho.
+# =====================================================
+
+es_retira = zona_expreso.eq("RETIRA")
+
+tabla["DiaEntrega"] = frecuencia_entrega.where(
+    ~es_retira,
+    "RETIRA"
+)
+
 tabla["ZonaExpreso"] = zona_expreso
 
 # =====================================================
 # REGLA DEFINITIVA DE PLANIFICACIÓN
 # =====================================================
 #
-# La frecuencia de entrega semanal tiene prioridad.
-#
-# Ejemplo:
-# FrecuenciaEntrega = JUEVES
-# CodigoExpreso = 05010001
-# ZonaExpreso = CABA SUR
-#
-# Resultado:
-# Planificacion = JUEVES
-#
-# Solo cuando el pedido NO tiene un día semanal asignado
-# se utiliza la zona del expreso como planificación.
+# Orden de prioridad:
+# 1. RETIRA informado en ZonaAgrupadorExpreso.
+# 2. Día semanal informado en FrecuenciaEntrega.
+# 3. Zona del expreso.
+# 4. Frecuencia de entrega restante.
 # =====================================================
 
 dias_entrega_semanal = {
@@ -850,12 +874,17 @@ es_entrega_semanal = frecuencia_entrega.isin(
     dias_entrega_semanal
 )
 
-tabla["Planificacion"] = frecuencia_entrega.where(
+planificacion_base = frecuencia_entrega.where(
     es_entrega_semanal,
     zona_expreso.where(
         zona_expreso.ne(""),
         frecuencia_entrega
     )
+)
+
+tabla["Planificacion"] = planificacion_base.where(
+    ~es_retira,
+    "RETIRA"
 )
 
 # =====================================================
@@ -1057,90 +1086,170 @@ tabla_detalle_dashboard = construir_tabla_detalle(
     df_volumetria,
 )
 
-tab_dashboard, tab_inteligencia, tab_operacion = st.tabs(
+lineas_cobertura_erp, resumen_cobertura_erp = analizar_cobertura_pedidos_erp(
+    tabla_detalle_erp=tabla_detalle_dashboard,
+    tabla_pendientes_erp=tabla_pendientes_erp,
+    df_pedidos_digip=df_pedidos,
+    df_disponible=df_disponible_digip,
+)
+
+tab_dashboard, tab_inteligencia, tab_cobertura, tab_operacion = st.tabs(
     [
         "📊 Dashboard",
         "🧠 Inteligencia analítica",
+        "🚨 Compromisos sin cobertura",
         "📋 Tabla y gestiones",
     ]
 )
 
 with tab_dashboard:
     st.subheader("📊 Panorama operativo de pedidos")
+    st.caption(
+        "Lectura ejecutiva del pendiente, su volumen, antigüedad "
+        "y distribución operativa."
+    )
+
+    st.markdown(
+        """
+        <style>
+        .pedidos-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin: 8px 0 18px 0;
+        }
+        .pedidos-kpi-card {
+            background: linear-gradient(145deg, #121923 0%, #0f151e 100%);
+            border: 1px solid #2a3442;
+            border-radius: 10px;
+            padding: 16px 18px;
+            min-height: 118px;
+        }
+        .pedidos-kpi-label {
+            color: #d8dee9;
+            font-size: 0.84rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .pedidos-kpi-value {
+            color: #f8fafc;
+            font-size: 1.85rem;
+            font-weight: 700;
+            line-height: 1.1;
+        }
+        .pedidos-kpi-detail {
+            color: #9ba8b7;
+            font-size: 0.76rem;
+            margin-top: 9px;
+        }
+        .inteligencia-grid {
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            margin-bottom: 1rem;
+        }
+        .inteligencia-card {
+            min-height: 128px;
+            background:
+                linear-gradient(145deg, rgba(20, 29, 41, 0.98), rgba(11, 17, 25, 0.98));
+        }
+        .inteligencia-card .pedidos-kpi-value {
+            font-size: 1.42rem;
+            overflow-wrap: anywhere;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(15, 23, 34, 0.58);
+            border-color: #2A3543;
+            border-radius: 12px;
+        }
+
+        .pedidos-panel {
+            background: linear-gradient(145deg, #111822 0%, #0d141d 100%);
+            border: 1px solid #2a3442;
+            border-radius: 10px;
+            padding: 12px 14px 4px 14px;
+            margin-bottom: 12px;
+        }
+        @media (max-width: 1100px) {
+            .pedidos-kpi-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+        @media (max-width: 640px) {
+            .pedidos-kpi-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if datos_dashboard.empty:
         st.info("No hay pedidos disponibles para analizar.")
     else:
-        fecha_min = (
-            datos_dashboard["FechaDia"].dropna().min()
-        )
-        fecha_max = (
-            datos_dashboard["FechaDia"].dropna().max()
-        )
+        fecha_min = datos_dashboard["FechaDia"].dropna().min()
+        fecha_max = datos_dashboard["FechaDia"].dropna().max()
 
-        filtro_1, filtro_2, filtro_3, filtro_4, filtro_5 = st.columns(
-            [1.25, 1, 1, 1, 0.85]
-        )
+        with st.expander("🔎 Filtros del dashboard", expanded=False):
+            filtro_1, filtro_2, filtro_3, filtro_4, filtro_5 = st.columns(
+                [1.25, 1, 1, 1, 0.85]
+            )
 
-        with filtro_1:
-            rango = st.date_input(
-                "Período de transmisión",
-                value=(
-                    fecha_min.date(),
-                    fecha_max.date(),
+            with filtro_1:
+                rango = st.date_input(
+                    "Período de transmisión",
+                    value=(
+                        fecha_min.date(),
+                        fecha_max.date(),
+                    )
+                    if pd.notna(fecha_min) and pd.notna(fecha_max)
+                    else (),
+                    key="pedidos_dashboard_periodo",
                 )
-                if pd.notna(fecha_min)
-                and pd.notna(fecha_max)
-                else (),
-                key="pedidos_dashboard_periodo",
-            )
 
-        with filtro_2:
-            estados_filtro = st.multiselect(
-                "Estado del pedido",
-                options=sorted(
-                    datos_dashboard["Estado"]
-                    .loc[
-                        datos_dashboard["Estado"].ne("")
-                    ]
-                    .unique()
-                    .tolist()
-                ),
-                default=[],
-            )
+            with filtro_2:
+                estados_filtro = st.multiselect(
+                    "Estado del pedido",
+                    options=sorted(
+                        datos_dashboard["Estado"]
+                        .loc[datos_dashboard["Estado"].ne("")]
+                        .unique()
+                        .tolist()
+                    ),
+                    default=[],
+                )
 
-        with filtro_3:
-            preparacion_filtro = st.multiselect(
-                "Preparación",
-                options=sorted(
-                    datos_dashboard[
-                        "CategoriaPreparacion"
-                    ].unique().tolist()
-                ),
-                default=[],
-            )
+            with filtro_3:
+                preparacion_filtro = st.multiselect(
+                    "Preparación",
+                    options=sorted(
+                        datos_dashboard["CategoriaPreparacion"]
+                        .unique()
+                        .tolist()
+                    ),
+                    default=[],
+                )
 
-        with filtro_4:
-            planificacion_filtro = st.multiselect(
-                "Planificación",
-                options=sorted(
-                    datos_dashboard[
-                        "PlanificacionVisible"
-                    ].unique().tolist()
-                ),
-                default=[],
-            )
+            with filtro_4:
+                planificacion_filtro = st.multiselect(
+                    "Planificación",
+                    options=sorted(
+                        datos_dashboard["PlanificacionVisible"]
+                        .unique()
+                        .tolist()
+                    ),
+                    default=[],
+                )
 
-        with filtro_5:
-            incluir_cencosud = st.toggle(
-                "Incluir Cencosud",
-                value=True,
-                key="pedidos_incluir_cencosud",
-                help=(
-                    "Encendido: incluye los pedidos de Cencosud. "
-                    "Apagado: muestra el pendiente sin Cencosud."
-                ),
-            )
+            with filtro_5:
+                incluir_cencosud = st.toggle(
+                    "Incluir Cencosud",
+                    value=True,
+                    key="pedidos_incluir_cencosud",
+                    help=(
+                        "Encendido: incluye los pedidos de Cencosud. "
+                        "Apagado: muestra el pendiente sin Cencosud."
+                    ),
+                )
 
         fecha_desde = None
         fecha_hasta = None
@@ -1159,113 +1268,151 @@ with tab_dashboard:
 
         kpis = calcular_kpis(dashboard_filtrado)
 
-        k1, k2, k3, k4, k5, k6, k7, k8 = st.columns(8)
-
-        k1.metric(
-            "📦 Pedidos",
-            f"{kpis['pedidos']:,}".replace(",", "."),
+        pedidos_preparados = int(
+            dashboard_filtrado.loc[
+                dashboard_filtrado["CategoriaPreparacion"].eq("Preparado"),
+                "Pedido",
+            ].nunique()
         )
-        k2.metric(
-            "📦 Unidades",
-            f"{kpis['unidades']:,}".replace(",", "."),
+        pedidos_en_preparacion = int(
+            dashboard_filtrado.loc[
+                dashboard_filtrado["CategoriaPreparacion"].eq("En preparación"),
+                "Pedido",
+            ].nunique()
         )
-        k3.metric(
-            "💰 Importe",
-            formatear_importe_compacto(
-                kpis["importe"]
-            ),
-            help=(
-                "Importe pendiente ERP de los pedidos "
-                "incluidos en los filtros."
-            ),
-        )
-        k4.metric(
-            "📐 Volumen",
-            f"{kpis['volumen']:.2f} m³",
-        )
-        k5.metric("👥 Clientes", kpis["clientes"])
-        k6.metric(
-            "⏳ Antigüedad",
-            f"{kpis['antiguedad_promedio']:.1f} días",
-        )
-        k7.metric(
-            "🚨 Críticos",
-            kpis["pedidos_criticos"],
-            help=(
-                "Pedidos con más de 5 días o ubicados "
-                "en el percentil 90 de unidades/volumen."
-            ),
-        )
-        k8.metric(
-            "🚚 Planificaciones",
-            kpis["planificaciones"],
+        unidades_criticas = int(
+            dashboard_filtrado.loc[
+                dashboard_filtrado["AntiguedadDias"].gt(5),
+                "TotalUnidades",
+            ].sum()
         )
 
-        st.divider()
+        def _fmt_entero(valor):
+            return f"{int(valor):,}".replace(",", ".")
 
-        c1, c2 = st.columns([1.15, 1])
-        with c1:
-            st.markdown("#### Unidades por fecha de transmisión")
-
-            evolucion_dashboard = resumen_evolucion(
-                dashboard_filtrado
-            )
-            grafico_evolucion_pedidos(
-                evolucion_dashboard
+        def _fmt_decimal(valor, decimales=2):
+            return (
+                f"{float(valor):,.{decimales}f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
             )
 
-            resumen_temporal = resumen_periodo(
-                dashboard_filtrado
-            )
+        tarjetas = [
+            ("📦 Pedidos", _fmt_entero(kpis["pedidos"]),
+             f"{_fmt_entero(kpis['unidades'])} unidades"),
+            ("💰 Importe pendiente", formatear_importe_compacto(kpis["importe"]),
+             "Valor pendiente informado por ERP"),
+            ("📐 Volumen", f"{_fmt_decimal(kpis['volumen'])} m³",
+             f"{kpis['clientes']} clientes"),
+            ("⏳ Antigüedad promedio",
+             f"{_fmt_decimal(kpis['antiguedad_promedio'], 1)} días",
+             f"{_fmt_entero(unidades_criticas)} unidades con más de 5 días"),
+            ("🚨 Pedidos críticos", _fmt_entero(kpis["pedidos_criticos"]),
+             "Antigüedad o dimensión excepcional"),
+            ("🧰 En preparación", _fmt_entero(pedidos_en_preparacion),
+             f"{_fmt_entero(pedidos_preparados)} preparados"),
+            ("🚚 Planificaciones", _fmt_entero(kpis["planificaciones"]),
+             "Agrupaciones operativas activas"),
+            ("👥 Clientes", _fmt_entero(kpis["clientes"]),
+             "Clientes incluidos en los filtros"),
+        ]
 
-            resumen_1, resumen_2 = st.columns(2)
-            resumen_3, resumen_4 = st.columns(2)
-
-            resumen_1.metric(
-                "🔺 Máximo del período",
-                (
-                    f"{resumen_temporal['unidades_maximas']:,} u"
-                ).replace(",", "."),
-                help=(
-                    "Mayor cantidad de unidades transmitidas "
-                    "en una misma fecha del período filtrado."
-                ),
+        html_tarjetas = '<div class="pedidos-kpi-grid">'
+        for etiqueta, valor, detalle in tarjetas:
+            html_tarjetas += (
+                '<div class="pedidos-kpi-card">'
+                f'<div class="pedidos-kpi-label">{etiqueta}</div>'
+                f'<div class="pedidos-kpi-value">{valor}</div>'
+                f'<div class="pedidos-kpi-detail">{detalle}</div>'
+                '</div>'
             )
-            resumen_1.caption(
-                resumen_temporal["fecha_maxima"]
-            )
+        html_tarjetas += "</div>"
+        st.markdown(html_tarjetas, unsafe_allow_html=True)
 
-            resumen_2.metric(
-                "📊 Promedio diario",
-                (
-                    f"{resumen_temporal['promedio_diario']:,.0f} u"
-                ).replace(",", "."),
-            )
+        st.markdown("### Lectura visual del pendiente")
 
-            resumen_3.metric(
-                "📦 Total del período",
-                (
-                    f"{resumen_temporal['total_unidades']:,} u"
-                ).replace(",", "."),
-            )
+        evolucion_dashboard = resumen_evolucion(dashboard_filtrado)
+        resumen_planificacion = resumen_categoria(
+            dashboard_filtrado,
+            "PlanificacionVisible",
+            "Planificación",
+            top=10,
+            medida="Volumen",
+        )
 
-            variacion_ultima = resumen_temporal[
-                "variacion_ultima_fecha"
-            ]
-            delta_transmision = (
-                f"{variacion_ultima:+.1f}% vs fecha anterior"
-                if variacion_ultima is not None
-                else None
-            )
+        grafico_1, grafico_2 = st.columns([1.45, 1], vertical_alignment="top")
 
-            resumen_4.metric(
-                "📄 Pedidos transmitidos",
-                resumen_temporal["pedidos_transmitidos"],
-                delta=delta_transmision,
-                delta_color="inverse",
-            )
+        with grafico_1:
+            st.markdown("#### Evolución de unidades transmitidas")
 
-        with c2:
+            if evolucion_dashboard.empty:
+                st.info("No hay fechas válidas para graficar.")
+            else:
+                linea = (
+                    alt.Chart(evolucion_dashboard)
+                    .mark_line(
+                        point=alt.OverlayMarkDef(
+                            filled=True,
+                            size=60,
+                            color="#2563EB",
+                        ),
+                        strokeWidth=3,
+                        color="#1D4ED8",
+                    )
+                    .encode(
+                        x=alt.X(
+                            "Fecha:T",
+                            title=None,
+                            axis=alt.Axis(format="%d/%m"),
+                        ),
+                        y=alt.Y(
+                            "Unidades:Q",
+                            title="Unidades",
+                            axis=alt.Axis(grid=True),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("FechaVisible:N", title="Fecha"),
+                            alt.Tooltip(
+                                "Unidades:Q",
+                                title="Unidades",
+                                format=",.0f",
+                            ),
+                        ],
+                    )
+                )
+
+                etiquetas = (
+                    alt.Chart(evolucion_dashboard)
+                    .mark_text(
+                        align="center",
+                        baseline="bottom",
+                        dy=-8,
+                        color="#D7DEE8",
+                        fontSize=11,
+                        fontWeight=600,
+                    )
+                    .encode(
+                        x="Fecha:T",
+                        y="Unidades:Q",
+                        text=alt.Text("Unidades:Q", format=",.0f"),
+                    )
+                )
+
+                st.altair_chart(
+                    (linea + etiquetas)
+                    .properties(height=310)
+                    .configure_view(strokeOpacity=0)
+                    .configure_axis(
+                        labelColor="#B8C2CF",
+                        titleColor="#D8DEE9",
+                        gridColor="#26303D",
+                        domainColor="#3B4655",
+                    ),
+                    width="stretch",
+                )
+
+        with grafico_2:
             st.markdown("#### Composición del pendiente")
 
             dimension_composicion = st.radio(
@@ -1294,14 +1441,130 @@ with tab_dashboard:
                 tabla_detalle_dashboard,
                 pedidos=pedidos_dashboard,
                 dimension=columna_dimension,
-                top=10,
+                top=7,
             )
 
-            grafico_donut_composicion(
-                resumen_composicion,
-                dimension_composicion,
-                "Unidades",
-            )
+            if resumen_composicion.empty:
+                st.info("No hay detalle disponible para la composición.")
+            else:
+                nombre_dimension = dimension_composicion
+                resumen_composicion = resumen_composicion.copy()
+                resumen_composicion["Total"] = (
+                    resumen_composicion["Unidades"].sum()
+                )
+                resumen_composicion["Porcentaje"] = (
+                    resumen_composicion["Unidades"]
+                    / resumen_composicion["Total"].replace(0, pd.NA)
+                    * 100
+                ).fillna(0)
+                resumen_composicion["Etiqueta"] = (
+                    resumen_composicion["Unidades"]
+                    .map(lambda valor: f"{int(valor):,}".replace(",", "."))
+                    + " | "
+                    + resumen_composicion["Porcentaje"]
+                    .map(lambda valor: f"{valor:.1f}%")
+                )
+
+                paleta_composicion = [
+                    "#1E3A5F",
+                    "#155E75",
+                    "#166534",
+                    "#854D0E",
+                    "#7C2D12",
+                    "#4C1D95",
+                    "#374151",
+                    "#111827",
+                ]
+
+                donut_composicion = (
+                    alt.Chart(resumen_composicion)
+                    .mark_arc(
+                        innerRadius=72,
+                        outerRadius=116,
+                        stroke="#0B1119",
+                        strokeWidth=2,
+                    )
+                    .encode(
+                        theta=alt.Theta("Unidades:Q", stack=True),
+                        color=alt.Color(
+                            f"{nombre_dimension}:N",
+                            scale=alt.Scale(range=paleta_composicion),
+                            legend=alt.Legend(
+                                orient="right",
+                                title=None,
+                                labelColor="#D8DEE9",
+                                labelLimit=190,
+                            ),
+                        ),
+                        tooltip=[
+                            alt.Tooltip(
+                                f"{nombre_dimension}:N",
+                                title=nombre_dimension,
+                            ),
+                            alt.Tooltip(
+                                "Unidades:Q",
+                                title="Unidades",
+                                format=",.0f",
+                            ),
+                            alt.Tooltip(
+                                "Porcentaje:Q",
+                                title="Participación",
+                                format=".1f",
+                            ),
+                        ],
+                    )
+                )
+
+                etiquetas_composicion = (
+                    alt.Chart(resumen_composicion)
+                    .mark_text(
+                        radius=137,
+                        fontSize=10,
+                        fontWeight=600,
+                        color="#F8FAFC",
+                    )
+                    .encode(
+                        theta=alt.Theta("Unidades:Q", stack=True),
+                        text="Etiqueta:N",
+                    )
+                )
+
+                total_unidades_composicion = int(
+                    resumen_composicion["Unidades"].sum()
+                )
+                centro_composicion = (
+                    alt.Chart(
+                        pd.DataFrame(
+                            {
+                                "texto": [
+                                    f"{total_unidades_composicion:,}"
+                                    .replace(",", ".")
+                                    + "\nUnidades"
+                                ]
+                            }
+                        )
+                    )
+                    .mark_text(
+                        align="center",
+                        baseline="middle",
+                        fontSize=18,
+                        fontWeight=700,
+                        color="#F8FAFC",
+                        lineBreak="\n",
+                    )
+                    .encode(text="texto:N")
+                )
+
+                st.altair_chart(
+                    (
+                        donut_composicion
+                        + etiquetas_composicion
+                        + centro_composicion
+                    )
+                    .properties(height=310)
+                    .configure_view(strokeOpacity=0),
+                    width="stretch",
+                )
 
             st.caption(
                 "Incluye Cencosud"
@@ -1309,63 +1572,217 @@ with tab_dashboard:
                 else "Vista sin Cencosud"
             )
 
-        c3, c4 = st.columns(2)
-        with c3:
-            st.markdown("#### Pedidos por planificación")
-            grafico_barras_pedidos(
-                resumen_categoria(
-                    dashboard_filtrado,
-                    "PlanificacionVisible",
-                    "Planificación",
-                    top=10,
-                ),
-                "Planificación",
-                "Pedidos",
-                color="#14B8A6",
+        st.markdown("#### Volumen por planificación")
+
+        if resumen_planificacion.empty:
+            st.info("No hay planificaciones para graficar.")
+        else:
+            max_volumen = float(
+                resumen_planificacion["Volumen"].max()
             )
-        with c4:
-            st.markdown("#### Volumen por planificación")
-            grafico_barras_pedidos(
-                resumen_categoria(
-                    dashboard_filtrado,
-                    "PlanificacionVisible",
-                    "Planificación",
-                    top=10,
-                    medida="Volumen",
-                ),
-                "Planificación",
-                "Volumen",
-                color="#F59E0B",
+            resumen_planificacion["EsMayor"] = (
+                resumen_planificacion["Volumen"].eq(max_volumen)
             )
 
-        c5, c6 = st.columns(2)
-        with c5:
-            st.markdown("#### Clientes con más unidades")
-            grafico_barras_pedidos(
-                resumen_categoria(
-                    dashboard_filtrado,
-                    "ClienteVisible",
-                    "Cliente",
-                    top=10,
-                    medida="Unidades",
+            barras = (
+                alt.Chart(resumen_planificacion)
+                .mark_bar(cornerRadiusEnd=5, size=22)
+                .encode(
+                    x=alt.X(
+                        "Volumen:Q",
+                        title="Volumen m³",
+                    ),
+                    y=alt.Y(
+                        "Planificación:N",
+                        sort="-x",
+                        title=None,
+                    ),
+                    color=alt.condition(
+                        "datum.EsMayor",
+                        alt.value("#1D4ED8"),
+                        alt.value("#27496D"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip(
+                            "Planificación:N",
+                            title="Planificación",
+                        ),
+                        alt.Tooltip(
+                            "Volumen:Q",
+                            title="Volumen m³",
+                            format=".2f",
+                        ),
+                    ],
+                )
+            )
+
+            etiquetas = (
+                alt.Chart(resumen_planificacion)
+                .mark_text(
+                    align="left",
+                    baseline="middle",
+                    dx=7,
+                    color="#E5E7EB",
+                    fontSize=11,
+                    fontWeight=600,
+                )
+                .encode(
+                    x="Volumen:Q",
+                    y=alt.Y("Planificación:N", sort="-x"),
+                    text=alt.Text("Volumen:Q", format=".2f"),
+                )
+            )
+
+            st.altair_chart(
+                (barras + etiquetas)
+                .properties(height=max(260, len(resumen_planificacion) * 34))
+                .configure_view(strokeOpacity=0)
+                .configure_axis(
+                    labelColor="#B8C2CF",
+                    titleColor="#D8DEE9",
+                    gridColor="#26303D",
+                    domainColor="#3B4655",
                 ),
+                width="stretch",
+            )
+
+        detalle_1, detalle_2 = st.columns(2, vertical_alignment="top")
+
+        with detalle_1:
+            st.markdown("#### Clientes con mayor carga")
+
+            clientes_carga = resumen_categoria(
+                dashboard_filtrado,
+                "ClienteVisible",
                 "Cliente",
-                "Unidades",
-                color="#8B5CF6",
+                top=8,
+                medida="Unidades",
             )
-        with c6:
+
+            if clientes_carga.empty:
+                st.info("No hay clientes para mostrar.")
+            else:
+                barras_clientes = (
+                    alt.Chart(clientes_carga)
+                    .mark_bar(cornerRadiusEnd=4, color="#4C1D95")
+                    .encode(
+                        x=alt.X("Unidades:Q", title="Unidades"),
+                        y=alt.Y("Cliente:N", sort="-x", title=None),
+                        tooltip=[
+                            alt.Tooltip("Cliente:N"),
+                            alt.Tooltip(
+                                "Unidades:Q",
+                                format=",.0f",
+                            ),
+                        ],
+                    )
+                )
+                texto_clientes = (
+                    alt.Chart(clientes_carga)
+                    .mark_text(
+                        align="left",
+                        baseline="middle",
+                        dx=6,
+                        color="#E5E7EB",
+                    )
+                    .encode(
+                        x="Unidades:Q",
+                        y=alt.Y("Cliente:N", sort="-x"),
+                        text=alt.Text("Unidades:Q", format=",.0f"),
+                    )
+                )
+                st.altair_chart(
+                    (barras_clientes + texto_clientes)
+                    .properties(height=300)
+                    .configure_view(strokeOpacity=0)
+                    .configure_axis(
+                        labelColor="#B8C2CF",
+                        titleColor="#D8DEE9",
+                        gridColor="#26303D",
+                    ),
+                    width="stretch",
+                )
+
+        with detalle_2:
             st.markdown("#### Antigüedad de pedidos")
-            grafico_barras_pedidos(
-                resumen_categoria(
-                    dashboard_filtrado,
-                    "RangoAntiguedad",
-                    "Antigüedad",
-                ),
+
+            antiguedad = resumen_categoria(
+                dashboard_filtrado,
+                "RangoAntiguedad",
                 "Antigüedad",
-                "Pedidos",
-                horizontal=False,
-                color="#EF4444",
+                medida="Pedidos",
             )
+
+            orden_antiguedad = [
+                "Hoy",
+                "1 día",
+                "2 días",
+                "3 a 5 días",
+                "Más de 5 días",
+            ]
+
+            if antiguedad.empty:
+                st.info("No hay antigüedad para mostrar.")
+            else:
+                barras_antiguedad = (
+                    alt.Chart(antiguedad)
+                    .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                    .encode(
+                        x=alt.X(
+                            "Antigüedad:N",
+                            sort=orden_antiguedad,
+                            title=None,
+                        ),
+                        y=alt.Y("Pedidos:Q", title="Pedidos"),
+                        color=alt.Color(
+                            "Antigüedad:N",
+                            sort=orden_antiguedad,
+                            scale=alt.Scale(
+                                domain=orden_antiguedad,
+                                range=[
+                                    "#1E3A5F",
+                                    "#27496D",
+                                    "#8A5A00",
+                                    "#9A3412",
+                                    "#7F1D1D",
+                                ],
+                            ),
+                            legend=None,
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Antigüedad:N"),
+                            alt.Tooltip("Pedidos:Q"),
+                        ],
+                    )
+                )
+                texto_antiguedad = (
+                    alt.Chart(antiguedad)
+                    .mark_text(
+                        baseline="bottom",
+                        dy=-6,
+                        color="#F8FAFC",
+                        fontWeight=600,
+                    )
+                    .encode(
+                        x=alt.X(
+                            "Antigüedad:N",
+                            sort=orden_antiguedad,
+                        ),
+                        y="Pedidos:Q",
+                        text="Pedidos:Q",
+                    )
+                )
+                st.altair_chart(
+                    (barras_antiguedad + texto_antiguedad)
+                    .properties(height=300)
+                    .configure_view(strokeOpacity=0)
+                    .configure_axis(
+                        labelColor="#B8C2CF",
+                        titleColor="#D8DEE9",
+                        gridColor="#26303D",
+                    ),
+                    width="stretch",
+                )
 
 
 with tab_inteligencia:
@@ -1387,57 +1804,62 @@ with tab_inteligencia:
             dashboard_filtrado
         )
 
-        i1, i2, i3, i4, i5, i6 = st.columns(6)
-
-        i1.metric(
-            "Unidades / pedido",
-            f"{inteligencia['unidades_promedio_pedido']:.1f}",
-        )
-        i2.metric(
-            "M³ / pedido",
-            f"{inteligencia['volumen_promedio_pedido']:.2f}",
-        )
-        i3.metric(
-            "Concentración Top 5",
-            f"{inteligencia['concentracion_top_5']:.1f}%",
-            help=(
-                "Porcentaje de unidades concentrado en los "
-                "cinco clientes con mayor pendiente."
-            ),
-        )
-        i4.metric(
-            "Cliente principal",
-            inteligencia["cliente_principal"],
-            delta=(
-                f"{inteligencia['participacion_cliente_principal']:.1f}% "
-                "de las unidades"
-            ),
-            delta_color="off",
-        )
-        i5.metric(
-            "Pedidos +5 días",
-            inteligencia["pedidos_mas_5_dias"],
-            delta=(
-                f"{inteligencia['unidades_mas_5_dias']:,} unidades"
-            ).replace(",", "."),
-            delta_color="inverse",
-        )
-
         tendencia = inteligencia["tendencia_reciente"]
         tendencia_texto = (
             f"{tendencia:+.1f}%"
             if tendencia is not None
             else "Sin base"
         )
-        i6.metric(
-            "Tendencia reciente",
-            tendencia_texto,
-            help=(
-                "Compara el promedio de unidades de las últimas "
-                "fechas transmitidas contra el bloque anterior."
+
+        tarjetas_inteligencia = [
+            (
+                "📦 Unidades / pedido",
+                f"{inteligencia['unidades_promedio_pedido']:.1f}",
+                "Dimensión media del pedido",
             ),
-            delta_color="inverse",
-        )
+            (
+                "📐 M³ / pedido",
+                f"{inteligencia['volumen_promedio_pedido']:.2f}",
+                "Volumen medio operativo",
+            ),
+            (
+                "🎯 Concentración Top 5",
+                f"{inteligencia['concentracion_top_5']:.1f}%",
+                "Participación de los 5 principales clientes",
+            ),
+            (
+                "🏢 Cliente principal",
+                inteligencia["cliente_principal"],
+                (
+                    f"{inteligencia['participacion_cliente_principal']:.1f}% "
+                    "de las unidades"
+                ),
+            ),
+            (
+                "⏳ Pedidos +5 días",
+                f"{inteligencia['pedidos_mas_5_dias']:,}".replace(",", "."),
+                (
+                    f"{inteligencia['unidades_mas_5_dias']:,} unidades"
+                ).replace(",", "."),
+            ),
+            (
+                "📈 Tendencia reciente",
+                tendencia_texto,
+                "Comparación contra el bloque anterior",
+            ),
+        ]
+
+        html_inteligencia = '<div class="pedidos-kpi-grid inteligencia-grid">'
+        for etiqueta, valor, detalle in tarjetas_inteligencia:
+            html_inteligencia += (
+                '<div class="pedidos-kpi-card inteligencia-card">'
+                f'<div class="pedidos-kpi-label">{etiqueta}</div>'
+                f'<div class="pedidos-kpi-value">{valor}</div>'
+                f'<div class="pedidos-kpi-detail">{detalle}</div>'
+                '</div>'
+            )
+        html_inteligencia += "</div>"
+        st.markdown(html_inteligencia, unsafe_allow_html=True)
 
         st.divider()
 
@@ -1741,6 +2163,239 @@ with tab_inteligencia:
                 ),
             },
         )
+
+
+with tab_cobertura:
+    st.subheader("🚨 Compromisos ERP sin cobertura")
+    st.caption(
+        "Pedidos que permanecen pendientes en el ERP y no están activos actualmente en DIGIP. "
+        "Una transmisión histórica anterior no los excluye del análisis."
+    )
+
+    if resumen_cobertura_erp.empty:
+        st.success("No hay pedidos pendientes fuera de DIGIP para evaluar.")
+    else:
+        total_pedidos = int(resumen_cobertura_erp["Pedido"].nunique())
+        con_faltante = int(resumen_cobertura_erp["UnidadesFaltantes"].gt(0).sum())
+        sin_cobertura = int(resumen_cobertura_erp["EstadoCobertura"].eq("Sin cobertura").sum())
+        unidades_faltantes = float(resumen_cobertura_erp["UnidadesFaltantes"].sum())
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Pendientes fuera de DIGIP", f"{total_pedidos:,}".replace(",", "."))
+        c2.metric("Pedidos con faltante", f"{con_faltante:,}".replace(",", "."))
+        c3.metric("Sin cobertura", f"{sin_cobertura:,}".replace(",", "."))
+        c4.metric("Unidades faltantes", f"{unidades_faltantes:,.0f}".replace(",", "."))
+
+        solo_faltantes = st.toggle(
+            "Mostrar solamente pedidos con faltante", value=True,
+            key="pedidos_solo_faltantes_cobertura",
+        )
+        vista_resumen = resumen_cobertura_erp.copy()
+        if solo_faltantes:
+            vista_resumen = vista_resumen.loc[vista_resumen["UnidadesFaltantes"].gt(0)].copy()
+
+        pedidos_visibles = set(vista_resumen["Pedido"].astype(str))
+        vista_lineas = lineas_cobertura_erp.loc[
+            lineas_cobertura_erp["Pedido"].astype(str).isin(pedidos_visibles)
+        ].copy()
+
+        if solo_faltantes:
+            vista_lineas = vista_lineas.loc[
+                vista_lineas["CantidadFaltante"].gt(0)
+            ].copy()
+
+        # =====================================================
+        # CONSOLIDADO DE CÓDIGOS CON FALTANTE
+        # =====================================================
+        lineas_codigos = lineas_cobertura_erp.loc[
+            lineas_cobertura_erp["Pedido"].astype(str).isin(pedidos_visibles)
+        ].copy()
+
+        if lineas_codigos.empty:
+            resumen_codigos_faltantes = pd.DataFrame(
+                columns=[
+                    "ArticuloCodigo",
+                    "ArticuloDescripcion",
+                    "Disponible",
+                    "Comprometido",
+                    "Faltante",
+                    "PedidosAfectados",
+                ]
+            )
+        else:
+            resumen_codigos_faltantes = (
+                lineas_codigos
+                .groupby(
+                    ["ArticuloCodigo", "ArticuloDescripcion"],
+                    as_index=False,
+                    dropna=False,
+                )
+                .agg(
+                    Disponible=("StockDisponibleInicial", "max"),
+                    Comprometido=("CantidadSolicitada", "sum"),
+                    Faltante=("CantidadFaltante", "sum"),
+                    PedidosAfectados=("Pedido", "nunique"),
+                )
+            )
+
+            resumen_codigos_faltantes = (
+                resumen_codigos_faltantes
+                .loc[resumen_codigos_faltantes["Faltante"].gt(0)]
+                .sort_values(
+                    by=["Faltante", "Comprometido", "ArticuloCodigo"],
+                    ascending=[False, False, True],
+                )
+                .reset_index(drop=True)
+            )
+
+            for columna in [
+                "Disponible",
+                "Comprometido",
+                "Faltante",
+                "PedidosAfectados",
+            ]:
+                resumen_codigos_faltantes[columna] = (
+                    pd.to_numeric(
+                        resumen_codigos_faltantes[columna],
+                        errors="coerce",
+                    )
+                    .fillna(0)
+                    .astype(int)
+                )
+
+        columna_tablas, columna_codigos = st.columns(
+            [1, 1],
+            gap="large",
+            vertical_alignment="top",
+        )
+
+        with columna_tablas:
+            st.markdown("#### Resumen por pedido")
+            st.dataframe(
+                vista_resumen,
+                hide_index=True,
+                width="stretch",
+                height=300,
+                column_config={
+                    "Fecha": st.column_config.DateColumn(
+                        "Fecha",
+                        format="DD/MM/YYYY",
+                    ),
+                    "PorcentajeCobertura": st.column_config.ProgressColumn(
+                        "Cobertura",
+                        min_value=0,
+                        max_value=100,
+                        format="%.1f %%",
+                    ),
+                    "UnidadesFaltantes": st.column_config.NumberColumn(
+                        "Faltante",
+                        format="%.0f",
+                    ),
+                },
+            )
+
+            st.markdown("#### Detalle de artículos")
+            st.dataframe(
+                vista_lineas,
+                hide_index=True,
+                width="stretch",
+                height=390,
+                column_config={
+                    "Fecha": st.column_config.DateColumn(
+                        "Fecha",
+                        format="DD/MM/YYYY",
+                    ),
+                    "CantidadSolicitada": st.column_config.NumberColumn(
+                        "Solicitado",
+                        format="%d",
+                    ),
+                    "StockDisponibleInicial": st.column_config.NumberColumn(
+                        "Disponible inicial",
+                        format="%d",
+                    ),
+                    "CantidadCubierta": st.column_config.NumberColumn(
+                        "Cubierto",
+                        format="%d",
+                    ),
+                    "CantidadFaltante": st.column_config.NumberColumn(
+                        "Faltante",
+                        format="%d",
+                    ),
+                },
+            )
+
+        with columna_codigos:
+            st.markdown("#### Artículos comprometidos sin stock")
+            st.caption(
+                "Consolidado por código de las ventas pendientes fuera de DIGIP."
+            )
+
+            if resumen_codigos_faltantes.empty:
+                st.success(
+                    "No hay artículos con faltante para los pedidos visibles."
+                )
+            else:
+                st.dataframe(
+                    resumen_codigos_faltantes,
+                    hide_index=True,
+                    width="stretch",
+                    height=750,
+                    column_config={
+                        "ArticuloCodigo": st.column_config.TextColumn(
+                            "Código",
+                            width="small",
+                        ),
+                        "ArticuloDescripcion": st.column_config.TextColumn(
+                            "Descripción",
+                            width="large",
+                        ),
+                        "Disponible": st.column_config.NumberColumn(
+                            "Disponible",
+                            format="%d",
+                        ),
+                        "Comprometido": st.column_config.NumberColumn(
+                            "Comprometido",
+                            format="%d",
+                        ),
+                        "Faltante": st.column_config.NumberColumn(
+                            "Faltante",
+                            format="%d",
+                        ),
+                        "PedidosAfectados": st.column_config.NumberColumn(
+                            "Pedidos",
+                            format="%d",
+                        ),
+                    },
+                )
+
+        col_descarga1, col_descarga2, col_descarga3 = st.columns(3)
+        with col_descarga1:
+            st.download_button(
+                "⬇️ Descargar resumen",
+                data=vista_resumen.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="Pedidos_ERP_Sin_Cobertura.csv", mime="text/csv",
+                key="descargar_resumen_cobertura_erp", width="stretch",
+            )
+        with col_descarga2:
+            st.download_button(
+                "⬇️ Descargar detalle",
+                data=vista_lineas.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="Detalle_Pedidos_ERP_Sin_Cobertura.csv", mime="text/csv",
+                key="descargar_detalle_cobertura_erp", width="stretch",
+            )
+        with col_descarga3:
+            st.download_button(
+                "⬇️ Descargar artículos",
+                data=resumen_codigos_faltantes.to_csv(
+                    index=False,
+                    sep=";",
+                    encoding="utf-8-sig",
+                ).encode("utf-8-sig"),
+                file_name="Articulos_Comprometidos_Sin_Stock.csv",
+                mime="text/csv",
+                key="descargar_articulos_sin_stock_erp",
+                width="stretch",
+            )
 
 
 with tab_operacion:

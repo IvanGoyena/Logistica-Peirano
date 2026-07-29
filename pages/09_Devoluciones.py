@@ -52,7 +52,123 @@ st.set_page_config(
     layout="wide",
 )
 
-TELEFONO = "5491172151924"
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.15rem;
+        padding-bottom: 3rem;
+    }
+
+    [data-testid="stMetric"] {
+        background:
+            linear-gradient(
+                145deg,
+                rgba(24, 34, 47, 0.98),
+                rgba(11, 17, 25, 0.98)
+            );
+        border: 1px solid #2A3543;
+        border-radius: 12px;
+        padding: 0.95rem 1rem;
+        min-height: 122px;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: #D8DEE9;
+        font-weight: 600;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: #F8FAFC;
+        font-size: 1.65rem;
+        font-weight: 700;
+    }
+
+    [data-testid="stMetricDelta"] {
+        font-size: 0.76rem;
+        white-space: normal;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(15, 23, 34, 0.62);
+        border-color: #2A3543;
+        border-radius: 12px;
+    }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #2A3543;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    button[data-baseweb="tab"] {
+        font-weight: 600;
+    }
+
+    .operativo-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin: 0.65rem 0 1.15rem 0;
+    }
+
+    .operativo-kpi-card {
+        min-height: 126px;
+        padding: 0.95rem 1rem;
+        border: 1px solid #2A3543;
+        border-radius: 12px;
+        background:
+            linear-gradient(
+                145deg,
+                rgba(24, 34, 47, 0.98),
+                rgba(11, 17, 25, 0.98)
+            );
+    }
+
+    .operativo-kpi-label {
+        color: #D8DEE9;
+        font-size: 0.82rem;
+        font-weight: 600;
+        min-height: 2.1rem;
+    }
+
+    .operativo-kpi-value {
+        color: #F8FAFC;
+        font-size: 1.72rem;
+        font-weight: 750;
+        margin-top: 0.36rem;
+        line-height: 1.05;
+    }
+
+    .operativo-kpi-detail {
+        color: #93A4B8;
+        font-size: 0.76rem;
+        margin-top: 0.52rem;
+        line-height: 1.25;
+    }
+
+    @media (max-width: 1100px) {
+        .operativo-kpi-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 680px) {
+        .operativo-kpi-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+DESTINATARIOS_WHATSAPP = {
+    "Leo": "5491124714063",
+    "Juanma": "5491133914080",
+}
 
 
 def usuario_actual() -> str:
@@ -83,8 +199,8 @@ def construir_mensaje(registro: dict) -> str:
     )
 
 
-def construir_url_whatsapp(registro: dict) -> str:
-    return f"https://wa.me/{TELEFONO}?text={quote(construir_mensaje(registro))}"
+def construir_url_whatsapp(registro: dict, telefono: str) -> str:
+    return f"https://wa.me/{telefono}?text={quote(construir_mensaje(registro))}"
 
 
 st.title("↩️ Devoluciones")
@@ -126,7 +242,9 @@ with pestana_dashboard:
         fecha_minima = fechas_validas.min().date()
         fecha_inicial = max(fecha_minima, fecha_maxima - timedelta(days=59))
 
-        f1, f2, f3, f4 = st.columns([1.2, 1, 1, 1])
+        with st.container(border=True):
+            st.markdown("##### 🔎 Filtros del dashboard")
+            f1, f2, f3, f4 = st.columns([1.2, 1, 1, 1])
         with f1:
             rango = st.date_input(
                 "Período",
@@ -177,13 +295,57 @@ with pestana_dashboard:
 
         metricas = calcular_metricas(filtrados, fecha_desde, fecha_hasta)
 
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("Gestiones del período", f"{metricas.periodo:,}")
-        k2.metric("Pendientes", f"{metricas.pendientes:,}")
-        k3.metric("Finalizadas", f"{metricas.finalizadas:,}")
-        k4.metric("Entregas detenidas", f"{metricas.porcentaje_detenidas:.1f}%")
-        k5.metric("Ya despachadas", f"{metricas.porcentaje_despachadas:.1f}%")
-        k6.metric("Promedio de cierre", f"{metricas.tiempo_promedio_cierre_horas:.1f} h")
+        tarjetas_devoluciones = [
+            (
+                "↩️ Gestiones del período",
+                f"{metricas.periodo:,}".replace(",", "."),
+                (
+                    f"{fecha_desde.strftime('%d/%m/%Y')} al "
+                    f"{fecha_hasta.strftime('%d/%m/%Y')}"
+                ),
+            ),
+            (
+                "⏳ Pendientes",
+                f"{metricas.pendientes:,}".replace(",", "."),
+                "Requieren continuidad operativa",
+            ),
+            (
+                "✅ Finalizadas",
+                f"{metricas.finalizadas:,}".replace(",", "."),
+                "Gestiones cerradas en el período",
+            ),
+            (
+                "🛑 Entregas detenidas",
+                f"{metricas.porcentaje_detenidas:.1f}%",
+                "Mercadería interceptada a tiempo",
+            ),
+            (
+                "🚚 Ya despachadas",
+                f"{metricas.porcentaje_despachadas:.1f}%",
+                "No pudieron detenerse antes de la salida",
+            ),
+            (
+                "⏱️ Promedio de cierre",
+                f"{metricas.tiempo_promedio_cierre_horas:.1f} h",
+                f"Promedio hasta IR: {metricas.tiempo_promedio_ir_horas:.1f} h",
+            ),
+        ]
+
+        html_kpis_devoluciones = '<div class="operativo-kpi-grid">'
+        for etiqueta, valor, detalle in tarjetas_devoluciones:
+            html_kpis_devoluciones += (
+                '<div class="operativo-kpi-card">'
+                f'<div class="operativo-kpi-label">{etiqueta}</div>'
+                f'<div class="operativo-kpi-value">{valor}</div>'
+                f'<div class="operativo-kpi-detail">{detalle}</div>'
+                '</div>'
+            )
+        html_kpis_devoluciones += "</div>"
+
+        st.markdown(
+            html_kpis_devoluciones,
+            unsafe_allow_html=True,
+        )
 
         st.caption(
             f"Período analizado: {fecha_desde.strftime('%d/%m/%Y')} al "
@@ -363,11 +525,27 @@ with pestana_historico:
                     f"**Motivo:** {registro.get('Motivo', '')}"
                 )
 
-                st.link_button(
-                    "📲 Abrir / reenviar alerta de WhatsApp",
-                    construir_url_whatsapp(registro.to_dict()),
-                    width="stretch",
-                )
+                w1, w2 = st.columns(2)
+                with w1:
+                    st.link_button(
+                        "📲 Enviar a Leo",
+                        construir_url_whatsapp(
+                            registro.to_dict(),
+                            DESTINATARIOS_WHATSAPP["Leo"],
+                        ),
+                        type="primary",
+                        width="stretch",
+                    )
+                with w2:
+                    st.link_button(
+                        "📲 Enviar a Juanma",
+                        construir_url_whatsapp(
+                            registro.to_dict(),
+                            DESTINATARIOS_WHATSAPP["Juanma"],
+                        ),
+                        type="primary",
+                        width="stretch",
+                    )
 
                 usuario = usuario_actual()
 

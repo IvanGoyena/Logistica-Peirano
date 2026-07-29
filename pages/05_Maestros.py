@@ -2,7 +2,7 @@ from config import *
 
 
 from utils.autenticacion import requerir_roles
-
+from models.pedidos import construir_tabla_pedidos
 
 requerir_roles(
     "admin",
@@ -13,6 +13,8 @@ from utils.leer_datos import (
     leer_archivo,
     fecha_archivo
 )
+
+from utils.leer_fuente_flexible import leer_archivo_flexible
 
 from models.pendiente import (
     construir_tabla_pendientes
@@ -37,6 +39,11 @@ from models.volumetria import (
 from models.metricas import (
     leer_historico_controles,
     leer_historico_preparaciones,
+)
+
+from models.sincronizar_clientes import (
+    validar_maestro_clientes,
+    actualizar_maestro_clientes,
 )
 
 import streamlit as st
@@ -150,89 +157,156 @@ def mostrar_tarjeta_reporte(
 
 
 # =====================================================
-# CARGA DE FUENTES
+# CARGA CONTROLADA DE FUENTES
 # =====================================================
 
-# -----------------------------------------------------
-# FUENTES DINÁMICAS
-# -----------------------------------------------------
-
-df_tareas = leer_archivo(
-    CARPETA_DATOS,
-    "Informe Tareas",
-    cache=False
+@st.cache_data(
+    show_spinner="Cargando reportes operativos...",
 )
+def cargar_fuentes_operativas():
+    """
+    Lee una sola vez las fuentes dinámicas y ERP.
 
-df_pedidos = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos DIGIP",
-    cache=False
+    Los reruns normales de Streamlit —filtros, botones,
+    multiselección o checkboxes— reutilizan estos DataFrames
+    desde memoria y no vuelven a consultar Google Drive.
+    """
+
+    return {
+        "tareas": leer_archivo(
+            CARPETA_DATOS,
+            "Informe Tareas",
+            cache=False,
+        ),
+        "pedidos": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos DIGIP",
+            cache=False,
+        ),
+        "detalle": leer_archivo(
+            CARPETA_DATOS,
+            "Detalle Pendientes",
+            cache=False,
+        ),
+        "pendientes_erp": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos Pendientes",
+            cache=False,
+        ),
+        "transmisiones": leer_archivo(
+            CARPETA_DATOS,
+            "Pedidos Transmicion",
+            cache=False,
+        ),
+    }
+
+
+@st.cache_data(
+    show_spinner="Cargando reportes de stock...",
 )
+def cargar_fuentes_stock():
+    """Lee las cuatro fuentes reales de stock y la configuración Max & Min."""
+
+    configuracion = {
+        "stock_detallado": ["stock_detallado", "Stock_Detallado", "Stock Detallado"],
+        "stock_recepcion": ["stock_recepcion", "Stock_Recepcion", "Stock Recepcion"],
+        "disponible": ["Disponible Digip", "Disponible_Digip", "disponible_digip"],
+        "calidad": ["stock_calidad_laboratorio", "Stock_Calidad_Laboratorio"],
+        "max_min": ["Max & Min", "Max_Min", "max_min"],
+    }
+
+    resultado = {}
+    for clave, nombres in configuracion.items():
+        df, _ = leer_archivo_flexible(
+            CARPETA_DATOS,
+            nombres,
+            cache=False,
+        )
+        resultado[clave] = df
+
+    return resultado
 
 
-# -----------------------------------------------------
-# FUENTES ERP
-# -----------------------------------------------------
-
-df_detalle = leer_archivo(
-    CARPETA_DATOS,
-    "Detalle Pendientes",
-    cache=False
+@st.cache_data(
+    show_spinner="Cargando maestros de planificación...",
 )
+def cargar_maestros_planificacion():
+    """
+    Mantiene los maestros en una caché independiente.
 
-df_pendientes_erp = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos Pendientes",
-    cache=False
+    Después de incorporar clientes nuevos se limpia solamente
+    esta función, evitando volver a descargar los reportes
+    operativos y ERP que no fueron modificados.
+    """
+
+    return {
+        "articulos": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Articulo",
+            cache=True,
+        ),
+        "clientes": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Clientes",
+            cache=False,
+        ),
+        "expresos": leer_archivo(
+            CARPETA_DATOS,
+            "Datos Expresos",
+            cache=True,
+        ),
+        "volumetria": leer_archivo(
+            CARPETA_DATOS,
+            "Maestro Volumetria",
+            cache=True,
+        ),
+    }
+
+
+@st.cache_data(
+    show_spinner="Cargando históricos de métricas...",
 )
+def cargar_historicos_metricas():
+    """Lee los históricos una sola vez durante la sesión."""
 
-df_transmisiones = leer_archivo(
-    CARPETA_DATOS,
-    "Pedidos Transmicion",
-    cache=False
-)
-
-
-# -----------------------------------------------------
-# MAESTROS CON CACHÉ
-# -----------------------------------------------------
-
-df_articulos = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Articulo",
-    cache=True
-)
-
-df_clientes = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Clientes",
-    cache=False
-)
-
-df_expresos = leer_archivo(
-    CARPETA_DATOS,
-    "Datos Expresos",
-    cache=True
-)
-
-df_volumetria = leer_archivo(
-    CARPETA_DATOS,
-    "Maestro Volumetria",
-    cache=True
-)
+    return {
+        "control": leer_historico_controles(
+            CARPETA_DATOS,
+        ),
+        "preparacion": leer_historico_preparaciones(
+            CARPETA_DATOS,
+        ),
+    }
 
 
-# -----------------------------------------------------
-# HISTÓRICOS DE MÉTRICAS
-# -----------------------------------------------------
+fuentes_operativas = cargar_fuentes_operativas()
+fuentes_stock = cargar_fuentes_stock()
+maestros_planificacion = cargar_maestros_planificacion()
+historicos_metricas = cargar_historicos_metricas()
 
-df_historico_control = leer_historico_controles(
-    CARPETA_DATOS
-)
+# Se entregan copias para que las transformaciones posteriores
+# no modifiquen accidentalmente los objetos guardados en caché.
+df_tareas = fuentes_operativas["tareas"].copy()
+df_pedidos = fuentes_operativas["pedidos"].copy()
+df_detalle = fuentes_operativas["detalle"].copy()
+df_pendientes_erp = fuentes_operativas["pendientes_erp"].copy()
+df_transmisiones = fuentes_operativas["transmisiones"].copy()
 
-df_historico_preparacion = leer_historico_preparaciones(
-    CARPETA_DATOS
-)
+df_stock_detallado = fuentes_stock["stock_detallado"].copy()
+df_stock_recepcion = fuentes_stock["stock_recepcion"].copy()
+df_disponible_digip = fuentes_stock["disponible"].copy()
+df_stock_calidad = fuentes_stock["calidad"].copy()
+df_max_min = fuentes_stock["max_min"].copy()
+
+df_articulos = maestros_planificacion["articulos"].copy()
+df_clientes = maestros_planificacion["clientes"].copy()
+df_expresos = maestros_planificacion["expresos"].copy()
+df_volumetria = maestros_planificacion["volumetria"].copy()
+
+df_historico_control = historicos_metricas["control"].copy()
+df_historico_preparacion = historicos_metricas[
+    "preparacion"
+].copy()
 
 # =====================================================
 # CONSTRUCCIÓN DE TABLAS LIMPIAS
@@ -258,6 +332,14 @@ tabla_volumetria = construir_tabla_volumetria(
     df_volumetria
 )
 
+
+tabla_pedidos = construir_tabla_pedidos(
+    df_pedidos,
+    df_detalle,
+    df_articulos,
+    tabla_clientes,
+    df_volumetria
+)
 
 # =====================================================
 # CATÁLOGO DE REPORTES
@@ -308,6 +390,51 @@ reportes = [
         "fuente": "Pedidos Transmicion",
         "descarga": "Transmisiones_ERP_Limpio.csv",
         "key": "descarga_transmisiones_erp",
+    },
+
+    {
+        "titulo": "Stock detallado",
+        "icono": "🏭",
+        "dataframe": df_stock_detallado,
+        "fuente": "stock_detallado",
+        "descarga": "Stock_Detallado.csv",
+        "key": "descarga_stock_detallado",
+    },
+
+    {
+        "titulo": "Stock recepción",
+        "icono": "📥",
+        "dataframe": df_stock_recepcion,
+        "fuente": "stock_recepcion",
+        "descarga": "Stock_Recepcion.csv",
+        "key": "descarga_stock_recepcion",
+    },
+
+    {
+        "titulo": "Disponible DIGIP",
+        "icono": "📦",
+        "dataframe": df_disponible_digip,
+        "fuente": "Disponible Digip",
+        "descarga": "Disponible_Digip.csv",
+        "key": "descarga_disponible_digip",
+    },
+
+    {
+        "titulo": "Stock Calidad / Laboratorio",
+        "icono": "🧪",
+        "dataframe": df_stock_calidad,
+        "fuente": "stock_calidad_laboratorio",
+        "descarga": "Stock_Calidad_Laboratorio.csv",
+        "key": "descarga_stock_calidad",
+    },
+
+    {
+        "titulo": "Max & Min Picking",
+        "icono": "⚙️",
+        "dataframe": df_max_min,
+        "fuente": "Max & Min",
+        "descarga": "Max_y_Min_Picking.csv",
+        "key": "descarga_max_min",
     },
 
     {
@@ -471,6 +598,69 @@ st.markdown("---")
 
 
 # =====================================================
+# FUENTES DE STOCK
+# =====================================================
+
+st.subheader("📊 Fuentes de Stock")
+st.caption("Reportes reales del WMS utilizados por el módulo de Stock.")
+
+col_stock1, col_stock2, col_stock3 = st.columns(3)
+
+with col_stock1:
+    mostrar_tarjeta_reporte(
+        titulo="Stock detallado",
+        icono="🏭",
+        dataframe=df_stock_detallado,
+        nombre_archivo_fuente="stock_detallado",
+        nombre_descarga="Stock_Detallado.csv",
+        key_boton="boton_stock_detallado",
+    )
+
+with col_stock2:
+    mostrar_tarjeta_reporte(
+        titulo="Stock recepción",
+        icono="📥",
+        dataframe=df_stock_recepcion,
+        nombre_archivo_fuente="stock_recepcion",
+        nombre_descarga="Stock_Recepcion.csv",
+        key_boton="boton_stock_recepcion",
+    )
+
+with col_stock3:
+    mostrar_tarjeta_reporte(
+        titulo="Disponible DIGIP",
+        icono="📦",
+        dataframe=df_disponible_digip,
+        nombre_archivo_fuente="Disponible Digip",
+        nombre_descarga="Disponible_Digip.csv",
+        key_boton="boton_disponible_digip",
+    )
+
+col_stock4, col_stock5 = st.columns(2)
+
+with col_stock4:
+    mostrar_tarjeta_reporte(
+        titulo="Stock Calidad / Laboratorio",
+        icono="🧪",
+        dataframe=df_stock_calidad,
+        nombre_archivo_fuente="stock_calidad_laboratorio",
+        nombre_descarga="Stock_Calidad_Laboratorio.csv",
+        key_boton="boton_stock_calidad",
+    )
+
+with col_stock5:
+    mostrar_tarjeta_reporte(
+        titulo="Max & Min Picking",
+        icono="⚙️",
+        dataframe=df_max_min,
+        nombre_archivo_fuente="Max & Min",
+        nombre_descarga="Max_y_Min_Picking.csv",
+        key_boton="boton_max_min",
+    )
+
+st.markdown("---")
+
+# =====================================================
 # FUENTES ERP
 # =====================================================
 
@@ -576,6 +766,272 @@ with col8:
     )
 
     st.markdown("---")
+# =====================================================
+# SINCRONIZACIÓN MAESTRO CLIENTES
+# =====================================================
+
+st.subheader("👥 Actualización de nuevos clientes")
+
+st.caption(
+    "Primero valida los códigos logísticos nuevos, propone su planificación "
+    "y luego permite seleccionar cuáles incorporar al Maestro Clientes."
+)
+
+mensaje_alta = st.session_state.pop(
+    "mensaje_actualizacion_clientes",
+    None,
+)
+
+if mensaje_alta:
+    st.success(mensaje_alta)
+
+if "validacion_clientes_resultado" not in st.session_state:
+    st.session_state["validacion_clientes_resultado"] = None
+
+if st.button(
+    "🔍 Validar actualización de clientes",
+    type="primary",
+    width="stretch",
+    key="validar_actualizacion_clientes",
+):
+
+    with st.spinner("Analizando códigos logísticos y planificación..."):
+        try:
+            resultado = validar_maestro_clientes(
+                tabla_clientes=tabla_clientes,
+                tabla_pendientes=df_pendientes_erp,
+                df_pedidos_digip=df_pedidos,
+            )
+            st.session_state["validacion_clientes_resultado"] = resultado
+
+        except Exception as error:
+            st.session_state["validacion_clientes_resultado"] = None
+            st.error(f"No se pudo completar la validación: {error}")
+
+resultado_clientes = st.session_state.get(
+    "validacion_clientes_resultado"
+)
+
+if isinstance(resultado_clientes, pd.DataFrame):
+
+    if resultado_clientes.empty:
+        st.success(
+            "El Maestro Clientes está actualizado: no se detectaron "
+            "códigos logísticos nuevos en Pedidos Pendientes ERP."
+        )
+
+    else:
+        cantidad_total = len(resultado_clientes)
+        cantidad_listos = int(
+            resultado_clientes["ListoParaAlta"].fillna(False).sum()
+        )
+        cantidad_revision = cantidad_total - cantidad_listos
+        sin_despacho = int(
+            resultado_clientes["Estado"]
+            .eq("SIN_CODIGO_DESPACHO")
+            .sum()
+        )
+
+        col_sync_1, col_sync_2, col_sync_3, col_sync_4 = st.columns(4)
+
+        with col_sync_1:
+            st.metric("Clientes nuevos", cantidad_total)
+
+        with col_sync_2:
+            st.metric("Listos para alta", cantidad_listos)
+
+        with col_sync_3:
+            st.metric("Requieren revisión", cantidad_revision)
+
+        with col_sync_4:
+            st.metric("Sin código despacho", sin_despacho)
+
+        columnas_vista = [
+            "Estado",
+            "ListoParaAlta",
+            "CodigoLogistico",
+            "CodigoCliente",
+            "Cliente",
+            "Distribuidor",
+            "PedidoReferencia",
+            "CodigoDespacho",
+            "Zona",
+            "EntregaPropuesta",
+            "PreparacionPropuesta",
+            "MetodoInferencia",
+            "ClientesReferencia",
+            "CombinacionesDetectadas",
+            "ConfianzaPorcentaje",
+            "ObservacionValidacion",
+        ]
+
+        columnas_vista = [
+            columna
+            for columna in columnas_vista
+            if columna in resultado_clientes.columns
+        ]
+
+        st.dataframe(
+            resultado_clientes[columnas_vista],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "ListoParaAlta": st.column_config.CheckboxColumn(
+                    "Listo",
+                    disabled=True,
+                ),
+                "ConfianzaPorcentaje": st.column_config.ProgressColumn(
+                    "Confianza",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f %%",
+                ),
+            },
+        )
+
+        with st.expander("Ver todos los campos detectados"):
+            st.dataframe(
+                resultado_clientes,
+                hide_index=True,
+                width="stretch",
+            )
+
+        st.download_button(
+            label="⬇️ Descargar validación",
+            data=dataframe_a_csv(resultado_clientes),
+            file_name="Validacion_Nuevos_Clientes.csv",
+            mime="text/csv",
+            key="descargar_validacion_clientes",
+            width="stretch",
+        )
+
+        st.markdown("#### ✅ Seleccionar registros para actualizar")
+
+        registros_listos = resultado_clientes.loc[
+            resultado_clientes["ListoParaAlta"].fillna(False)
+        ].copy()
+
+        if registros_listos.empty:
+            st.warning(
+                "No hay registros habilitados para actualización. Los casos "
+                "con observaciones deben resolverse antes de incorporarlos."
+            )
+
+        else:
+            opciones = registros_listos["CodigoLogistico"].tolist()
+            descripcion_por_codigo = {
+                fila["CodigoLogistico"]: (
+                    f"{fila['CodigoLogistico']} — {fila['Cliente']} — "
+                    f"Entrega {fila['EntregaPropuesta']} / "
+                    f"Preparación {fila['PreparacionPropuesta']}"
+                )
+                for _, fila in registros_listos.iterrows()
+            }
+
+            seleccionados = st.multiselect(
+                "Clientes a incorporar al Maestro Clientes",
+                options=opciones,
+                default=opciones,
+                format_func=lambda codigo: descripcion_por_codigo.get(
+                    codigo,
+                    codigo,
+                ),
+                key="clientes_seleccionados_actualizacion",
+                help=(
+                    "Solo aparecen registros que superaron la validación. "
+                    "Podés quitar de la selección los que no quieras cargar."
+                ),
+            )
+
+            registros_seleccionados = registros_listos.loc[
+                registros_listos["CodigoLogistico"].isin(seleccionados)
+            ].copy()
+
+            st.caption(
+                f"Se actualizarán {len(registros_seleccionados)} de "
+                f"{len(registros_listos)} registros listos."
+            )
+
+            confirmar_actualizacion = st.checkbox(
+                "Confirmo que revisé la planificación de los clientes "
+                "seleccionados.",
+                key="confirmar_actualizacion_maestro_clientes",
+            )
+
+            actualizar_clientes = st.button(
+                "💾 Actualizar registros seleccionados",
+                type="primary",
+                width="stretch",
+                key="actualizar_registros_maestro_clientes",
+                disabled=(
+                    registros_seleccionados.empty
+                    or not confirmar_actualizacion
+                ),
+            )
+
+            if actualizar_clientes:
+                with st.spinner(
+                    "Creando respaldo y actualizando Maestro Clientes..."
+                ):
+                    try:
+                        resumen_actualizacion = actualizar_maestro_clientes(
+                            registros_seleccionados=(
+                                registros_seleccionados
+                            ),
+                            carpeta_datos=CARPETA_DATOS,
+                            nombre_base="Maestro Clientes",
+                        )
+
+                        cantidad_agregados = resumen_actualizacion[
+                            "cantidad_agregados"
+                        ]
+                        cantidad_omitidos = resumen_actualizacion[
+                            "cantidad_omitidos"
+                        ]
+
+                        # Solo cambió Maestro Clientes. Se invalida la
+                        # caché de maestros para leer el XLSM actualizado,
+                        # sin volver a descargar las fuentes operativas,
+                        # ERP ni los históricos.
+                        cargar_maestros_planificacion.clear()
+
+                        st.session_state.pop(
+                            "validacion_clientes_resultado",
+                            None,
+                        )
+                        st.session_state.pop(
+                            "clientes_seleccionados_actualizacion",
+                            None,
+                        )
+                        st.session_state.pop(
+                            "confirmar_actualizacion_maestro_clientes",
+                            None,
+                        )
+
+                        mensaje = (
+                            f"Maestro Clientes actualizado: "
+                            f"{cantidad_agregados} registro(s) agregado(s)."
+                        )
+
+                        if cantidad_omitidos:
+                            mensaje += (
+                                f" {cantidad_omitidos} registro(s) ya "
+                                "existían y fueron omitidos."
+                            )
+
+                        st.session_state[
+                            "mensaje_actualizacion_clientes"
+                        ] = mensaje
+
+                        st.rerun()
+
+                    except Exception as error:
+                        st.error(
+                            "No se pudo actualizar el maestro. "
+                            f"{error}"
+                        )
+
+st.markdown("---")
 
 
 # =====================================================
@@ -628,6 +1084,13 @@ st.info(
     **Fuentes dinámicas**
     - Informe Tareas.
     - Pedidos DIGIP.
+
+    **Fuentes de Stock**
+    - Stock Almacén.
+    - Stock_Picking.
+    - Stock_Recepciones.
+    - Stock Calidad / Laboratorio.
+    - Max & Min Picking.
 
     **Fuentes ERP**
     - Detalle Pendientes.

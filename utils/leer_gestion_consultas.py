@@ -480,37 +480,52 @@ def obtener_fotos_reclamo(
 def obtener_solicitudes_abiertas(
 ) -> pd.DataFrame:
     """
-    Devuelve solicitudes que todavía requieren gestión.
+    Devuelve todas las solicitudes que todavía requieren gestión.
+
+    Una solicitud se considera abierta mientras no tenga un
+    estado explícitamente cerrado. Esto permite conservar
+    compatibilidad con registros antiguos, estados vacíos o
+    variantes como Solicitada y Abierta.
     """
 
     tabla = leer_solicitudes()
 
-    if tabla.empty:
+    if tabla is None or tabla.empty:
         return tabla
 
-    estados_abiertos = {
-        "PENDIENTE",
-        "EN REVISIÓN",
-        "EN REVISION",
-        "EN CURSO",
-        "EN GESTIÓN",
-        "EN GESTION",
+    if "EstadoSolicitud" not in tabla.columns:
+        return tabla.copy().reset_index(drop=True)
+
+    estados_cerrados = {
+        "FINALIZADA",
+        "FINALIZADO",
+        "RESUELTA",
+        "RESUELTO",
+        "CERRADA",
+        "CERRADO",
+        "RECHAZADA",
+        "RECHAZADO",
+        "CANCELADA",
+        "CANCELADO",
     }
 
-    mascara = (
+    estados = (
         tabla["EstadoSolicitud"]
+        .fillna("")
         .astype(str)
         .str.strip()
         .str.upper()
-        .isin(estados_abiertos)
+    )
+
+    mascara_abiertas = ~estados.isin(
+        estados_cerrados
     )
 
     return (
-        tabla.loc[mascara]
+        tabla.loc[mascara_abiertas]
         .copy()
         .reset_index(drop=True)
     )
-
 
 # ==========================================================
 # URGENCIAS ACTIVAS

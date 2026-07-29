@@ -117,6 +117,15 @@ COLUMNAS_ANULACIONES = [
 ]
 
 
+
+
+COLUMNAS_CONFIRMACIONES_INGRESO_OC = [
+    "OrdenCompra",
+    "FechaConfirmadaIngreso",
+    "UsuarioConfirmacion",
+    "FechaRegistro",
+]
+
 COLUMNAS_CANCELACIONES_ENTREGA = [
     "CancelacionEntregaID",
     "Remito",
@@ -163,6 +172,8 @@ ESTRUCTURA_HOJAS = {
     "ReclamosDetalle": COLUMNAS_RECLAMOS_DETALLE,
 
     "ReclamosFotos": COLUMNAS_RECLAMOS_FOTOS,
+
+    "ConfirmacionesIngresoOC": COLUMNAS_CONFIRMACIONES_INGRESO_OC,
 
 }
 

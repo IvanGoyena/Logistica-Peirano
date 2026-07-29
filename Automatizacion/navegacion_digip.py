@@ -257,7 +257,7 @@ def ir_a_home(
     callback: CallbackEstado | None = None,
 ) -> None:
     registrar_paso(
-        "1/5 — Abriendo HOME de DIGIP...",
+        "1/4 — Abriendo HOME de DIGIP...",
         callback,
     )
 
@@ -293,7 +293,7 @@ def abrir_preparaciones(
     callback: CallbackEstado | None = None,
 ) -> None:
     registrar_paso(
-        "2/5 — Buscando acceso a Preparaciones...",
+        "2/4 — Buscando acceso a Preparaciones...",
         callback,
     )
 
@@ -408,50 +408,59 @@ def abrir_menu_opciones(
         ) from error
 
 
-def abrir_nueva(
+def abrir_boton_nueva_preparacion(
     page: Page,
     callback: CallbackEstado | None = None,
 ) -> None:
+    """
+    Abre la pantalla de creación desde el botón verde
+    "Nueva preparación" del listado de preparaciones.
+    """
+
     registrar_paso(
-        "4/5 — Buscando la opción Nueva...",
+        "3/4 — Buscando el botón Nueva preparación...",
         callback,
     )
 
     candidatos = [
         page.get_by_role(
-            "menuitem",
-            name="Nueva",
-            exact=False,
-        ),
-        page.get_by_role(
             "link",
-            name="Nueva",
+            name="Nueva preparación",
             exact=False,
         ),
         page.get_by_text(
-            "Nueva",
-            exact=True,
+            "Nueva preparación",
+            exact=False,
         ),
-        page.locator("a").filter(
-            has_text="Nueva"
+        page.locator(
+            "#ListadoPreparacion "
+            "> div.row.g-3 "
+            "> div "
+            "> div "
+            "> div "
+            "> div.row.align-items-center.mb-3 "
+            "> div.col-auto "
+            "> a"
         ),
-        page.locator("button").filter(
-            has_text="Nueva"
+        page.locator(
+            "#ListadoPreparacion a"
+        ).filter(
+            has_text="Nueva preparación"
         ),
     ]
 
     try:
-        opcion = primer_locator_visible(
+        boton = primer_locator_visible(
             candidatos=candidatos,
-            descripcion="opción Nueva",
+            descripcion="botón Nueva preparación",
             page=page,
             callback=callback,
         )
 
         click_reforzado(
-            locator=opcion,
+            locator=boton,
             page=page,
-            descripcion="Opción Nueva",
+            descripcion="Botón Nueva preparación",
             callback=callback,
         )
 
@@ -484,7 +493,7 @@ def filtrar_codigo_despacho(
         )
 
     registrar_paso(
-        f"5/5 — Filtrando CodigoDespacho = {codigo}...",
+        f"4/4 — Filtrando CodigoDespacho = {codigo}...",
         callback,
     )
 
@@ -530,17 +539,21 @@ def filtrar_codigo_despacho(
 
 def abrir_nueva_preparacion(
     page: Page,
-    codigo_despacho: str,
+    codigo_despacho: str = "",
     callback: CallbackEstado | None = None,
+    aplicar_filtro: bool = True,
 ) -> None:
     """
     Ejecuta el recorrido completo:
 
     HOME
     -> Preparaciones
-    -> OPCIONES
-    -> Nueva
-    -> filtro CodigoDespacho
+    -> botón Nueva preparación
+    -> filtro CodigoDespacho, solamente cuando corresponde
+
+    Para RETIRA u otras agrupaciones sin código de despacho,
+    aplicar_filtro=False deja visible la grilla completa para
+    buscar los pedidos directamente por número.
 
     El callback es opcional para conservar compatibilidad con
     las llamadas existentes.
@@ -557,25 +570,39 @@ def abrir_nueva_preparacion(
             callback=callback,
         )
 
-        abrir_menu_opciones(
+        abrir_boton_nueva_preparacion(
             page=page,
             callback=callback,
         )
 
-        abrir_nueva(
-            page=page,
-            callback=callback,
-        )
+        codigo = str(codigo_despacho).strip()
+        debe_filtrar = bool(aplicar_filtro and codigo)
 
-        filtrar_codigo_despacho(
-            page=page,
-            codigo_despacho=codigo_despacho,
-            callback=callback,
-        )
+        if debe_filtrar:
+            filtrar_codigo_despacho(
+                page=page,
+                codigo_despacho=codigo,
+                callback=callback,
+            )
+
+            mensaje_final = (
+                "NAVEGACIÓN COMPLETADA — "
+                f"CodigoDespacho filtrado: {codigo}"
+            )
+        else:
+            registrar_paso(
+                "No se aplicará filtro CodigoDespacho; "
+                "la grilla queda completa para buscar por pedido.",
+                callback,
+            )
+
+            mensaje_final = (
+                "NAVEGACIÓN COMPLETADA — "
+                "sin filtro CodigoDespacho"
+            )
 
         registrar_paso(
-            "NAVEGACIÓN COMPLETADA — "
-            f"CodigoDespacho filtrado: {codigo_despacho}",
+            mensaje_final,
             callback,
         )
 

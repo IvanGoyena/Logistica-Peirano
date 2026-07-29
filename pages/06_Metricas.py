@@ -89,9 +89,15 @@ MESES_CORTOS = {
     show_spinner=(
         "Leyendo, limpiando y enriqueciendo históricos..."
     ),
-    max_entries=1,
+    max_entries=2,
+    persist="disk",
 )
 def cargar_metricas():
+    """
+    Construye la base histórica completa y la conserva también
+    en disco. De esta forma, al reiniciar Streamlit no es
+    necesario repetir toda la ETL si las cachés siguen vigentes.
+    """
 
     fuentes = construir_fuentes_metricas(
         CARPETA_DATOS
@@ -132,6 +138,90 @@ def cargar_metricas():
         "tabla_volumetria": tabla_volumetria,
         "enriquecimiento": enriquecimiento,
     }
+
+
+@st.cache_data(
+    show_spinner="Preparando base analítica...",
+    max_entries=2,
+    persist="disk",
+)
+def preparar_base_analitica(
+    tareas_enriquecidas: pd.DataFrame,
+    detalle_enriquecido: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Deja lista la base operativa una sola vez.
+
+    Las normalizaciones de sectorización y fecha ya no se
+    repiten cada vez que el usuario cambia un filtro o una
+    pestaña del dashboard.
+    """
+
+    tareas = tareas_enriquecidas.copy()
+    detalle = detalle_enriquecido.copy()
+
+    sectorizacion_tareas = (
+        tareas["SectorizacionPrincipal"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    tareas = tareas.loc[
+        sectorizacion_tareas.ne("")
+        & sectorizacion_tareas.ne("NO APLICA")
+    ].copy()
+
+    sectorizacion_detalle = (
+        detalle["Sectorizacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    detalle = detalle.loc[
+        sectorizacion_detalle.ne("")
+        & sectorizacion_detalle.ne("NO APLICA")
+    ].copy()
+
+    tareas["Fecha"] = pd.to_datetime(
+        tareas["Fecha"],
+        errors="coerce",
+    )
+
+    # Tipos numéricos utilizados repetidamente por los KPIs
+    # y gráficos. Convertirlos aquí evita repetir coerciones.
+    columnas_numericas_tareas = [
+        "TiempoRealSegundos",
+        "UnidadesAnalisis",
+        "LineasDetalle",
+        "VolumenTotalM3",
+        "PesoTotalKg",
+    ]
+
+    for columna in columnas_numericas_tareas:
+        if columna in tareas.columns:
+            tareas[columna] = pd.to_numeric(
+                tareas[columna],
+                errors="coerce",
+            ).fillna(0)
+
+    columnas_numericas_detalle = [
+        "UnidadesDetalle",
+        "VolumenLineaM3",
+        "PesoLineaKg",
+    ]
+
+    for columna in columnas_numericas_detalle:
+        if columna in detalle.columns:
+            detalle[columna] = pd.to_numeric(
+                detalle[columna],
+                errors="coerce",
+            ).fillna(0)
+
+    return tareas, detalle
 
 
 # ==========================================================
@@ -744,28 +834,140 @@ def mostrar_insight(
     )
 
 
+
+def aplicar_formato_visual_plotly(
+    figura,
+    *,
+    mostrar_valores: bool = True,
+):
+    """Aplica una identidad visual oscura y consistente a Plotly."""
+
+    paleta = [
+        "#1E5A8A",
+        "#155E75",
+        "#166534",
+        "#854D0E",
+        "#7C2D12",
+        "#4C1D95",
+        "#374151",
+        "#0F766E",
+    ]
+
+    figura.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(
+            color="#D8DEE9",
+            family="Arial, sans-serif",
+        ),
+        colorway=paleta,
+        margin=dict(l=18, r=28, t=30, b=20),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#D8DEE9"),
+        ),
+        hoverlabel=dict(
+            bgcolor="#111827",
+            bordercolor="#334155",
+            font_color="#F8FAFC",
+        ),
+    )
+
+    figura.update_xaxes(
+        gridcolor="rgba(148,163,184,0.12)",
+        zerolinecolor="rgba(148,163,184,0.22)",
+        linecolor="rgba(148,163,184,0.22)",
+        tickfont=dict(color="#B8C2D0"),
+        title_font=dict(color="#D8DEE9"),
+    )
+    figura.update_yaxes(
+        gridcolor="rgba(148,163,184,0.12)",
+        zerolinecolor="rgba(148,163,184,0.22)",
+        linecolor="rgba(148,163,184,0.22)",
+        tickfont=dict(color="#B8C2D0"),
+        title_font=dict(color="#D8DEE9"),
+    )
+
+    for traza in figura.data:
+        tipo = getattr(traza, "type", "")
+
+        if tipo == "pie":
+            traza.update(
+                hole=max(float(getattr(traza, "hole", 0) or 0), 0.56),
+                textposition="auto",
+                textinfo="label+percent",
+                marker=dict(
+                    line=dict(
+                        color="#0B1119",
+                        width=2,
+                    )
+                ),
+                sort=False,
+            )
+
+        elif tipo == "bar" and mostrar_valores:
+            orientacion = getattr(traza, "orientation", None)
+
+            if orientacion == "h":
+                traza.update(
+                    texttemplate="%{x:,.0f}",
+                    textposition="outside",
+                    cliponaxis=False,
+                )
+            else:
+                traza.update(
+                    texttemplate="%{y:,.0f}",
+                    textposition="outside",
+                    cliponaxis=False,
+                )
+
+        elif tipo == "scatter":
+            modo = str(getattr(traza, "mode", "") or "")
+            if "lines" in modo:
+                traza.update(
+                    line=dict(width=3),
+                    marker=dict(size=8),
+                )
+
+    return figura
+
+
 # ==========================================================
 # ESTILO
 # ==========================================================
+
 
 st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1.4rem;
+        padding-top: 1.15rem;
         padding-bottom: 3rem;
     }
 
     [data-testid="stMetric"] {
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 14px;
-        padding: 0.82rem 0.88rem;
-        background: rgba(128, 128, 128, 0.04);
+        background:
+            linear-gradient(
+                145deg,
+                rgba(24, 34, 47, 0.98),
+                rgba(11, 17, 25, 0.98)
+            );
+        border: 1px solid #2A3543;
+        border-radius: 12px;
+        padding: 0.95rem 1rem;
         min-height: 122px;
     }
 
+    [data-testid="stMetricLabel"] {
+        color: #D8DEE9;
+        font-weight: 600;
+    }
+
     [data-testid="stMetricValue"] {
-        font-size: 1.62rem;
+        color: #F8FAFC;
+        font-size: 1.65rem;
+        font-weight: 700;
     }
 
     [data-testid="stMetricDelta"] {
@@ -773,38 +975,117 @@ st.markdown(
         white-space: normal;
     }
 
-    [data-testid="stMetricLabel"] {
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(15, 23, 34, 0.62);
+        border-color: #2A3543;
+        border-radius: 12px;
+    }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #2A3543;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    button[data-baseweb="tab"] {
         font-weight: 600;
     }
 
+    .operativo-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin: 0.65rem 0 1.15rem 0;
+    }
+
+    .operativo-kpi-card {
+        min-height: 126px;
+        padding: 0.95rem 1rem;
+        border: 1px solid #2A3543;
+        border-radius: 12px;
+        background:
+            linear-gradient(
+                145deg,
+                rgba(24, 34, 47, 0.98),
+                rgba(11, 17, 25, 0.98)
+            );
+    }
+
+    .operativo-kpi-label {
+        color: #D8DEE9;
+        font-size: 0.82rem;
+        font-weight: 600;
+        min-height: 2.1rem;
+    }
+
+    .operativo-kpi-value {
+        color: #F8FAFC;
+        font-size: 1.72rem;
+        font-weight: 750;
+        margin-top: 0.36rem;
+        line-height: 1.05;
+    }
+
+    .operativo-kpi-detail {
+        color: #93A4B8;
+        font-size: 0.76rem;
+        margin-top: 0.52rem;
+        line-height: 1.25;
+    }
+
+    @media (max-width: 1100px) {
+        .operativo-kpi-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 680px) {
+        .operativo-kpi-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <style>
     .insight-card {
         display: flex;
         gap: 0.8rem;
         align-items: flex-start;
-        padding: 0.9rem;
-        border: 1px solid rgba(128, 128, 128, 0.22);
+        padding: 0.95rem;
+        border: 1px solid #2A3543;
         border-radius: 12px;
-        margin-bottom: 0.65rem;
-        background: rgba(128, 128, 128, 0.04);
+        margin-bottom: 0.7rem;
+        background:
+            linear-gradient(
+                145deg,
+                rgba(24, 34, 47, 0.96),
+                rgba(11, 17, 25, 0.96)
+            );
     }
 
     .insight-icon {
-        font-size: 1.25rem;
+        font-size: 1.28rem;
         line-height: 1.3;
     }
 
     .insight-title {
+        color: #F8FAFC;
         font-weight: 700;
-        margin-bottom: 0.18rem;
+        margin-bottom: 0.2rem;
     }
 
     .insight-text {
-        opacity: 0.84;
-        font-size: 0.92rem;
+        color: #AAB7C7;
+        font-size: 0.9rem;
     }
 
     .section-caption {
-        opacity: 0.72;
+        color: #93A4B8;
         margin-top: -0.45rem;
         margin-bottom: 0.8rem;
     }
@@ -812,6 +1093,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 
 # ==========================================================
@@ -844,6 +1126,7 @@ with actualizar_col:
 if actualizar:
 
     cargar_metricas.clear()
+    preparar_base_analitica.clear()
 
     st.toast(
         "Datos actualizados correctamente.",
@@ -876,65 +1159,14 @@ fuentes = datos["fuentes"]
 etl = datos["etl"]
 enriquecimiento = datos["enriquecimiento"]
 
-df_tareas = enriquecimiento[
-    "tareas_enriquecidas"
-].copy()
-
-df_detalle = enriquecimiento[
-    "detalle_enriquecido"
-].copy()
+df_tareas, df_detalle = preparar_base_analitica(
+    enriquecimiento["tareas_enriquecidas"],
+    enriquecimiento["detalle_enriquecido"],
+)
 
 df_calidad_enriquecimiento = enriquecimiento[
     "calidad_enriquecimiento"
 ]
-
-
-# ==========================================================
-# EXCLUSIÓN DE PEDIDOS INTERNOS
-# ==========================================================
-#
-# Los registros sin sectorización o con Sectorización
-# "NO APLICA" corresponden a movimientos/pedidos internos
-# que no deben impactar el tablero operativo.
-#
-# Se excluyen únicamente de la base analítica del dashboard.
-# Los datos crudos y la Auditoría ETL continúan conservándolos.
-# ==========================================================
-
-sectorizacion_tareas = (
-    df_tareas["SectorizacionPrincipal"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-    .str.upper()
-)
-
-mascara_tareas_operativas = (
-    sectorizacion_tareas.ne("")
-    & sectorizacion_tareas.ne("NO APLICA")
-)
-
-df_tareas = df_tareas[
-    mascara_tareas_operativas
-].copy()
-
-
-sectorizacion_detalle = (
-    df_detalle["Sectorizacion"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-    .str.upper()
-)
-
-mascara_detalle_operativo = (
-    sectorizacion_detalle.ne("")
-    & sectorizacion_detalle.ne("NO APLICA")
-)
-
-df_detalle = df_detalle[
-    mascara_detalle_operativo
-].copy()
 
 
 if df_tareas.empty:
@@ -945,11 +1177,6 @@ if df_tareas.empty:
 
     st.stop()
 
-
-df_tareas["Fecha"] = pd.to_datetime(
-    df_tareas["Fecha"],
-    errors="coerce",
-)
 
 fecha_minima = df_tareas["Fecha"].min()
 fecha_maxima = df_tareas["Fecha"].max()
@@ -1480,6 +1707,8 @@ if vista_principal == "🏠 Resumen":
             gridcolor="rgba(128,128,128,0.18)",
         )
 
+        aplicar_formato_visual_plotly(fig_evolucion)
+
         st.plotly_chart(
             fig_evolucion,
             width="stretch",
@@ -1575,6 +1804,27 @@ if vista_principal == "🏠 Resumen":
             ),
         )
 
+        total_mix = int(
+            pd.to_numeric(
+                mix_categorias["UnidadesDetalle"],
+                errors="coerce",
+            ).fillna(0).sum()
+        )
+
+        fig_mix.add_annotation(
+            text=(
+                f"<b>{formatear_entero(total_mix)}</b>"
+                "<br><span style='font-size:12px'>Unidades</span>"
+            ),
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(
+                size=20,
+                color="#F8FAFC",
+            ),
+        )
+
         fig_mix.update_layout(
             height=360,
             margin=dict(
@@ -1590,6 +1840,8 @@ if vista_principal == "🏠 Resumen":
                 y=0.5,
             ),
         )
+
+        aplicar_formato_visual_plotly(fig_mix)
 
         st.plotly_chart(
             fig_mix,
@@ -1718,6 +1970,8 @@ if vista_principal == "🏠 Resumen":
         fig_top.update_xaxes(
             gridcolor="rgba(128,128,128,0.18)",
         )
+
+        aplicar_formato_visual_plotly(fig_top)
 
         st.plotly_chart(
             fig_top,
@@ -1852,6 +2106,8 @@ if vista_principal == "🏠 Resumen":
             gridcolor="rgba(128,128,128,0.18)",
         )
 
+        aplicar_formato_visual_plotly(fig_carga)
+
         st.plotly_chart(
             fig_carga,
             width="stretch",
@@ -1951,6 +2207,8 @@ if vista_principal == "🏠 Resumen":
             gridcolor="rgba(128,128,128,0.18)",
         )
 
+        aplicar_formato_visual_plotly(fig_prod_familia)
+
         st.plotly_chart(
             fig_prod_familia,
             width="stretch",
@@ -2049,6 +2307,8 @@ if vista_principal == "⚡ Productividad":
             showlegend=False,
         )
 
+        aplicar_formato_visual_plotly(fig_prod_proceso)
+
         st.plotly_chart(
             fig_prod_proceso,
             width="stretch",
@@ -2106,6 +2366,8 @@ if vista_principal == "⚡ Productividad":
             ),
             showlegend=False,
         )
+
+        aplicar_formato_visual_plotly(fig_tiempo)
 
         st.plotly_chart(
             fig_tiempo,
@@ -2281,6 +2543,8 @@ if vista_principal == "⚡ Productividad":
         legend_title_text="",
     )
 
+    aplicar_formato_visual_plotly(fig_hora)
+
     st.plotly_chart(
         fig_hora,
         width="stretch",
@@ -2362,6 +2626,8 @@ if vista_principal == "📦 Productos":
             ),
             showlegend=False,
         )
+
+        aplicar_formato_visual_plotly(fig_familias)
 
         st.plotly_chart(
             fig_familias,
@@ -2464,6 +2730,8 @@ if vista_principal == "📦 Productos":
             ),
             showlegend=False,
         )
+
+        aplicar_formato_visual_plotly(fig_abc)
 
         st.plotly_chart(
             fig_abc,

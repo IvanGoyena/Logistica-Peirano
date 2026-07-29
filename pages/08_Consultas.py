@@ -266,7 +266,7 @@ def abrir_detalle_solicitud(
             guardar_cambios = st.form_submit_button(
                 "💾 Guardar cambios",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
 
         if guardar_cambios:
@@ -284,6 +284,7 @@ def abrir_detalle_solicitud(
                     "Solicitud actualizada.",
                     icon="✅",
                 )
+                invalidar_cache_gestion()
                 st.rerun()
 
             except Exception as error:
@@ -306,7 +307,7 @@ def abrir_detalle_solicitud(
         eliminar = st.button(
             "🚫 Cancelar solicitud",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not confirmar,
             key=f"btn_eliminar_{solicitud_id}",
         )
@@ -330,6 +331,7 @@ def abrir_detalle_solicitud(
                     "Solicitud cancelada.",
                     icon="🚫",
                 )
+                invalidar_cache_gestion()
                 st.rerun()
 
             except Exception as error:
@@ -575,6 +577,7 @@ def cargar_datos_consultas() -> dict[str, pd.DataFrame]:
 # TABLA OPERATIVA
 # ==========================================================
 
+@st.cache_data(show_spinner=False)
 def construir_tabla_operativa(
     datos: dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
@@ -586,6 +589,133 @@ def construir_tabla_operativa(
         datos["clientes"].copy(),
         datos["volumetria"].copy(),
     )
+
+    # ======================================================
+    # RECUPERAR PEDIDOS DIGIP SIN DETALLE / ERP
+    # ======================================================
+    #
+    # models.pedidos conserva únicamente pedidos que ya tienen
+    # detalle consolidado. Para Consultas Comerciales necesitamos
+    # mostrar también pedidos recién transmitidos que todavía no
+    # fueron enriquecidos por Detalle Pendientes o por el ERP.
+    #
+    # Esta recuperación se hace solamente en este módulo para no
+    # modificar el comportamiento de Pedidos, Despachos u otros
+    # consumidores de models.pedidos.
+    # ======================================================
+
+    pedidos_digip_base = datos["pedidos"].copy()
+
+    if not pedidos_digip_base.empty and "Codigo" in pedidos_digip_base.columns:
+
+        codigo_normalizado = (
+            pedidos_digip_base["Codigo"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        pedidos_digip_base["Pedido"] = (
+            codigo_normalizado
+            .str.split()
+            .str[1]
+            .str.split("-")
+            .str[0]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        # Mantener el mismo universo operativo del modelo compartido:
+        # pedidos pendientes o con preparación, pero sin exigir detalle.
+        estado_digip = (
+            pedidos_digip_base.get(
+                "Estado",
+                pd.Series("", index=pedidos_digip_base.index),
+            )
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        pedidos_digip_base = pedidos_digip_base.loc[
+            estado_digip.isin(
+                [
+                    "Pendiente",
+                    "Preparacion",
+                ]
+            )
+            & pedidos_digip_base["Pedido"].ne("")
+        ].copy()
+
+        pedidos_presentes = set(
+            tabla["Pedido"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+
+        pedidos_faltantes = pedidos_digip_base.loc[
+            ~pedidos_digip_base["Pedido"].isin(pedidos_presentes)
+        ].copy()
+
+        if not pedidos_faltantes.empty:
+
+            # Columnas que normalmente aporta el detalle consolidado.
+            valores_defecto = {
+                "TotalUnidades": 0,
+                "TotalM3": 0.0,
+                "TotalSKUs": 0,
+                "CantidadFamilias": 0,
+                "DetalleFamilias": "Sin detalle disponible",
+            }
+
+            for columna, valor in valores_defecto.items():
+                if columna not in pedidos_faltantes.columns:
+                    pedidos_faltantes[columna] = valor
+                else:
+                    pedidos_faltantes[columna] = (
+                        pedidos_faltantes[columna].fillna(valor)
+                    )
+
+            columnas_descartar = [
+                "PedidoID",
+                "Codigo",
+                "CodigoDeEnvio",
+                "ServicioDeEnvioTipo",
+                "OrdenPreparacion",
+                "DespachoID",
+                "ClienteID",
+                "Tags",
+            ]
+
+            pedidos_faltantes = pedidos_faltantes.drop(
+                columns=columnas_descartar,
+                errors="ignore",
+            )
+
+            # Alinear estructuras sin perder columnas existentes.
+            columnas_union = list(
+                dict.fromkeys(
+                    list(tabla.columns)
+                    + list(pedidos_faltantes.columns)
+                )
+            )
+
+            tabla = tabla.reindex(columns=columnas_union)
+            pedidos_faltantes = pedidos_faltantes.reindex(
+                columns=columnas_union
+            )
+
+            tabla = pd.concat(
+                [
+                    tabla,
+                    pedidos_faltantes,
+                ],
+                ignore_index=True,
+                sort=False,
+            )
 
     tabla_transmisiones = construir_tabla_transmisiones(
         datos["transmisiones"].copy()
@@ -770,7 +900,129 @@ def construir_tabla_operativa(
         ),
     )
 
+    # Los pedidos recién transmitidos pueden no tener todavía
+    # información ERP, transmisión o detalle. Se mantienen visibles
+    # con valores neutros en lugar de eliminarlos.
+    columnas_texto_consultas = [
+        "Pedido",
+        "ClienteCodigo",
+        "ClienteDescripcion",
+        "Estado",
+        "PreparacionEstado",
+        "PreparacionID",
+        "CodigoDespacho",
+        "DespachoDescripcion",
+        "DetalleFamilias",
+        "NroEnvioERP",
+        "EstadoTransmisionERP",
+        "HoraTransmisionERP",
+        "Planificacion",
+    ]
+
+    for columna in columnas_texto_consultas:
+        if columna not in tabla.columns:
+            tabla[columna] = ""
+        tabla[columna] = (
+            tabla[columna]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+    if "DetalleFamilias" in tabla.columns:
+        tabla["DetalleFamilias"] = tabla[
+            "DetalleFamilias"
+        ].replace("", "Sin detalle disponible")
+
+    for columna in [
+        "TotalUnidades",
+        "TotalSKUs",
+        "CantidadFamilias",
+        "ImporteERP",
+    ]:
+        if columna not in tabla.columns:
+            tabla[columna] = 0
+        tabla[columna] = (
+            pd.to_numeric(
+                tabla[columna],
+                errors="coerce",
+            )
+            .fillna(0)
+            .astype(int)
+        )
+
+    if "TotalM3" not in tabla.columns:
+        tabla["TotalM3"] = 0.0
+
+    tabla["TotalM3"] = (
+        pd.to_numeric(
+            tabla["TotalM3"],
+            errors="coerce",
+        )
+        .fillna(0)
+        .round(3)
+    )
+
     return tabla
+
+
+@st.cache_data(show_spinner=False)
+def construir_tabla_consultas_cache(
+    tabla_operativa: pd.DataFrame,
+    df_tareas: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Construye la tabla final una sola vez por versión de los datos.
+    Los reruns provocados por filtros, selecciones y diálogos reutilizan
+    este resultado en memoria.
+    """
+    return construir_tabla_consultas(
+        tabla_operativa.copy(),
+        df_tareas=df_tareas.copy(),
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_gestion_comercial_cache() -> dict[str, pd.DataFrame]:
+    """
+    Centraliza las lecturas de Google Sheets relacionadas con solicitudes,
+    urgencias y reclamos. El TTL evita consultar nuevamente en cada clic.
+    """
+    return {
+        "urgencias_activas": obtener_urgencias_activas(),
+        "solicitudes_abiertas": obtener_solicitudes_abiertas(),
+        "solicitudes_totales": obtener_historial_solicitudes(),
+        "urgencias_totales": obtener_historial_urgencias(),
+        "reclamos_totales": obtener_historial_reclamos(),
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_cancelaciones_cache() -> dict[str, pd.DataFrame]:
+    return {
+        "totales": obtener_historial_cancelaciones(),
+        "activas": obtener_cancelaciones_activas(),
+    }
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cargar_urgencias_digip_cache() -> dict[str, object]:
+    return {
+        "urgencias": obtener_urgencias_pendientes_digip(),
+        "pedidos": obtener_pedidos_pendientes_digip(),
+    }
+
+
+def invalidar_cache_gestion() -> None:
+    """
+    Limpia únicamente la información que puede cambiar después de
+    registrar, editar o cerrar una gestión. No vuelve a descargar los
+    reportes operativos del WMS/ERP.
+    """
+    cargar_gestion_comercial_cache.clear()
+    cargar_cancelaciones_cache.clear()
+    cargar_urgencias_digip_cache.clear()
 
 
 # ==========================================================
@@ -869,7 +1121,7 @@ def mostrar_historial_solicitudes(
     })
 
     st.dataframe(
-        vista, use_container_width=True, hide_index=True,
+        vista, width="stretch", hide_index=True,
         height=min(420, 85 + len(vista) * 35),
         key="tabla_historico_solicitudes",
     )
@@ -939,7 +1191,7 @@ def mostrar_historial_urgencias(
     })
 
     st.dataframe(
-        vista, use_container_width=True, hide_index=True,
+        vista, width="stretch", hide_index=True,
         height=min(420, 85 + len(vista) * 35),
         key="tabla_historico_urgencias",
     )
@@ -1001,15 +1253,10 @@ def construir_opciones_clientes_cancelacion(
     return ["Seleccionar cliente..."] + opciones
 
 
-def obtener_telefono_cancelaciones() -> str:
-    """Obtiene el teléfono de prueba desde Secrets o usa el número empresarial."""
-
-    try:
-        telefono = str(st.secrets.get("WHATSAPP_CANCELACIONES", "")).strip()
-    except Exception:
-        telefono = ""
-
-    return telefono or "5491172151924"
+DESTINATARIOS_WHATSAPP = {
+    "Leo": "5491124714063",
+    "Juanma": "5491133914080",
+}
 
 
 def construir_mensaje_whatsapp_cancelacion(registro: dict) -> str:
@@ -1034,8 +1281,7 @@ def construir_mensaje_whatsapp_cancelacion(registro: dict) -> str:
     )
 
 
-def construir_url_whatsapp_cancelacion(registro: dict) -> str:
-    telefono = obtener_telefono_cancelaciones()
+def construir_url_whatsapp_cancelacion(registro: dict, telefono: str) -> str:
     mensaje = construir_mensaje_whatsapp_cancelacion(registro)
     return f"https://wa.me/{telefono}?text={quote(mensaje)}"
 
@@ -1084,7 +1330,7 @@ def mostrar_historial_cancelaciones_entrega(cancelaciones: pd.DataFrame) -> None
 
     st.dataframe(
         vista,
-        use_container_width=True,
+         width="stretch",
         hide_index=True,
         height=min(420, 85 + len(vista) * 35),
         key="tabla_historico_cancelaciones_entrega",
@@ -1128,7 +1374,7 @@ with col_historico:
     if st.button(
         texto_historico,
         icon="📚",
-        use_container_width=True,
+        width="stretch",
         key="btn_historico_reclamos_consultas",
     ):
         st.session_state["mostrar_historico_reclamos"] = (
@@ -1139,11 +1385,14 @@ with col_historico:
 with col_actualizar:
     actualizar = st.button(
         "🔄 Actualizar",
-        use_container_width=True,
+        width="stretch",
     )
 
 if actualizar:
     cargar_datos_consultas.clear()
+    construir_tabla_operativa.clear()
+    construir_tabla_consultas_cache.clear()
+    invalidar_cache_gestion()
     st.rerun()
 
 
@@ -1158,16 +1407,18 @@ try:
         datos
     )
 
-    tabla_consultas = construir_tabla_consultas(
+    tabla_consultas = construir_tabla_consultas_cache(
         tabla_operativa,
-        df_tareas=datos["tareas"],
+        datos["tareas"],
     )
+
+    gestion_cache = cargar_gestion_comercial_cache()
 
     # ------------------------------------------------------
     # URGENCIAS ACTIVAS
     # ------------------------------------------------------
 
-    urgencias_activas = obtener_urgencias_activas()
+    urgencias_activas = gestion_cache["urgencias_activas"]
 
     if urgencias_activas is None:
         urgencias_activas = pd.DataFrame()
@@ -1225,7 +1476,7 @@ try:
     # SOLICITUDES ABIERTAS
     # ------------------------------------------------------
 
-    solicitudes_abiertas = obtener_solicitudes_abiertas()
+    solicitudes_abiertas = gestion_cache["solicitudes_abiertas"]
 
     if solicitudes_abiertas is None:
         solicitudes_abiertas = pd.DataFrame()
@@ -1292,9 +1543,10 @@ with espacio_boton_reclamo.container():
 # KPIs GENERALES DE GESTIÓN
 # ==========================================================
 
-solicitudes_totales = obtener_historial_solicitudes()
-urgencias_totales = obtener_historial_urgencias()
-reclamos_totales = obtener_historial_reclamos()
+gestion_cache = cargar_gestion_comercial_cache()
+solicitudes_totales = gestion_cache["solicitudes_totales"]
+urgencias_totales = gestion_cache["urgencias_totales"]
+reclamos_totales = gestion_cache["reclamos_totales"]
 
 if solicitudes_totales is None:
     solicitudes_totales = pd.DataFrame()
@@ -1606,7 +1858,7 @@ if st.session_state["mostrar_historico_reclamos"]:
 
         evento_reclamos_consultas = st.dataframe(
             tabla_reclamos_consultas,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(
                 430,
@@ -1687,7 +1939,7 @@ if st.session_state["mostrar_historico_reclamos"]:
             ver_detalle_reclamo = st.button(
                 "🧾 Ver detalle",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 disabled=not bool(
                     filas_reclamos_consultas
                 ),
@@ -1778,15 +2030,17 @@ with can_titulo:
 with can_historial:
     if st.button(
         "Ocultar histórico" if st.session_state["mostrar_historico_cancelaciones_entrega"] else "📚 Histórico",
-        use_container_width=True, key="btn_historico_cancelaciones_entrega"):
+        width="stretch", key="btn_historico_cancelaciones_entrega"):
         st.session_state["mostrar_historico_cancelaciones_entrega"] = not st.session_state["mostrar_historico_cancelaciones_entrega"]
         st.rerun()
 
 try:
-    cancelaciones_totales = obtener_historial_cancelaciones()
-    cancelaciones_activas = obtener_cancelaciones_activas()
+    cancelaciones_cache = cargar_cancelaciones_cache()
+    cancelaciones_totales = cancelaciones_cache["totales"]
+    cancelaciones_activas = cancelaciones_cache["activas"]
 except Exception as error:
-    cancelaciones_totales = pd.DataFrame(); cancelaciones_activas = pd.DataFrame()
+    cancelaciones_totales = pd.DataFrame()
+    cancelaciones_activas = pd.DataFrame()
     st.error(f"No se pudieron leer las cancelaciones de entrega: {error}")
 
 if st.session_state["mostrar_historico_cancelaciones_entrega"]:
@@ -1804,33 +2058,81 @@ with st.expander("➕ Cargar cancelación de entrega", expanded=False):
         with c2:
             motivo_cancelacion=st.selectbox("Motivo *",options=["Devolución del cliente","Error de carga del vendedor","Pedido duplicado","Error de carga de productos","Otros"])
             observacion_cancelacion=st.text_area("Observación")
-        telefono_prueba=obtener_telefono_cancelaciones()
-        st.caption(f"El aviso se preparará para el WhatsApp: **{telefono_prueba}**")
-        cargar_cancelacion=st.form_submit_button("🚨 Registrar y preparar WhatsApp",type="primary",use_container_width=True)
+        st.caption(
+            "La alerta se preparará para **Leo y Juanma**. "
+            "Después de registrar la cancelación aparecerán dos botones de WhatsApp."
+        )
+        cargar_cancelacion=st.form_submit_button(
+            "🚨 Registrar y preparar WhatsApp",
+            type="primary",
+            width="stretch",
+        )
     if cargar_cancelacion:
         usuario_cancelacion=st.session_state.get("usuario") or st.session_state.get("nombre_usuario") or "Usuario app"
         if cliente_cancelacion=="Seleccionar cliente...":
             st.error("Seleccioná un cliente.")
         else:
             try:
-                resultado=guardar_cancelacion_entrega(remito_cancelacion,cliente_cancelacion,motivo_cancelacion,observacion_cancelacion,usuario_cancelacion,telefono_prueba)
-                if resultado.get("duplicado"): st.warning(resultado["mensaje"])
+                telefonos_destino = " | ".join(DESTINATARIOS_WHATSAPP.values())
+                resultado=guardar_cancelacion_entrega(
+                    remito_cancelacion,
+                    cliente_cancelacion,
+                    motivo_cancelacion,
+                    observacion_cancelacion,
+                    usuario_cancelacion,
+                    telefonos_destino,
+                )
+                if resultado.get("duplicado"):
+                    st.warning(resultado["mensaje"])
                 else:
-                    st.session_state["ultima_cancelacion_whatsapp"]={"id":resultado["id"],"url":construir_url_whatsapp_cancelacion(resultado["registro"]),"registro":resultado["registro"]}
-                    st.success("Cancelación registrada. Abrí WhatsApp y enviá la alerta.")
-            except Exception as error: st.error(f"No se pudo registrar: {error}")
+                    urls_whatsapp = {
+                        nombre: construir_url_whatsapp_cancelacion(
+                            resultado["registro"], telefono
+                        )
+                        for nombre, telefono in DESTINATARIOS_WHATSAPP.items()
+                    }
+                    st.session_state["ultima_cancelacion_whatsapp"] = {
+                        "id": resultado["id"],
+                        "urls": urls_whatsapp,
+                        "registro": resultado["registro"],
+                    }
+                    invalidar_cache_gestion()
+                    st.success(
+                        "Cancelación registrada. Enviá la alerta a Leo y a Juanma."
+                    )
+            except Exception as error:
+                st.error(f"No se pudo registrar: {error}")
 
 ultima=st.session_state.get("ultima_cancelacion_whatsapp")
 if ultima:
-    st.error("🚨 Aviso pendiente de envío.")
-    w1,w2=st.columns([3,1.25])
-    with w1: st.link_button("📲 Abrir WhatsApp con la alerta",ultima["url"],type="primary",use_container_width=True)
+    st.error("🚨 Aviso pendiente de envío a Leo y Juanma.")
+    urls_whatsapp = ultima.get("urls", {})
+    w1,w2,w3=st.columns([1.4,1.4,1.1])
+    with w1:
+        st.link_button(
+            "📲 Enviar a Leo",
+            urls_whatsapp.get("Leo", "#"),
+            type="primary",
+            width="stretch",
+        )
     with w2:
-        if st.button("✅ Confirmar envío",use_container_width=True,key="btn_confirmar_whatsapp_enviado"):
+        st.link_button(
+            "📲 Enviar a Juanma",
+            urls_whatsapp.get("Juanma", "#"),
+            type="primary",
+            width="stretch",
+        )
+    with w3:
+        if st.button(
+            "✅ Confirmar ambos",
+            width="stretch",
+            key="btn_confirmar_whatsapp_enviado",
+        ):
             usuario=st.session_state.get("usuario") or st.session_state.get("nombre_usuario") or "Usuario app"
             confirmar_envio_whatsapp(ultima["id"],usuario)
             st.session_state["ultima_cancelacion_whatsapp"]=None
-            st.success("Aviso enviado y gestión derivada a Logística.")
+            invalidar_cache_gestion()
+            st.success("Avisos enviados y gestión derivada a Logística.")
             st.rerun()
 
 if cancelaciones_activas.empty:
@@ -1842,14 +2144,15 @@ else:
     columnas=["Remito","Cliente","Motivo","EstadoComercial","ResponsableGestion","UltimaActualizacion","ResultadoFinal","Fecha"]
     columnas=[c for c in columnas if c in vista.columns]
     st.markdown("#### Seguimiento de cancelaciones abiertas")
-    st.dataframe(vista[columnas].rename(columns={"EstadoComercial":"Estado","ResponsableGestion":"Responsable Logística","UltimaActualizacion":"Última actualización","ResultadoFinal":"Resultado"}),use_container_width=True,hide_index=True)
+    st.dataframe(vista[columnas].rename(columns={"EstadoComercial":"Estado","ResponsableGestion":"Responsable Logística","UltimaActualizacion":"Última actualización","ResultadoFinal":"Resultado"}),width="stretch",hide_index=True)
 
 
 # GESTIÓN DE URGENCIAS DIGIP
 # ==========================================================
 
-urgencias_digip = obtener_urgencias_pendientes_digip()
-pedidos_urgentes_digip = obtener_pedidos_pendientes_digip()
+urgencias_digip_cache = cargar_urgencias_digip_cache()
+urgencias_digip = urgencias_digip_cache["urgencias"]
+pedidos_urgentes_digip = urgencias_digip_cache["pedidos"]
 
 roles_ejecucion_urgencias = {
     "admin",
@@ -2037,7 +2340,7 @@ with urg_historial:
         "Ocultar histórico"
         if st.session_state["mostrar_historico_urgencias"]
         else "📚 Histórico",
-        use_container_width=True,
+        width="stretch",
         key="btn_historico_urgencias",
     ):
         st.session_state["mostrar_historico_urgencias"] = (
@@ -2096,7 +2399,7 @@ with urg_col_3:
     enviar_urgentes_worker = st.button(
         "🚀 Enviar al worker",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=(
             orden_urgentes is None
             or not puede_ejecutar_urgencias
@@ -2156,6 +2459,7 @@ if enviar_urgentes_worker and orden_urgentes:
         marcar_lote_procesando(
             pedidos_a_procesar
         )
+        invalidar_cache_gestion()
 
         st.session_state[
             "orden_worker_urgentes"
@@ -2227,6 +2531,7 @@ if orden_worker_urgentes:
                         "en el despacho URGENTES."
                     ),
                 )
+                invalidar_cache_gestion()
 
                 st.session_state[
                     clave_aplicada
@@ -2250,6 +2555,7 @@ if orden_worker_urgentes:
                     pedidos_orden,
                     mensaje=mensaje_orden,
                 )
+                invalidar_cache_gestion()
 
                 st.session_state[
                     clave_aplicada
@@ -2297,7 +2603,7 @@ with sol_historial:
         "Ocultar histórico"
         if st.session_state["mostrar_historico_solicitudes"]
         else "📚 Histórico",
-        use_container_width=True,
+        width="stretch",
         key="btn_historico_solicitudes",
     ):
         st.session_state["mostrar_historico_solicitudes"] = (
@@ -2364,7 +2670,7 @@ else:
 
     evento_solicitudes_superior = st.dataframe(
         tabla_solicitudes_superior,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=min(
             420,
@@ -2453,7 +2759,7 @@ else:
         gestionar_solicitud_superior = st.button(
             "📩 Gestionar",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not bool(
                 filas_solicitudes_superior
             ),
@@ -2679,7 +2985,7 @@ def abrir_detalle_pedido(
                     confirmar_urgencia = st.form_submit_button(
                         texto_boton_urgencia,
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 if confirmar_urgencia:
@@ -2751,6 +3057,7 @@ def abrir_detalle_pedido(
                                 icon="🚨",
                             )
 
+                        invalidar_cache_gestion()
                         st.rerun()
 
                     except Exception as error:
@@ -2801,7 +3108,7 @@ def abrir_detalle_pedido(
                 confirmar_solicitud = st.form_submit_button(
                     "📩 Registrar solicitud",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
             if confirmar_solicitud:
@@ -2830,6 +3137,7 @@ def abrir_detalle_pedido(
                         icon="📩",
                     )
 
+                    invalidar_cache_gestion()
                     st.rerun()
 
                 except Exception as error:
@@ -2912,13 +3220,13 @@ with st.form(
         aplicar = st.form_submit_button(
             "🔎 Buscar",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     with limpiar_col:
         limpiar = st.form_submit_button(
             "🧹 Quitar filtro",
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -3045,65 +3353,18 @@ st.caption(
     ).replace(",", ".")
 )
 
-pedido_seleccionado_guardado = st.session_state.get(
-    "consulta_pedido_seleccionado",
-    "",
-)
-
-cabecera_tabla_1, cabecera_tabla_2 = st.columns(
-    [5, 1],
-    vertical_alignment="center",
-)
-
-with cabecera_tabla_1:
-    if pedido_seleccionado_guardado:
-        coincidencia_seleccionada = tabla_visible_pedidos[
-            tabla_visible_pedidos["Pedido"]
-            .astype(str)
-            .eq(str(pedido_seleccionado_guardado))
-        ]
-
-        if not coincidencia_seleccionada.empty:
-            fila_seleccionada_guardada = (
-                coincidencia_seleccionada.iloc[0]
-            )
-
-            st.caption(
-                f"Seleccionado: pedido "
-                f"**{fila_seleccionada_guardada['Pedido']}** · "
-                f"{fila_seleccionada_guardada['Cliente']}"
-            )
-        else:
-            st.caption(
-                "Seleccioná un pedido de la tabla para abrir "
-                "su centro de gestión."
-            )
-            pedido_seleccionado_guardado = ""
-    else:
-        st.caption(
-            "Seleccioná un pedido de la tabla para abrir "
-            "su centro de gestión."
-        )
-
-with cabecera_tabla_2:
-    abrir_detalle = st.button(
-        "👁 Ver detalle",
-        type="primary",
-        use_container_width=True,
-        disabled=not bool(pedido_seleccionado_guardado),
-        key="btn_detalle_tabla_consultas",
+pedido_seleccionado_guardado = str(
+    st.session_state.get(
+        "consulta_pedido_seleccionado",
+        "",
     )
-
-if abrir_detalle and pedido_seleccionado_guardado:
-    abrir_detalle_pedido(
-        str(pedido_seleccionado_guardado).strip()
-    )
+).strip()
 
 evento_tabla_pedidos = st.dataframe(
     tabla_visible_pedidos,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
-    height=1000,
+    height=500,
     column_config=COLUMN_CONFIG,
     on_select="rerun",
     selection_mode="single-row",
@@ -3116,26 +3377,74 @@ filas_pedido_seleccionadas = (
     else []
 )
 
+# La fila seleccionada se procesa en el mismo rerun generado por la tabla.
+# Ya no se fuerza un segundo st.rerun solamente para habilitar el botón.
 if filas_pedido_seleccionadas:
-    pedido_seleccionado = (
-        tabla_visible_pedidos.iloc[
-            filas_pedido_seleccionadas[0]
+    indice_seleccionado = filas_pedido_seleccionadas[0]
+
+    if 0 <= indice_seleccionado < len(tabla_visible_pedidos):
+        pedido_seleccionado = tabla_visible_pedidos.iloc[
+            indice_seleccionado
         ]
-    )
 
-    pedido_nuevo = str(
-        pedido_seleccionado["Pedido"]
-    ).strip()
+        pedido_seleccionado_guardado = str(
+            pedido_seleccionado["Pedido"]
+        ).strip()
 
-    if (
-        st.session_state.get(
-            "consulta_pedido_seleccionado",
-            "",
-        )
-        != pedido_nuevo
-    ):
         st.session_state[
             "consulta_pedido_seleccionado"
-        ] = pedido_nuevo
-        st.rerun()
+        ] = pedido_seleccionado_guardado
 
+# Si el pedido guardado dejó de estar visible por un filtro,
+# se limpia sin provocar una nueva ejecución de la página.
+coincidencia_seleccionada = pd.DataFrame()
+
+if pedido_seleccionado_guardado:
+    coincidencia_seleccionada = tabla_visible_pedidos[
+        tabla_visible_pedidos["Pedido"]
+        .astype(str)
+        .eq(pedido_seleccionado_guardado)
+    ]
+
+    if coincidencia_seleccionada.empty:
+        pedido_seleccionado_guardado = ""
+        st.session_state["consulta_pedido_seleccionado"] = ""
+
+cabecera_tabla_1, cabecera_tabla_2 = st.columns(
+    [5, 1],
+    vertical_alignment="center",
+)
+
+with cabecera_tabla_1:
+    if (
+        pedido_seleccionado_guardado
+        and not coincidencia_seleccionada.empty
+    ):
+        fila_seleccionada_guardada = (
+            coincidencia_seleccionada.iloc[0]
+        )
+
+        st.caption(
+            f"Seleccionado: pedido "
+            f"**{fila_seleccionada_guardada['Pedido']}** · "
+            f"{fila_seleccionada_guardada['Cliente']}"
+        )
+    else:
+        st.caption(
+            "Seleccioná un pedido de la tabla para abrir "
+            "su centro de gestión."
+        )
+
+with cabecera_tabla_2:
+    abrir_detalle = st.button(
+        "👁 Ver detalle",
+        type="primary",
+        width="stretch",
+        disabled=not bool(pedido_seleccionado_guardado),
+        key="btn_detalle_tabla_consultas",
+    )
+
+if abrir_detalle and pedido_seleccionado_guardado:
+    abrir_detalle_pedido(
+        pedido_seleccionado_guardado
+    )

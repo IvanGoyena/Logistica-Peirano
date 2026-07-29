@@ -30,6 +30,35 @@ def normalizar_codigo(serie):
     )
 
 
+def convertir_numero_erp(serie):
+
+    texto = (
+        serie
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+    )
+
+    # Formato ERP argentino:
+    # 1.234,56 -> 1234.56
+    tiene_coma = texto.str.contains(",", regex=False)
+
+    texto.loc[tiene_coma] = (
+        texto.loc[tiene_coma]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+
+    return (
+        pd.to_numeric(
+            texto,
+            errors="coerce",
+        )
+        .fillna(0)
+    )
+
+
 # ==========================================================
 # TABLA PEDIDOS PENDIENTES ERP
 # ==========================================================
@@ -218,23 +247,18 @@ def construir_tabla_pendientes(df_pendientes):
     # IMPORTES Y VOLUMEN
     # ------------------------------------------------------
 
-    columnas_decimales = [
-        "ImporteERP",
-        "ImportePendienteERP",
-        "VolumenPedidoERP",
-        "VolumenRemitidoERP",
-    ]
+        columnas_decimales = [
+            "ImporteERP",
+            "ImportePendienteERP",
+            "VolumenPedidoERP",
+            "VolumenRemitidoERP",
+        ]
 
-    for columna in columnas_decimales:
+        for columna in columnas_decimales:
 
-        tabla[columna] = (
-            pd.to_numeric(
-                tabla[columna],
-                errors="coerce"
+            tabla[columna] = convertir_numero_erp(
+                tabla[columna]
             )
-            .fillna(0)
-        )
-
     # ------------------------------------------------------
     # TEXTOS
     # ------------------------------------------------------
@@ -421,6 +445,8 @@ def construir_tabla_pendientes(df_pendientes):
         # INFORMACIÓN ERP QUE NO ESTÁ EN DIGIP
         "FechaPedidoERP",
         "AtrasoDiasERP",
+        "ClienteDescripcionERP",
+        "EstadoERP",
 
         # CLAVE DE CLIENTE + SUCURSAL
         "CodigoSucursal",
@@ -430,12 +456,11 @@ def construir_tabla_pendientes(df_pendientes):
 
         # CARGA PENDIENTE
         "UnidadesPendientesERP",
+        "VolumenPendienteERP",
 
         # INFORMACIÓN ECONÓMICA
         "ImporteERP",
-
     ]
-
     # Validar que las columnas existan
     columnas_satelite = [
         columna

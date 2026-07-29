@@ -1,7 +1,11 @@
 """
 Motor de planificación logística.
 
-Regla definitiva para pedidos con código de expreso:
+Orden de prioridad de las reglas:
+
+1. RETIRA siempre prevalece sobre zona, expreso y planificación semanal.
+2. Luego se aplican las reglas definitivas para pedidos con código de expreso:
+
 
 1. Si la planificación contiene un día de LUNES a VIERNES,
    el pedido entra en la planificación semanal correspondiente.
@@ -81,6 +85,40 @@ def normalizar_texto_sin_acentos(valor) -> str:
         )
         if unicodedata.category(caracter) != "Mn"
     )
+
+
+def es_pedido_retira(fila: pd.Series) -> bool:
+    """
+    Detecta pedidos RETIRA usando los campos disponibles.
+
+    La condición RETIRA tiene prioridad absoluta sobre cualquier
+    zona, código de despacho, expreso o día de planificación.
+    """
+
+    columnas_candidatas = [
+        "TipoPreparacion",
+        "TipoEntrega",
+        "DespachoDescripcion",
+        "ServicioDeEnvioTipo",
+        "Planificacion",
+        "FrecuenciaEntrega",
+        "ZonaAgrupadorExpreso",
+        "ZonaExpreso",
+    ]
+
+    for columna in columnas_candidatas:
+
+        if columna not in fila.index:
+            continue
+
+        valor = normalizar_texto_sin_acentos(
+            fila.get(columna, "")
+        )
+
+        if "RETIRA" in valor:
+            return True
+
+    return False
 
 
 def extraer_dia_entrega(valor) -> str:
@@ -266,6 +304,16 @@ def enriquecer_pedidos_planificacion(
 
     tabla = df_pedidos.copy()
 
+    # ------------------------------------------------------
+    # REGLA 1 — RETIRA
+    # ------------------------------------------------------
+    # Se calcula antes de cualquier enriquecimiento para que
+    # ninguna zona o código de despacho pueda reemplazarlo.
+    tabla["EsRetira"] = tabla.apply(
+        es_pedido_retira,
+        axis=1,
+    )
+
     if tabla.empty:
 
         columnas_salida_vacia = [
@@ -276,6 +324,7 @@ def enriquecer_pedidos_planificacion(
             "PlanificacionConfigurada",
             "ZonaConfigurada",
             "EsExpreso",
+            "EsRetira",
             "ZonaExpreso",
             "ZonaExpresoConfigurada",
             "DiaEntregaConfigurado",
@@ -294,6 +343,7 @@ def enriquecer_pedidos_planificacion(
                 if columna in {
                     "ZonaConfigurada",
                     "EsExpreso",
+                    "EsRetira",
                     "ZonaExpresoConfigurada",
                     "CoincidePlanificacion",
                     "EsPrioritario",
@@ -646,6 +696,72 @@ def enriquecer_pedidos_planificacion(
         "GrupoDespacho"
     ] = "EXPRESO SIN CONFIG"
 
+    # ------------------------------------------------------
+    # PRIORIDAD ABSOLUTA — RETIRA
+    # ------------------------------------------------------
+    # Esta asignación se realiza nuevamente al final para impedir
+    # que las reglas de zona o expreso modifiquen el resultado.
+    # Recalcular al final porque ZonaAgrupadorExpreso y ZonaExpreso
+    # recién quedan disponibles después de procesar los expresos.
+    retira_detectado_final = tabla.apply(
+        es_pedido_retira,
+        axis=1,
+    )
+
+    tabla["EsRetira"] = (
+        tabla["EsRetira"]
+        .fillna(False)
+        .astype(bool)
+        | retira_detectado_final
+    )
+
+    mascara_retira = tabla["EsRetira"]
+
+    tabla.loc[
+        mascara_retira,
+        "Planificacion"
+    ] = "RETIRA"
+
+    tabla.loc[
+        mascara_retira,
+        "PlanificacionConfigurada"
+    ] = "RETIRA"
+
+    tabla.loc[
+        mascara_retira,
+        "GrupoDespacho"
+    ] = "RETIRA"
+
+    tabla.loc[
+        mascara_retira,
+        "ZonaDescripcion"
+    ] = "RETIRA"
+
+    tabla.loc[
+        mascara_retira,
+        "ZonaConfigurada"
+    ] = True
+
+    tabla.loc[
+        mascara_retira,
+        "EsExpreso"
+    ] = False
+
+    tabla.loc[
+        mascara_retira,
+        "ZonaExpreso"
+    ] = "RETIRA"
+
+    tabla.loc[
+        mascara_retira,
+        "ZonaExpresoConfigurada"
+    ] = True
+
+    tabla.loc[
+        mascara_retira,
+        "DiaEntregaConfigurado"
+    ] = "RETIRA"
+
     tabla["CoincidePlanificacion"] = (
         tabla["Planificacion"].eq(
             tabla["PlanificacionConfigurada"]
@@ -675,6 +791,11 @@ def enriquecer_pedidos_planificacion(
         + " | Grupo "
         + grupo_despacho_texto
     )
+
+    tabla.loc[
+        mascara_retira,
+        "ClaveAgrupacion"
+    ] = "RETIRA"
 
     prioridades = (
         tabla["ClienteCodigo"]
