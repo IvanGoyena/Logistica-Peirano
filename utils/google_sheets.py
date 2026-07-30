@@ -126,6 +126,14 @@ COLUMNAS_CONFIRMACIONES_INGRESO_OC = [
     "FechaRegistro",
 ]
 
+
+COLUMNAS_COBERTURA_INFORMADOS = [
+    "Pedido",
+    "FechaInformado",
+    "Usuario",
+    "Estado",
+]
+
 COLUMNAS_CANCELACIONES_ENTREGA = [
     "CancelacionEntregaID",
     "Remito",
@@ -174,6 +182,8 @@ ESTRUCTURA_HOJAS = {
     "ReclamosFotos": COLUMNAS_RECLAMOS_FOTOS,
 
     "ConfirmacionesIngresoOC": COLUMNAS_CONFIRMACIONES_INGRESO_OC,
+
+    "CoberturaInformados": COLUMNAS_COBERTURA_INFORMADOS,
 
 }
 

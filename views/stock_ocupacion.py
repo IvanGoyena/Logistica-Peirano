@@ -10,9 +10,10 @@ from models.stock_mapa import mostrar_mapa_visual_deposito
 def render(contexto: dict) -> None:
     tabla_maestro_ubicaciones = contexto["tabla_maestro_ubicaciones"]
     tabla_ocupacion = contexto["tabla_ocupacion"]
+    tabla_stock_total_detallado = contexto.get("tabla_stock_total_detallado", pd.DataFrame())
 
     st.subheader("🗺️ Ocupación del depósito")
-    st.caption("Ocupación real por ubicación y capacidad operativa del depósito.")
+    st.caption("Visión general de ocupación por sectores, pasillos y ubicaciones.")
 
     if tabla_maestro_ubicaciones.empty:
         st.error("No se encontró `Maestro Ubicaciones` dentro de la carpeta de datos.")
@@ -20,13 +21,8 @@ def render(contexto: dict) -> None:
 
     st.markdown(
         """
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin:0 0 1rem 0;">
-          <div>
-            <h2 style="margin:0">📊 Ocupación del depósito</h2>
-            <div style="color:#94A3B8;margin-top:.2rem">Visión general de ocupación por sectores</div>
-          </div>
-          <div style="border:1px solid #334155;border-radius:10px;padding:.65rem .9rem;min-width:390px;">
-            <div style="font-weight:700;margin-bottom:.35rem">Referencias de colores</div>
+        <div style="display:flex;justify-content:flex-end;margin:0 0 .7rem 0;">
+          <div style="border:1px solid #334155;border-radius:10px;padding:.55rem .8rem;">
             <div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:.82rem">
               <span><b style="color:#3B82F6">●</b> Almacenamiento</span>
               <span><b style="color:#8B5CF6">●</b> Picking</span>
@@ -216,7 +212,10 @@ def render(contexto: dict) -> None:
 
 
     # ---------------- MAPA VISUAL ----------------
-    mostrar_mapa_visual_deposito(tabla_ocupacion)
+    mostrar_mapa_visual_deposito(
+        tabla_ocupacion,
+        tabla_stock_total_detallado=tabla_stock_total_detallado,
+    )
 
     st.caption("ℹ️ Los datos se actualizan según la última extracción del stock y el Maestro Ubicaciones.")
 

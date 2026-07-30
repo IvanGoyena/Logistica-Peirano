@@ -53,6 +53,533 @@ def preparar_mapa_ubicaciones(tabla_ocupacion: pd.DataFrame) -> pd.DataFrame:
 
 
 
+
+def _segmento_mapa(valor: object, ancho: int = 3) -> str:
+    texto = str(valor or "").strip().upper()
+    if texto.endswith(".0"):
+        texto = texto[:-2]
+    return texto.zfill(ancho) if texto.isdigit() else texto
+
+
+def _claves_desde_ubicacion(valor: object) -> tuple[str, str]:
+    """Devuelve claves con y sin abreviatura de área desde una ubicación WMS."""
+    texto = str(valor or "").strip().upper()
+    limpio = texto.replace(" ", "-").replace("_", "-").replace("/", "-")
+    while "--" in limpio:
+        limpio = limpio.replace("--", "-")
+    segmentos = [segmento for segmento in limpio.strip("-").split("-") if segmento]
+
+    con_area = ""
+    sin_area = ""
+    if len(segmentos) >= 4:
+        ab = segmentos[-4]
+        pasillo = _segmento_mapa(segmentos[-3])
+        posicion = _segmento_mapa(segmentos[-2])
+        nivel = _segmento_mapa(segmentos[-1])
+        con_area = f"{ab}-{pasillo}-{posicion}-{nivel}"
+        sin_area = f"{pasillo}-{posicion}-{nivel}"
+    elif len(segmentos) >= 3:
+        pasillo = _segmento_mapa(segmentos[-3])
+        posicion = _segmento_mapa(segmentos[-2])
+        nivel = _segmento_mapa(segmentos[-1])
+        sin_area = f"{pasillo}-{posicion}-{nivel}"
+    return con_area, sin_area
+
+
+def enriquecer_mapa_con_stock(
+    mapa: pd.DataFrame,
+    tabla_stock_total_detallado: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Agrega SKU, descripciones, unidades y contenedores por ubicación."""
+    resultado = mapa.copy()
+    columnas_default = {
+        "SKUsMapa": 0,
+        "UnidadesMapa": 0.0,
+        "ContenedoresDetalleMapa": 0,
+        "ArticulosMapa": "",
+    }
+    for columna, valor in columnas_default.items():
+        resultado[columna] = valor
+
+    if tabla_stock_total_detallado is None or tabla_stock_total_detallado.empty:
+        return resultado
+    if "Ubicacion" not in tabla_stock_total_detallado.columns:
+        return resultado
+
+    stock = tabla_stock_total_detallado.copy()
+    if "FuenteStock" in stock.columns:
+        stock = stock.loc[
+            stock["FuenteStock"].astype("string").str.contains(
+                "Almac", case=False, na=False
+            )
+        ].copy()
+    if stock.empty:
+        return resultado
+
+    claves_exactas = {
+        str(clave): str(clave)
+        for clave in resultado["ClaveUbicacion"].dropna().astype(str)
+    }
+    claves_sin_area_df = (
+        resultado[["ClaveSinArea", "ClaveUbicacion"]]
+        .dropna()
+        .drop_duplicates()
+    )
+    conteo_sin_area = claves_sin_area_df["ClaveSinArea"].value_counts()
+    claves_sin_area = {
+        str(fila.ClaveSinArea): str(fila.ClaveUbicacion)
+        for fila in claves_sin_area_df.itertuples(index=False)
+        if conteo_sin_area.get(fila.ClaveSinArea, 0) == 1
+    }
+
+    pares = stock["Ubicacion"].map(_claves_desde_ubicacion)
+    stock["_ClaveConArea"] = pares.map(lambda valor: valor[0])
+    stock["_ClaveSinArea"] = pares.map(lambda valor: valor[1])
+    stock["_ClaveMapa"] = stock["_ClaveConArea"].map(claves_exactas)
+    faltantes = stock["_ClaveMapa"].isna()
+    stock.loc[faltantes, "_ClaveMapa"] = stock.loc[faltantes, "_ClaveSinArea"].map(
+        claves_sin_area
+    )
+    stock = stock.loc[stock["_ClaveMapa"].notna()].copy()
+    if stock.empty:
+        return resultado
+
+    for columna in ["ArticuloCodigo", "ArticuloDescripcion", "ContenedorNumero"]:
+        if columna not in stock.columns:
+            stock[columna] = ""
+        stock[columna] = stock[columna].fillna("").astype(str).str.strip()
+    if "Cantidad" not in stock.columns:
+        stock["Cantidad"] = 0
+    stock["Cantidad"] = pd.to_numeric(stock["Cantidad"], errors="coerce").fillna(0)
+
+    articulo_ubicacion = (
+        stock.groupby(["_ClaveMapa", "ArticuloCodigo", "ArticuloDescripcion"], dropna=False)
+        .agg(UnidadesArticulo=("Cantidad", "sum"))
+        .reset_index()
+    )
+
+    def resumir_articulos(grupo: pd.DataFrame) -> str:
+        lineas = []
+        for fila in grupo.sort_values("UnidadesArticulo", ascending=False).head(6).itertuples(index=False):
+            descripcion = str(fila.ArticuloDescripcion or "").strip()
+            etiqueta = str(fila.ArticuloCodigo or "").strip()
+            if descripcion:
+                etiqueta += f" · {descripcion}"
+            lineas.append(f"{etiqueta} · {float(fila.UnidadesArticulo):,.0f} u".replace(",", "."))
+        restantes = max(len(grupo) - 6, 0)
+        if restantes:
+            lineas.append(f"+ {restantes} artículos adicionales")
+        return "<br>".join(lineas)
+
+    texto_articulos = pd.DataFrame([
+        {"_ClaveMapa": clave, "ArticulosMapa": resumir_articulos(grupo)}
+        for clave, grupo in articulo_ubicacion.groupby("_ClaveMapa", dropna=False)
+    ])
+    resumen = (
+        stock.groupby("_ClaveMapa", as_index=False)
+        .agg(
+            SKUsMapa=("ArticuloCodigo", lambda serie: serie.loc[serie.ne("")].nunique()),
+            UnidadesMapa=("Cantidad", "sum"),
+            ContenedoresDetalleMapa=(
+                "ContenedorNumero",
+                lambda serie: serie.loc[serie.ne("")].nunique(),
+            ),
+        )
+        .merge(texto_articulos, on="_ClaveMapa", how="left")
+    )
+
+    resultado = resultado.merge(
+        resumen,
+        how="left",
+        left_on="ClaveUbicacion",
+        right_on="_ClaveMapa",
+        suffixes=("", "_Stock"),
+    )
+    for columna, valor in columnas_default.items():
+        stock_col = f"{columna}_Stock"
+        if stock_col in resultado.columns:
+            resultado[columna] = resultado[stock_col].fillna(resultado[columna])
+            resultado.drop(columns=[stock_col], inplace=True)
+    resultado.drop(columns=["_ClaveMapa"], errors="ignore", inplace=True)
+    resultado["SKUsMapa"] = pd.to_numeric(resultado["SKUsMapa"], errors="coerce").fillna(0).astype(int)
+    resultado["UnidadesMapa"] = pd.to_numeric(resultado["UnidadesMapa"], errors="coerce").fillna(0)
+    resultado["ContenedoresDetalleMapa"] = pd.to_numeric(
+        resultado["ContenedoresDetalleMapa"], errors="coerce"
+    ).fillna(0).astype(int)
+    resultado["ArticulosMapa"] = resultado["ArticulosMapa"].fillna("")
+    return resultado
+
+
+def _grafico_pasillo_2d(detalle: pd.DataFrame, titulo: str, altura_minima: int = 150):
+    posiciones = sorted(
+        detalle["PosicionMapa"].dropna().unique().tolist(),
+        key=_ordenar_segmento_mapa,
+    )
+    niveles = sorted(
+        detalle["NivelMapa"].dropna().unique().tolist(),
+        key=_ordenar_segmento_mapa,
+        reverse=True,
+    )
+    tooltip = [
+        alt.Tooltip("EtiquetaUbicacion:N", title="Ubicación"),
+        alt.Tooltip("AreaMapa:N", title="Área"),
+        alt.Tooltip("PasilloMapa:N", title="Pasillo"),
+        alt.Tooltip("PosicionMapa:N", title="Posición"),
+        alt.Tooltip("NivelMapa:N", title="Nivel"),
+        alt.Tooltip("Tercio:N", title="Tercio"),
+        alt.Tooltip("EstadoMapa:N", title="Estado"),
+        alt.Tooltip("SKUsMapa:Q", title="SKU", format=",.0f"),
+        alt.Tooltip("UnidadesMapa:Q", title="Unidades", format=",.0f"),
+        alt.Tooltip("ContenedoresDetalleMapa:Q", title="Contenedores", format=",.0f"),
+        alt.Tooltip("ArticulosMapa:N", title="Artículos"),
+    ]
+    return (
+        alt.Chart(detalle)
+        .mark_rect(cornerRadius=2, stroke="#111827", strokeWidth=1)
+        .encode(
+            x=alt.X(
+                "PosicionMapa:N",
+                title="Posición",
+                sort=posiciones,
+                axis=alt.Axis(labelAngle=-90, labelLimit=45),
+            ),
+            y=alt.Y("NivelMapa:N", title="Nivel", sort=niveles),
+            color=alt.Color(
+                "EstadoMapa:N",
+                scale=alt.Scale(
+                    domain=["Ocupada", "Vacía", "No disponible"],
+                    range=["#22C55E", "#E5E7EB", "#EF4444"],
+                ),
+                legend=None,
+            ),
+            tooltip=tooltip,
+        )
+        .properties(
+            title=titulo,
+            height=max(altura_minima, min(250, len(niveles) * 42)),
+        )
+    )
+
+
+def _agregar_prismas_sector_3d(
+    figura: go.Figure,
+    datos: pd.DataFrame,
+    *,
+    color: str,
+    nombre: str,
+    coordenadas: dict[tuple[str, str], float],
+    pasillos_y: dict[str, float],
+    niveles_z: dict[tuple[str, str], float],
+) -> None:
+    """Agrega todas las ubicaciones de un estado al mapa 3D completo."""
+    if datos.empty:
+        return
+
+    ancho = 0.88
+    profundidad = 0.78
+    alto = 1.02
+
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    ii: list[int] = []
+    jj: list[int] = []
+    kk: list[int] = []
+    hover_x: list[float] = []
+    hover_y: list[float] = []
+    hover_z: list[float] = []
+    hover_text: list[str] = []
+
+    caras = [
+        (0, 1, 2), (0, 2, 3),
+        (4, 6, 5), (4, 7, 6),
+        (0, 4, 5), (0, 5, 1),
+        (1, 5, 6), (1, 6, 2),
+        (2, 6, 7), (2, 7, 3),
+        (3, 7, 4), (3, 4, 0),
+    ]
+
+    for fila in datos.itertuples(index=False):
+        pasillo = str(getattr(fila, "PasilloMapa"))
+        posicion = str(getattr(fila, "PosicionMapa"))
+        nivel = str(getattr(fila, "NivelMapa"))
+
+        x0 = coordenadas.get((pasillo, posicion), 0.0)
+        y0 = pasillos_y.get(pasillo, 0.0)
+        z0 = niveles_z.get((pasillo, nivel), 0.0)
+        x1 = x0 + ancho
+        y1 = y0 + profundidad
+        z1 = z0 + alto
+
+        vertices = [
+            (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+            (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
+        ]
+        base_idx = len(xs)
+        for vx, vy, vz in vertices:
+            xs.append(vx)
+            ys.append(vy)
+            zs.append(vz)
+        for a, b, c in caras:
+            ii.append(base_idx + a)
+            jj.append(base_idx + b)
+            kk.append(base_idx + c)
+
+        hover_x.append(x0 + ancho / 2)
+        hover_y.append(y0 + profundidad / 2)
+        hover_z.append(z0 + alto / 2)
+        articulos = str(getattr(fila, "ArticulosMapa", "") or "")
+        hover_text.append(
+            f"<b>{getattr(fila, 'EtiquetaUbicacion', '')}</b><br>"
+            f"Sector: {getattr(fila, 'SectorMapa', '')}<br>"
+            f"Área: {getattr(fila, 'AreaMapa', '')}<br>"
+            f"Pasillo: {pasillo}<br>"
+            f"Posición: {posicion}<br>"
+            f"Nivel: {nivel}<br>"
+            f"Tercio: {getattr(fila, 'Tercio', '')}<br>"
+            f"Estado: {getattr(fila, 'EstadoMapa', '')}<br>"
+            f"SKU distintos: {int(getattr(fila, 'SKUsMapa', 0) or 0)}<br>"
+            f"Unidades: {float(getattr(fila, 'UnidadesMapa', 0) or 0):,.0f}<br>"
+            f"Artículos:<br>{articulos}"
+        )
+
+    figura.add_trace(go.Mesh3d(
+        x=xs,
+        y=ys,
+        z=zs,
+        i=ii,
+        j=jj,
+        k=kk,
+        color=color,
+        opacity=0.94,
+        flatshading=True,
+        name=nombre,
+        hoverinfo="skip",
+        showscale=False,
+        lighting=dict(ambient=0.64, diffuse=0.72, roughness=0.70, specular=0.10),
+        lightposition=dict(x=100, y=-160, z=180),
+    ))
+    figura.add_trace(go.Scatter3d(
+        x=hover_x,
+        y=hover_y,
+        z=hover_z,
+        mode="markers",
+        marker=dict(size=6, color=color, opacity=0.01),
+        text=hover_text,
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+        name=f"Detalle {nombre}",
+    ))
+
+
+def construir_mapa_sector_3d(base: pd.DataFrame, sector: str) -> go.Figure:
+    """Construye una vista 3D completa con todos los pasillos del sector."""
+    pasillos = sorted(
+        base["PasilloMapa"].dropna().astype(str).unique().tolist(),
+        key=_ordenar_segmento_mapa,
+    )
+
+    coordenadas: dict[tuple[str, str], float] = {}
+    pasillos_y: dict[str, float] = {}
+    niveles_z: dict[tuple[str, str], float] = {}
+    max_posiciones = 1
+    max_niveles = 1
+
+    separacion_pasillos = 1.75
+    for indice_pasillo, pasillo in enumerate(pasillos):
+        detalle_pasillo = base.loc[base["PasilloMapa"].astype(str).eq(pasillo)]
+        posiciones = sorted(
+            detalle_pasillo["PosicionMapa"].dropna().astype(str).unique().tolist(),
+            key=_ordenar_segmento_mapa,
+        )
+        niveles = sorted(
+            detalle_pasillo["NivelMapa"].dropna().astype(str).unique().tolist(),
+            key=_ordenar_segmento_mapa,
+        )
+        max_posiciones = max(max_posiciones, len(posiciones))
+        max_niveles = max(max_niveles, len(niveles))
+        pasillos_y[pasillo] = indice_pasillo * separacion_pasillos
+
+        for indice_posicion, posicion in enumerate(posiciones):
+            coordenadas[(pasillo, posicion)] = indice_posicion * 0.98
+        for indice_nivel, nivel in enumerate(niveles):
+            niveles_z[(pasillo, nivel)] = indice_nivel * 1.14
+
+    figura = go.Figure()
+    configuracion = [
+        ("Ocupada", "#22C55E"),
+        ("Vacía", "#D1D5DB"),
+        ("No disponible", "#EF4444"),
+    ]
+    for estado, color in configuracion:
+        _agregar_prismas_sector_3d(
+            figura,
+            base.loc[base["EstadoMapa"].eq(estado)],
+            color=color,
+            nombre=estado,
+            coordenadas=coordenadas,
+            pasillos_y=pasillos_y,
+            niveles_z=niveles_z,
+        )
+
+    tick_y = [pasillos_y[p] + 0.39 for p in pasillos]
+    extension_y = (len(pasillos) - 1) * separacion_pasillos + 0.9 if pasillos else 1
+    extension_x = max_posiciones * 0.98
+    extension_z = max_niveles * 1.14
+
+    figura.update_layout(
+        title=dict(text=f"{sector} · Vista 3D completa", x=0.02),
+        height=620,
+        margin=dict(l=0, r=0, t=45, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.01, x=0.02),
+        scene=dict(
+            bgcolor="rgba(0,0,0,0)",
+            aspectmode="manual",
+            aspectratio=dict(
+                x=max(2.4, min(4.5, extension_x / 14)),
+                y=max(1.4, min(3.8, extension_y / 10)),
+                z=max(1.15, min(2.0, extension_z / 3.2)),
+            ),
+            camera=dict(
+                eye=dict(x=1.55, y=-2.10, z=1.55),
+                up=dict(x=0, y=0, z=1),
+            ),
+            xaxis=dict(
+                title="Posición relativa",
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-0.2, extension_x + 0.2],
+            ),
+            yaxis=dict(
+                title="Pasillo",
+                tickmode="array",
+                tickvals=tick_y,
+                ticktext=pasillos,
+                showgrid=False,
+                zeroline=False,
+                range=[-0.35, extension_y + 0.35],
+            ),
+            zaxis=dict(
+                title="Nivel",
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                range=[-0.15, extension_z + 0.25],
+            ),
+        ),
+    )
+    return figura
+
+
+def _mostrar_vista_completa_sector(mapa: pd.DataFrame) -> None:
+    sectores = [s for s in ["Almacén", "Picking Rack"] if s in mapa["SectorMapa"].unique()]
+    if not sectores:
+        return
+
+    with st.expander("🧭 Vista completa de Almacén y Picking", expanded=False):
+        st.caption(
+            "Permite recorrer todos los pasillos en paneles 2D o visualizar el sector "
+            "completo dentro de un único modelo 3D."
+        )
+        col_sector, col_vista, col_cargar = st.columns(
+            [1.15, 1.25, 2.1],
+            vertical_alignment="bottom",
+        )
+        with col_sector:
+            sector = st.selectbox(
+                "Sector completo",
+                options=sectores,
+                key="mapa_sector_completo",
+            )
+        with col_vista:
+            vista_completa = st.radio(
+                "Tipo de vista",
+                options=["Paneles 2D", "Modelo 3D completo"],
+                horizontal=True,
+                key="mapa_tipo_vista_completa",
+            )
+        with col_cargar:
+            cargar = st.toggle(
+                "Cargar sector completo",
+                value=False,
+                key="mapa_cargar_sector_completo",
+                help="Se mantiene apagado por defecto para no ralentizar la pantalla.",
+            )
+
+        if not cargar:
+            st.info("Activá la vista para cargar todos los pasillos del sector seleccionado.")
+            return
+
+        base = mapa.loc[mapa["SectorMapa"].eq(sector)].copy()
+        pasillos = sorted(
+            base["PasilloMapa"].dropna().unique().tolist(),
+            key=_ordenar_segmento_mapa,
+        )
+        if not pasillos:
+            st.info("No hay pasillos disponibles para este sector.")
+            return
+
+        total = int(len(base))
+        disponibles = int(base["Disponible"].fillna(False).astype(bool).sum())
+        ocupadas = int(
+            (base["Disponible"].fillna(False).astype(bool)
+             & base["Ocupada"].fillna(False).astype(bool)).sum()
+        )
+        porcentaje = ocupadas / disponibles * 100 if disponibles else 0
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Pasillos", formato_entero(len(pasillos)))
+        k2.metric("Ubicaciones", formato_entero(total))
+        k3.metric("Ocupadas", formato_entero(ocupadas))
+        k4.metric("Ocupación", f"{porcentaje:.1f}%")
+
+        if vista_completa == "Modelo 3D completo":
+            st.caption(
+                "Cada línea de profundidad representa un pasillo real. Picking y Almacén "
+                "conservan sus propias posiciones y niveles."
+            )
+            with st.spinner(f"Construyendo mapa 3D completo de {sector}..."):
+                figura = construir_mapa_sector_3d(base, sector)
+            st.plotly_chart(
+                figura,
+                use_container_width=True,
+                config={
+                    "displaylogo": False,
+                    "scrollZoom": True,
+                    "responsive": True,
+                },
+                key=f"mapa_3d_completo_{sector}",
+            )
+            return
+
+        for inicio in range(0, len(pasillos), 2):
+            columnas = st.columns(2, gap="large")
+            for offset, pasillo in enumerate(pasillos[inicio:inicio + 2]):
+                detalle = base.loc[base["PasilloMapa"].eq(pasillo)].copy()
+                ocupadas_pasillo = int((detalle["Disponible"] & detalle["Ocupada"]).sum())
+                disponibles_pasillo = int(detalle["Disponible"].sum())
+                porcentaje_pasillo = (
+                    ocupadas_pasillo / disponibles_pasillo * 100
+                    if disponibles_pasillo else 0
+                )
+                with columnas[offset]:
+                    with st.container(border=True):
+                        st.markdown(
+                            f"##### Pasillo {pasillo} · {porcentaje_pasillo:.1f}%"
+                        )
+                        grafico = _grafico_pasillo_2d(
+                            detalle,
+                            titulo="",
+                            altura_minima=135,
+                        )
+                        st.altair_chart(
+                            grafico,
+                            use_container_width=True,
+                            key=f"mapa_completo_{sector}_{pasillo}",
+                        )
+
 def _coordenadas_posiciones_3d(detalle, orden_posiciones):
     """Calcula X compactas y abre una calle visible al cambiar de tercio."""
     tercio_por_posicion = {}
@@ -163,7 +690,10 @@ def _agregar_cubos_3d(
             f"Nivel: {fila.get('NivelMapa', '')}<br>"
             f"Tercio: {fila.get('Tercio', '')}<br>"
             f"Estado: {fila.get('EstadoMapa', '')}<br>"
-            f"Contenedores: {int(fila.get('ContenedoresMapa', 0) or 0)}"
+            f"Contenedores: {int(fila.get('ContenedoresDetalleMapa', fila.get('ContenedoresMapa', 0)) or 0)}<br>"
+            f"SKU distintos: {int(fila.get('SKUsMapa', 0) or 0)}<br>"
+            f"Unidades: {float(fila.get('UnidadesMapa', 0) or 0):,.0f}<br>"
+            f"Artículos:<br>{fila.get('ArticulosMapa', '')}"
         )
 
     figura.add_trace(go.Mesh3d(
@@ -321,13 +851,16 @@ def construir_mapa_3d(detalle, orden_posiciones, orden_niveles, titulo):
     )
     return figura
 
-def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
+def mostrar_mapa_visual_deposito(
+    tabla_ocupacion: pd.DataFrame,
+    tabla_stock_total_detallado: pd.DataFrame | None = None,
+) -> None:
     mapa = preparar_mapa_ubicaciones(tabla_ocupacion)
+    mapa = enriquecer_mapa_con_stock(mapa, tabla_stock_total_detallado)
     if mapa.empty:
         st.info("No hay datos disponibles para construir el mapa visual.")
         return
 
-    # Las superficies de piso se analizarán luego con un plano específico.
     sectores_rack = [
         sector for sector in [
             "Almacén", "Pasillo", "Picking Rack", "Cajones", "Estanterías"
@@ -335,96 +868,61 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
     ]
 
     st.markdown("---")
-    st.markdown(
-        """
-        <div style="margin-top:.35rem;margin-bottom:.8rem">
-          <h2 style="margin:0">🗺️ Mapa visual del depósito</h2>
-          <div style="color:#94A3B8;margin-top:.2rem">
-            Cada celda representa una ubicación física del maestro. Seleccioná un sector y un pasillo para recorrer el rack nivel por nivel.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.markdown("## 🗺️ Mapa visual del depósito")
+    st.caption(
+        "Vista general por pasillo, mapa completo por sector y detalle de cada ubicación."
     )
 
-    # Vista general por pasillo
     mapa_racks = mapa.loc[mapa["SectorMapa"].isin(sectores_rack)].copy()
-
     if mapa_racks.empty:
-        st.warning(
-            "El Maestro Ubicaciones fue leído, pero no se encontraron sectores "
-            "válidos para el mapa. Revisá GrupoOcupacion y SectorMapa."
-        )
+        st.warning("No se encontraron sectores válidos para construir el mapa.")
         return
 
     resumen_pasillos = (
         mapa_racks.groupby(["SectorMapa", "PasilloMapa"], dropna=False)
         .agg(
             TotalUbicaciones=("ClaveUbicacion", "nunique"),
-            UbicacionesOcupadas=("Ocupada", lambda serie: int(serie.fillna(False).astype(bool).sum())),
-            UbicacionesDisponibles=("Disponible", lambda serie: int(serie.fillna(False).astype(bool).sum())),
+            UbicacionesOcupadas=("Ocupada", lambda s: int(s.fillna(False).astype(bool).sum())),
+            UbicacionesDisponibles=("Disponible", lambda s: int(s.fillna(False).astype(bool).sum())),
         )
         .reset_index()
     )
     resumen_pasillos["UbicacionesVacias"] = (
-        resumen_pasillos["UbicacionesDisponibles"]
-        - resumen_pasillos["UbicacionesOcupadas"]
+        resumen_pasillos["UbicacionesDisponibles"] - resumen_pasillos["UbicacionesOcupadas"]
     ).clip(lower=0)
     resumen_pasillos["PorcentajeOcupacion"] = (
         resumen_pasillos["UbicacionesOcupadas"]
         .div(resumen_pasillos["UbicacionesDisponibles"].replace(0, pd.NA))
-        .mul(100)
-        .fillna(0)
-        .astype(float)
+        .mul(100).fillna(0).astype(float)
     )
     resumen_pasillos["PasilloOrden"] = pd.to_numeric(
         resumen_pasillos["PasilloMapa"], errors="coerce"
     ).fillna(9999)
-    resumen_pasillos = resumen_pasillos.sort_values(
-        ["SectorMapa", "PasilloOrden", "PasilloMapa"]
-    ).reset_index(drop=True)
 
+    sectores_comparables = [s for s in ["Almacén", "Pasillo"] if s in sectores_rack]
     with st.container(border=True):
-        encabezado_grafico, filtro_grafico = st.columns([2.4, 1])
-        with encabezado_grafico:
+        encabezado, filtro = st.columns([2.4, 1])
+        with encabezado:
             st.markdown("#### Vista general por pasillo")
-            st.caption(
-                "Permite detectar rápidamente pasillos saturados o con capacidad disponible, "
-                "sin ampliar horizontalmente la página."
-            )
-        with filtro_grafico:
+            st.caption("Comparación rápida de ocupación en Almacén y Pasillo.")
+        with filtro:
             sector_resumen = st.selectbox(
                 "Sector a comparar",
-                options=sectores_rack,
+                options=sectores_comparables or sectores_rack,
                 key="mapa_sector_resumen_pasillos",
             )
-
         resumen_sector = resumen_pasillos.loc[
             resumen_pasillos["SectorMapa"].eq(sector_resumen)
-        ].copy()
-
+        ].sort_values(["PasilloOrden", "PasilloMapa"])
         grafico_pasillos = (
             alt.Chart(resumen_sector)
             .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, size=16)
             .encode(
-                x=alt.X(
-                    "PasilloMapa:N",
-                    title="Pasillo",
-                    sort=alt.SortField(field="PasilloOrden", order="ascending"),
-                    axis=alt.Axis(labelAngle=0, labelOverlap=True, labelLimit=45),
-                ),
-                y=alt.Y(
-                    "PorcentajeOcupacion:Q",
-                    title="% de ocupación",
-                    scale=alt.Scale(domain=[0, 100]),
-                ),
-                color=alt.value({
-                    "Almacén": "#3B82F6",
-                    "Pasillo": "#2563EB",
-                    "Picking Rack": "#8B5CF6",
-                    "Cajones": "#A855F7",
-                    "Estanterías": "#65A30D",
-                }.get(sector_resumen, "#3B82F6")),
+                x=alt.X("PasilloMapa:N", title="Pasillo", sort=None,
+                        axis=alt.Axis(labelAngle=0, labelOverlap=True, labelLimit=45)),
+                y=alt.Y("PorcentajeOcupacion:Q", title="% de ocupación",
+                        scale=alt.Scale(domain=[0, 100])),
+                color=alt.value("#3B82F6" if sector_resumen == "Almacén" else "#2563EB"),
                 tooltip=[
                     alt.Tooltip("PasilloMapa:N", title="Pasillo"),
                     alt.Tooltip("UbicacionesOcupadas:Q", title="Ocupadas", format=",.0f"),
@@ -432,81 +930,46 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
                     alt.Tooltip("UbicacionesDisponibles:Q", title="Disponibles", format=",.0f"),
                     alt.Tooltip("PorcentajeOcupacion:Q", title="Ocupación", format=".1f"),
                 ],
-            )
-            .properties(height=245, title=sector_resumen)
+            ).properties(height=245)
         )
+        st.altair_chart(grafico_pasillos, use_container_width=True,
+                        key="mapa_resumen_pasillos_compacto")
 
-        st.altair_chart(
-            grafico_pasillos,
-            use_container_width=True,
-            key="mapa_resumen_pasillos_compacto",
-        )
+    _mostrar_vista_completa_sector(mapa)
 
-    # =====================================================
-    # VISUALIZACIÓN DETALLADA CON FILTROS LATERALES
-    # =====================================================
     st.markdown("#### Visualización del pasillo seleccionado")
-    st.caption(
-        "Elegí un sector, área y pasillo. Los filtros de este bloque son independientes "
-        "de la vista general superior."
-    )
-
+    st.caption("Los filtros de este bloque son independientes de las otras visualizaciones.")
     panel_filtros, panel_mapa = st.columns([0.9, 3.1], gap="large")
 
     with panel_filtros:
         with st.container(border=True):
             st.markdown("##### Filtros del mapa")
-
             sector_seleccionado = st.selectbox(
-                "Sector",
-                options=sectores_rack,
-                key="mapa_sector_seleccionado",
+                "Sector", options=sectores_rack, key="mapa_sector_seleccionado"
             )
-
-            base_sector = mapa.loc[
-                mapa["SectorMapa"].eq(sector_seleccionado)
-            ].copy()
-
-            areas = sorted(
-                base_sector["AreaMapa"].dropna().unique().tolist()
-            )
+            base_sector = mapa.loc[mapa["SectorMapa"].eq(sector_seleccionado)].copy()
+            areas = sorted(base_sector["AreaMapa"].dropna().unique().tolist())
             area_seleccionada = st.selectbox(
-                "Área",
-                options=["Todas"] + areas,
-                key="mapa_area_seleccionada",
+                "Área", options=["Todas"] + areas, key="mapa_area_seleccionada"
             )
-
             if area_seleccionada != "Todas":
-                base_sector = base_sector.loc[
-                    base_sector["AreaMapa"].eq(area_seleccionada)
-                ].copy()
-
-            pasillos = sorted(
-                base_sector["PasilloMapa"].dropna().unique().tolist(),
-                key=_ordenar_segmento_mapa,
-            )
-
+                base_sector = base_sector.loc[base_sector["AreaMapa"].eq(area_seleccionada)].copy()
+            pasillos = sorted(base_sector["PasilloMapa"].dropna().unique().tolist(),
+                              key=_ordenar_segmento_mapa)
             if not pasillos:
                 st.info("No hay pasillos para la selección realizada.")
                 return
-
             pasillo_seleccionado = st.selectbox(
-                "Pasillo",
-                options=pasillos,
-                key="mapa_pasillo_seleccionado",
+                "Pasillo", options=pasillos, key="mapa_pasillo_seleccionado"
             )
-
             vista_mapa = st.radio(
-                "Vista",
-                options=["2D", "3D"],
-                horizontal=True,
-                key="mapa_tipo_vista_pasillo",
+                "Vista", options=["2D", "3D"], horizontal=True,
+                key="mapa_tipo_vista_pasillo"
             )
 
         detalle = base_sector.loc[
             base_sector["PasilloMapa"].eq(pasillo_seleccionado)
         ].copy()
-
         if detalle.empty:
             st.info("No se encontraron ubicaciones para la selección realizada.")
             return
@@ -517,7 +980,6 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
         vacias = max(disponibles - ocupadas, 0)
         no_disponibles = max(total - disponibles, 0)
         porcentaje = ocupadas / disponibles * 100 if disponibles else 0
-
         with st.container(border=True):
             st.markdown("##### Resumen del pasillo")
             st.metric("Ubicaciones", formato_entero(total))
@@ -527,7 +989,6 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
             st.metric("No disponibles", formato_entero(no_disponibles))
             st.metric("Ocupación", f"{porcentaje:.1f}%")
             st.progress(min(max(porcentaje / 100, 0), 1))
-
         with st.container(border=True):
             st.markdown("##### Referencia")
             st.markdown(
@@ -535,76 +996,20 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
                 "<div><b style='color:#22C55E'>■</b> Ocupada</div>"
                 "<div><b style='color:#E5E7EB'>■</b> Vacía</div>"
                 "<div><b style='color:#EF4444'>■</b> No disponible</div>"
-                "</div>",
-                unsafe_allow_html=True,
+                "</div>", unsafe_allow_html=True,
             )
 
-    orden_posiciones = sorted(
-        detalle["PosicionMapa"].dropna().unique().tolist(),
-        key=_ordenar_segmento_mapa,
-    )
-    orden_niveles = sorted(
-        detalle["NivelMapa"].dropna().unique().tolist(),
-        key=_ordenar_segmento_mapa,
-        reverse=True,
-    )
-
+    orden_posiciones = sorted(detalle["PosicionMapa"].dropna().unique().tolist(),
+                              key=_ordenar_segmento_mapa)
+    orden_niveles = sorted(detalle["NivelMapa"].dropna().unique().tolist(),
+                           key=_ordenar_segmento_mapa, reverse=True)
     detalle["TextoCelda"] = detalle["ContenedoresMapa"].apply(
         lambda valor: "" if valor <= 0 else str(int(valor))
     )
-
-    base_rect = (
-        alt.Chart(detalle)
-        .mark_rect(cornerRadius=2, stroke="#111827", strokeWidth=1.2)
-        .encode(
-            x=alt.X(
-                "PosicionMapa:N",
-                title="Posición",
-                sort=orden_posiciones,
-                axis=alt.Axis(labelAngle=0, labelLimit=60),
-            ),
-            y=alt.Y(
-                "NivelMapa:N",
-                title="Nivel",
-                sort=orden_niveles,
-            ),
-            color=alt.Color(
-                "EstadoMapa:N",
-                title="Estado",
-                scale=alt.Scale(
-                    domain=["Ocupada", "Vacía", "No disponible"],
-                    range=["#22C55E", "#E5E7EB", "#EF4444"],
-                ),
-                legend=None,
-            ),
-            tooltip=[
-                alt.Tooltip("EtiquetaUbicacion:N", title="Ubicación"),
-                alt.Tooltip("AreaMapa:N", title="Área"),
-                alt.Tooltip("PasilloMapa:N", title="Pasillo"),
-                alt.Tooltip("PosicionMapa:N", title="Posición"),
-                alt.Tooltip("NivelMapa:N", title="Nivel"),
-                alt.Tooltip("Tercio:N", title="Tercio"),
-                alt.Tooltip("EstadoMapa:N", title="Estado"),
-                alt.Tooltip("ContenedoresMapa:Q", title="Contenedores", format=",.0f"),
-                alt.Tooltip("CodigoVerificador:N", title="Código verificador"),
-            ],
-        )
-    )
-
-    texto = (
-        alt.Chart(detalle.loc[detalle["ContenedoresMapa"].gt(0)])
-        .mark_text(fontSize=9, fontWeight="bold", color="#0F172A")
-        .encode(
-            x=alt.X("PosicionMapa:N", sort=orden_posiciones),
-            y=alt.Y("NivelMapa:N", sort=orden_niveles),
-            text="TextoCelda:N",
-        )
-    )
-
-    alto_mapa = max(230, min(360, len(orden_niveles) * 46))
-    mapa_chart = (base_rect + texto).properties(
-        height=alto_mapa,
-        title=f"{sector_seleccionado} · Pasillo {pasillo_seleccionado} · Vista 2D",
+    mapa_chart = _grafico_pasillo_2d(
+        detalle,
+        f"{sector_seleccionado} · Pasillo {pasillo_seleccionado} · Vista 2D",
+        altura_minima=max(230, min(360, len(orden_niveles) * 46)),
     )
 
     with panel_mapa:
@@ -613,13 +1018,9 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
                 f"##### {sector_seleccionado} · Pasillo {pasillo_seleccionado} · "
                 f"{'Plano 2D' if vista_mapa == '2D' else 'Modelo 3D'}"
             )
-
             if vista_mapa == "2D":
-                st.altair_chart(
-                    mapa_chart,
-                    use_container_width=True,
-                    key="mapa_detalle_ubicaciones_2d",
-                )
+                st.altair_chart(mapa_chart, use_container_width=True,
+                                key="mapa_detalle_ubicaciones_2d")
             else:
                 figura_3d = construir_mapa_3d(
                     detalle=detalle,
@@ -628,45 +1029,33 @@ def mostrar_mapa_visual_deposito(tabla_ocupacion: pd.DataFrame) -> None:
                     titulo="",
                 )
                 figura_3d.update_layout(
-                    height=410,
-                    margin=dict(l=0, r=0, t=10, b=0),
+                    height=410, margin=dict(l=0, r=0, t=10, b=0),
                     legend=dict(orientation="h", y=1.0, x=0.01),
                 )
                 st.plotly_chart(
-                    figura_3d,
-                    use_container_width=True,
-                    config={
-                        "displaylogo": False,
-                        "scrollZoom": True,
-                        "responsive": True,
-                    },
+                    figura_3d, use_container_width=True,
+                    config={"displaylogo": False, "scrollZoom": True, "responsive": True},
                     key="mapa_detalle_ubicaciones_3d",
                 )
-                st.caption(
-                    "Arrastrá para rotar, usá la rueda para acercar y pasá el cursor "
-                    "sobre cada bloque para ver su detalle."
-                )
+                st.caption("Arrastrá para rotar, acercá y pasá el cursor sobre cada bloque.")
 
-    with st.expander("📋 Ver ubicaciones del pasillo seleccionado"):
+    with st.expander("📋 Ver artículos y ubicaciones del pasillo seleccionado"):
         columnas = [
             "EtiquetaUbicacion", "AreaMapa", "PasilloMapa", "PosicionMapa",
-            "NivelMapa", "Tercio", "EstadoMapa", "ContenedoresMapa",
-            "CodigoVerificador",
+            "NivelMapa", "Tercio", "EstadoMapa", "ContenedoresDetalleMapa",
+            "SKUsMapa", "UnidadesMapa", "ArticulosMapa", "CodigoVerificador",
         ]
         tabla_detalle = detalle[[c for c in columnas if c in detalle.columns]].copy()
         tabla_detalle = tabla_detalle.rename(columns={
-            "EtiquetaUbicacion": "Ubicación",
-            "AreaMapa": "Área",
-            "PasilloMapa": "Pasillo",
-            "PosicionMapa": "Posición",
-            "NivelMapa": "Nivel",
-            "EstadoMapa": "Estado",
-            "ContenedoresMapa": "Contenedores",
+            "EtiquetaUbicacion": "Ubicación", "AreaMapa": "Área",
+            "PasilloMapa": "Pasillo", "PosicionMapa": "Posición",
+            "NivelMapa": "Nivel", "EstadoMapa": "Estado",
+            "ContenedoresDetalleMapa": "Contenedores", "SKUsMapa": "SKU distintos",
+            "UnidadesMapa": "Unidades", "ArticulosMapa": "Artículos",
             "CodigoVerificador": "Código verificador",
         })
+        tabla_detalle["Artículos"] = tabla_detalle["Artículos"].str.replace("<br>", " | ", regex=False)
         st.dataframe(
-            dataframe_para_streamlit(tabla_detalle),
-            hide_index=True, width="stretch", height=420,
+            dataframe_para_streamlit(tabla_detalle), hide_index=True,
+            width="stretch", height=460,
         )
-
-

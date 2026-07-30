@@ -61,6 +61,12 @@ from models.expresos import (
 
 from utils.leer_fuente_flexible import leer_archivo_flexible
 from models.cobertura_pedidos import analizar_cobertura_pedidos_erp
+from utils.gestion_cobertura import (
+    leer_pedidos_informados,
+    obtener_pedidos_informados,
+    marcar_pedidos_informados,
+    reabrir_pedidos_informados,
+)
 
 
 
@@ -177,6 +183,11 @@ def cargar_datos_operativos():
         "disponible_digip": leer_archivo_flexible(
             CARPETA_DATOS, ["Disponible Digip", "disponible_digip"], cache=False
         )[0],
+        "stock_total_erp": leer_archivo_flexible(
+            CARPETA_DATOS,
+            ["info stock total", "Info Stock Total", "stock total erp"],
+            cache=False,
+        )[0],
     }
 
 
@@ -272,6 +283,7 @@ df_volumetria = datos_operativos["volumetria"].copy()
 df_stock_detallado = datos_operativos["stock_detallado"].copy()
 df_stock_recepcion = datos_operativos["stock_recepcion"].copy()
 df_disponible_digip = datos_operativos["disponible_digip"].copy()
+df_stock_total_erp = datos_operativos["stock_total_erp"].copy()
 
 
 # =====================================================
@@ -1088,9 +1100,13 @@ tabla_detalle_dashboard = construir_tabla_detalle(
 
 lineas_cobertura_erp, resumen_cobertura_erp = analizar_cobertura_pedidos_erp(
     tabla_detalle_erp=tabla_detalle_dashboard,
-    tabla_pendientes_erp=tabla_pendientes_erp,
+    # Se utiliza el reporte crudo para conservar:
+    # nro_com, fec_com, cod_cli y nombre.
+    tabla_pendientes_erp=df_pendientes_erp,
     df_pedidos_digip=df_pedidos,
     df_disponible=df_disponible_digip,
+    df_stock_erp=df_stock_total_erp,
+    tabla_clientes=tabla_clientes,
 )
 
 tab_dashboard, tab_inteligencia, tab_cobertura, tab_operacion = st.tabs(
@@ -1190,8 +1206,15 @@ with tab_dashboard:
         fecha_max = datos_dashboard["FechaDia"].dropna().max()
 
         with st.expander("🔎 Filtros del dashboard", expanded=False):
-            filtro_1, filtro_2, filtro_3, filtro_4, filtro_5 = st.columns(
-                [1.25, 1, 1, 1, 0.85]
+            (
+                filtro_1,
+                filtro_2,
+                filtro_3,
+                filtro_4,
+                filtro_5,
+                filtro_6,
+            ) = st.columns(
+                [1.25, 1, 1, 1, 0.85, 0.85]
             )
 
             with filtro_1:
@@ -1251,10 +1274,29 @@ with tab_dashboard:
                     ),
                 )
 
+            with filtro_6:
+                ver_solo_cencosud = st.toggle(
+                    "Ver Cencosud",
+                    value=False,
+                    key="pedidos_ver_solo_cencosud",
+                    help=(
+                        "Encendido: muestra únicamente los pedidos "
+                        "de Cencosud."
+                    ),
+                )
+
         fecha_desde = None
         fecha_hasta = None
         if isinstance(rango, (list, tuple)) and len(rango) == 2:
             fecha_desde, fecha_hasta = rango
+
+        # Si se activa "Ver Cencosud", se fuerza la inclusión
+        # para evitar que ambos controles se contradigan.
+        incluir_cencosud_aplicado = (
+            True
+            if ver_solo_cencosud
+            else incluir_cencosud
+        )
 
         dashboard_filtrado = aplicar_filtros_dashboard(
             datos_dashboard,
@@ -1263,8 +1305,23 @@ with tab_dashboard:
             estados=estados_filtro,
             preparaciones=preparacion_filtro,
             planificaciones=planificacion_filtro,
-            incluir_cencosud=incluir_cencosud,
+            incluir_cencosud=incluir_cencosud_aplicado,
         )
+
+        if ver_solo_cencosud:
+            columna_cliente_cencosud = (
+                "ClienteVisible"
+                if "ClienteVisible" in dashboard_filtrado.columns
+                else "ClienteDescripcion"
+            )
+
+            dashboard_filtrado = dashboard_filtrado.loc[
+                dashboard_filtrado[columna_cliente_cencosud]
+                .fillna("")
+                .astype(str)
+                .str.upper()
+                .str.contains("CENCOSUD", regex=False)
+            ].copy()
 
         kpis = calcular_kpis(dashboard_filtrado)
 
@@ -2168,232 +2225,576 @@ with tab_inteligencia:
 with tab_cobertura:
     st.subheader("🚨 Compromisos ERP sin cobertura")
     st.caption(
-        "Pedidos que permanecen pendientes en el ERP y no están activos actualmente en DIGIP. "
-        "Una transmisión histórica anterior no los excluye del análisis."
+        "La cobertura inmediata se calcula con el disponible aprobado del ERP "
+        "(est_1). El pendiente o tránsito se toma de est_8. El stock WMS se "
+        "mantiene como control para detectar diferencias entre sistemas."
     )
 
     if resumen_cobertura_erp.empty:
         st.success("No hay pedidos pendientes fuera de DIGIP para evaluar.")
     else:
-        total_pedidos = int(resumen_cobertura_erp["Pedido"].nunique())
-        con_faltante = int(resumen_cobertura_erp["UnidadesFaltantes"].gt(0).sum())
-        sin_cobertura = int(resumen_cobertura_erp["EstadoCobertura"].eq("Sin cobertura").sum())
-        unidades_faltantes = float(resumen_cobertura_erp["UnidadesFaltantes"].sum())
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pendientes fuera de DIGIP", f"{total_pedidos:,}".replace(",", "."))
-        c2.metric("Pedidos con faltante", f"{con_faltante:,}".replace(",", "."))
-        c3.metric("Sin cobertura", f"{sin_cobertura:,}".replace(",", "."))
-        c4.metric("Unidades faltantes", f"{unidades_faltantes:,.0f}".replace(",", "."))
-
-        solo_faltantes = st.toggle(
-            "Mostrar solamente pedidos con faltante", value=True,
-            key="pedidos_solo_faltantes_cobertura",
+        total_pedidos = int(
+            resumen_cobertura_erp["Pedido"].nunique()
         )
+        con_faltante = int(
+            resumen_cobertura_erp["UnidadesFaltantes"].gt(0).sum()
+        )
+        sin_cobertura = int(
+            resumen_cobertura_erp["EstadoCobertura"]
+            .eq("Sin cobertura")
+            .sum()
+        )
+        cobertura_transito = int(
+            resumen_cobertura_erp["EstadoCobertura"]
+            .eq("Cobertura en tránsito")
+            .sum()
+        )
+        con_diferencias = int(
+            resumen_cobertura_erp["CodigosConDiferencia"].gt(0).sum()
+        )
+        unidades_faltantes = int(
+            resumen_cobertura_erp["UnidadesFaltantes"].sum()
+        )
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric(
+            "Pendientes fuera de DIGIP",
+            f"{total_pedidos:,}".replace(",", "."),
+        )
+        c2.metric(
+            "Pedidos con faltante",
+            f"{con_faltante:,}".replace(",", "."),
+        )
+        c3.metric(
+            "Sin cobertura real",
+            f"{sin_cobertura:,}".replace(",", "."),
+        )
+        c4.metric(
+            "Cubiertos por tránsito",
+            f"{cobertura_transito:,}".replace(",", "."),
+        )
+        c5.metric(
+            "Diferencias ERP/WMS",
+            f"{con_diferencias:,}".replace(",", "."),
+        )
+
+        st.caption(
+            f"Unidades sin cobertura inmediata: "
+            f"{unidades_faltantes:,}".replace(",", ".")
+        )
+
+        pedidos_informados = obtener_pedidos_informados()
+
+        filtro_1, filtro_2, filtro_3 = st.columns(
+            [1.05, 1.05, 1.35]
+        )
+
+        with filtro_1:
+            solo_problemas = st.toggle(
+                "Mostrar solo casos con problemas",
+                value=True,
+                key="pedidos_solo_problemas_cobertura",
+                help=(
+                    "Muestra únicamente Sin cobertura y "
+                    "Cobertura en tránsito."
+                ),
+            )
+
+        with filtro_2:
+            ocultar_informados = st.toggle(
+                "Ocultar pedidos informados",
+                value=True,
+                key="pedidos_ocultar_informados_cobertura",
+            )
+
+        with filtro_3:
+            estados_cobertura = st.multiselect(
+                "Estado de cobertura",
+                options=[
+                    "Sin cobertura",
+                    "Cobertura en tránsito",
+                    "Con cobertura",
+                ],
+                default=[],
+                key="filtro_estado_cobertura_erp",
+            )
+
         vista_resumen = resumen_cobertura_erp.copy()
-        if solo_faltantes:
-            vista_resumen = vista_resumen.loc[vista_resumen["UnidadesFaltantes"].gt(0)].copy()
 
-        pedidos_visibles = set(vista_resumen["Pedido"].astype(str))
-        vista_lineas = lineas_cobertura_erp.loc[
-            lineas_cobertura_erp["Pedido"].astype(str).isin(pedidos_visibles)
-        ].copy()
+        vista_resumen["Informado"] = (
+            vista_resumen["Pedido"]
+            .astype(str)
+            .isin(pedidos_informados)
+        )
 
-        if solo_faltantes:
-            vista_lineas = vista_lineas.loc[
-                vista_lineas["CantidadFaltante"].gt(0)
+        if solo_problemas:
+            vista_resumen = vista_resumen.loc[
+                vista_resumen["EstadoCobertura"].isin(
+                    [
+                        "Sin cobertura",
+                        "Cobertura en tránsito",
+                    ]
+                )
             ].copy()
 
-        # =====================================================
-        # CONSOLIDADO DE CÓDIGOS CON FALTANTE
-        # =====================================================
-        lineas_codigos = lineas_cobertura_erp.loc[
-            lineas_cobertura_erp["Pedido"].astype(str).isin(pedidos_visibles)
+        if ocultar_informados:
+            vista_resumen = vista_resumen.loc[
+                ~vista_resumen["Informado"]
+            ].copy()
+
+        if estados_cobertura:
+            vista_resumen = vista_resumen.loc[
+                vista_resumen["EstadoCobertura"].isin(
+                    estados_cobertura
+                )
+            ].copy()
+
+        pedidos_visibles = set(
+            vista_resumen["Pedido"].astype(str)
+        )
+
+        vista_lineas = lineas_cobertura_erp.loc[
+            lineas_cobertura_erp["Pedido"]
+            .astype(str)
+            .isin(pedidos_visibles)
         ].copy()
 
-        if lineas_codigos.empty:
+        if solo_problemas:
+            # El botón controla específicamente la tabla de detalle:
+            # cuando está activo, oculta todos los ítems con cobertura,
+            # aunque tengan una alerta de diferencia ERP/WMS.
+            vista_lineas = vista_lineas.loc[
+                vista_lineas["EstadoCobertura"].isin(
+                    [
+                        "Sin cobertura",
+                        "Cobertura en tránsito",
+                    ]
+                )
+            ].copy()
+
+        if vista_lineas.empty:
             resumen_codigos_faltantes = pd.DataFrame(
                 columns=[
                     "ArticuloCodigo",
                     "ArticuloDescripcion",
-                    "Disponible",
+                    "DisponibleERP",
+                    "TransitoERP",
+                    "DisponibleWMS",
+                    "DiferenciaERPvsWMS",
                     "Comprometido",
-                    "Faltante",
+                    "FaltanteInmediato",
+                    "FaltanteLuegoTransito",
                     "PedidosAfectados",
+                    "AlertaStock",
                 ]
             )
         else:
             resumen_codigos_faltantes = (
-                lineas_codigos
+                vista_lineas
                 .groupby(
-                    ["ArticuloCodigo", "ArticuloDescripcion"],
+                    [
+                        "ArticuloCodigo",
+                        "ArticuloDescripcion",
+                    ],
                     as_index=False,
                     dropna=False,
                 )
                 .agg(
-                    Disponible=("StockDisponibleInicial", "max"),
-                    Comprometido=("CantidadSolicitada", "sum"),
-                    Faltante=("CantidadFaltante", "sum"),
+                    DisponibleERP=(
+                        "DisponibleERPInicial",
+                        "max",
+                    ),
+                    TransitoERP=("TransitoERP", "max"),
+                    DisponibleWMS=("DisponibleWMS", "max"),
+                    DiferenciaERPvsWMS=(
+                        "DiferenciaERPvsWMS",
+                        "max",
+                    ),
+                    Comprometido=(
+                        "CantidadSolicitada",
+                        "sum",
+                    ),
+                    FaltanteInmediato=(
+                        "CantidadFaltante",
+                        "sum",
+                    ),
+                    FaltanteLuegoTransito=(
+                        "FaltanteLuegoTransito",
+                        "sum",
+                    ),
                     PedidosAfectados=("Pedido", "nunique"),
+                    AlertaStock=(
+                        "AlertaStock",
+                        lambda serie: " | ".join(
+                            dict.fromkeys(
+                                valor
+                                for valor in serie.astype(str)
+                                if valor.strip()
+                            )
+                        ),
+                    ),
                 )
             )
 
             resumen_codigos_faltantes = (
                 resumen_codigos_faltantes
-                .loc[resumen_codigos_faltantes["Faltante"].gt(0)]
+                .loc[
+                    resumen_codigos_faltantes[
+                        "FaltanteInmediato"
+                    ].gt(0)
+                    | resumen_codigos_faltantes[
+                        "AlertaStock"
+                    ].ne("")
+                ]
                 .sort_values(
-                    by=["Faltante", "Comprometido", "ArticuloCodigo"],
+                    by=[
+                        "FaltanteLuegoTransito",
+                        "FaltanteInmediato",
+                        "ArticuloCodigo",
+                    ],
                     ascending=[False, False, True],
                 )
                 .reset_index(drop=True)
             )
 
-            for columna in [
-                "Disponible",
-                "Comprometido",
-                "Faltante",
-                "PedidosAfectados",
-            ]:
-                resumen_codigos_faltantes[columna] = (
-                    pd.to_numeric(
-                        resumen_codigos_faltantes[columna],
-                        errors="coerce",
-                    )
-                    .fillna(0)
-                    .astype(int)
+        st.markdown("#### Gestión de pedidos informados")
+
+        usuario_actual = str(
+            st.session_state.get(
+                "usuario",
+                st.session_state.get(
+                    "username",
+                    st.session_state.get(
+                        "email",
+                        "",
+                    ),
+                ),
+            )
+        ).strip()
+
+        opciones_para_informar = (
+            vista_resumen.loc[
+                ~vista_resumen["Informado"],
+                "Pedido",
+            ]
+            .astype(str)
+            .tolist()
+        )
+
+        col_informar_1, col_informar_2 = st.columns(
+            [3, 1],
+            vertical_alignment="bottom",
+        )
+
+        with col_informar_1:
+            pedidos_a_informar = st.multiselect(
+                "Pedidos incluidos en el mail a Comercial",
+                options=opciones_para_informar,
+                default=[],
+                key="pedidos_seleccionados_para_informar",
+                placeholder="Seleccioná uno o varios pedidos",
+            )
+
+        with col_informar_2:
+            confirmar_informados = st.button(
+                "📨 Marcar como informados",
+                key="marcar_cobertura_como_informada",
+                width="stretch",
+                disabled=not pedidos_a_informar,
+            )
+
+        if confirmar_informados:
+            marcar_pedidos_informados(
+                pedidos=pedidos_a_informar,
+                usuario=usuario_actual,
+            )
+
+            st.toast(
+                f"{len(pedidos_a_informar)} pedido(s) "
+                "marcado(s) como informados.",
+                icon="✅",
+            )
+            st.rerun()
+
+        with st.expander(
+            f"📬 Historial de informados ({len(pedidos_informados)})",
+            expanded=False,
+        ):
+            historial_informados = leer_pedidos_informados()
+            historial_activo = historial_informados.loc[
+                historial_informados["Estado"].eq("INFORMADO")
+            ].copy()
+
+            if historial_activo.empty:
+                st.info("Todavía no hay pedidos marcados como informados.")
+            else:
+                st.dataframe(
+                    historial_activo,
+                    hide_index=True,
+                    width="stretch",
+                    height=min(
+                        330,
+                        75 + len(historial_activo) * 35,
+                    ),
                 )
 
-        columna_tablas, columna_codigos = st.columns(
-            [1, 1],
+                pedidos_a_reabrir = st.multiselect(
+                    "Volver a mostrar pedidos",
+                    options=historial_activo["Pedido"].tolist(),
+                    default=[],
+                    key="pedidos_informados_a_reabrir",
+                )
+
+                if st.button(
+                    "↩️ Quitar marca de informado",
+                    key="reabrir_pedidos_cobertura",
+                    disabled=not pedidos_a_reabrir,
+                ):
+                    reabrir_pedidos_informados(
+                        pedidos=pedidos_a_reabrir,
+                        usuario=usuario_actual,
+                    )
+
+                    st.toast(
+                        f"{len(pedidos_a_reabrir)} pedido(s) "
+                        "vuelven a estar visibles.",
+                        icon="↩️",
+                    )
+                    st.rerun()
+
+        st.markdown("#### Resumen por pedido")
+        st.dataframe(
+            vista_resumen,
+            hide_index=True,
+            width="stretch",
+            height=300,
+            column_config={
+                "Informado": st.column_config.CheckboxColumn(
+                    "Informado",
+                    disabled=True,
+                ),
+                "Fecha": st.column_config.DateColumn(
+                    "Fecha",
+                    format="DD/MM/YYYY",
+                ),
+                "Planificacion": st.column_config.TextColumn(
+                    "Día de entrega",
+                    width="medium",
+                ),
+                "PorcentajeCobertura": (
+                    st.column_config.ProgressColumn(
+                        "Cobertura inmediata",
+                        min_value=0,
+                        max_value=100,
+                        format="%.1f %%",
+                    )
+                ),
+                "UnidadesFaltantes": (
+                    st.column_config.NumberColumn(
+                        "Faltante inmediato",
+                        format="%d",
+                    )
+                ),
+                "UnidadesEnTransito": (
+                    st.column_config.NumberColumn(
+                        "Cubierto por tránsito",
+                        format="%d",
+                    )
+                ),
+                "FaltanteLuegoTransito": (
+                    st.column_config.NumberColumn(
+                        "Faltante real",
+                        format="%d",
+                    )
+                ),
+                "CodigosConDiferencia": (
+                    st.column_config.NumberColumn(
+                        "Diferencias ERP/WMS",
+                        format="%d",
+                    )
+                ),
+            },
+        )
+
+        columna_detalle, columna_codigos = st.columns(
+            [1.35, 1],
             gap="large",
             vertical_alignment="top",
         )
 
-        with columna_tablas:
-            st.markdown("#### Resumen por pedido")
-            st.dataframe(
-                vista_resumen,
-                hide_index=True,
-                width="stretch",
-                height=300,
-                column_config={
-                    "Fecha": st.column_config.DateColumn(
-                        "Fecha",
-                        format="DD/MM/YYYY",
-                    ),
-                    "PorcentajeCobertura": st.column_config.ProgressColumn(
-                        "Cobertura",
-                        min_value=0,
-                        max_value=100,
-                        format="%.1f %%",
-                    ),
-                    "UnidadesFaltantes": st.column_config.NumberColumn(
-                        "Faltante",
-                        format="%.0f",
-                    ),
-                },
-            )
-
-            st.markdown("#### Detalle de artículos")
+        with columna_detalle:
+            st.markdown("#### Detalle por artículo y pedido")
             st.dataframe(
                 vista_lineas,
                 hide_index=True,
                 width="stretch",
-                height=390,
+                height=600,
                 column_config={
                     "Fecha": st.column_config.DateColumn(
                         "Fecha",
                         format="DD/MM/YYYY",
                     ),
-                    "CantidadSolicitada": st.column_config.NumberColumn(
-                        "Solicitado",
-                        format="%d",
+                    "CantidadSolicitada": (
+                        st.column_config.NumberColumn(
+                            "Solicitado",
+                            format="%d",
+                        )
                     ),
-                    "StockDisponibleInicial": st.column_config.NumberColumn(
-                        "Disponible inicial",
-                        format="%d",
+                    "DisponibleERPInicial": (
+                        st.column_config.NumberColumn(
+                            "Disponible ERP",
+                            format="%d",
+                        )
                     ),
-                    "CantidadCubierta": st.column_config.NumberColumn(
-                        "Cubierto",
-                        format="%d",
+                    "TransitoERP": (
+                        st.column_config.NumberColumn(
+                            "Tránsito ERP",
+                            format="%d",
+                        )
                     ),
-                    "CantidadFaltante": st.column_config.NumberColumn(
-                        "Faltante",
-                        format="%d",
+                    "DisponibleWMS": (
+                        st.column_config.NumberColumn(
+                            "Disponible WMS",
+                            format="%d",
+                        )
+                    ),
+                    "DiferenciaERPvsWMS": (
+                        st.column_config.NumberColumn(
+                            "Dif. ERP-WMS",
+                            format="%d",
+                        )
+                    ),
+                    "CantidadFaltante": (
+                        st.column_config.NumberColumn(
+                            "Faltante inmediato",
+                            format="%d",
+                        )
+                    ),
+                    "FaltanteLuegoTransito": (
+                        st.column_config.NumberColumn(
+                            "Faltante real",
+                            format="%d",
+                        )
                     ),
                 },
             )
 
         with columna_codigos:
-            st.markdown("#### Artículos comprometidos sin stock")
+            st.markdown("#### Diagnóstico consolidado por código")
             st.caption(
-                "Consolidado por código de las ventas pendientes fuera de DIGIP."
+                "Compara el disponible aprobado del ERP, el tránsito "
+                "y el disponible operativo del WMS."
             )
 
             if resumen_codigos_faltantes.empty:
                 st.success(
-                    "No hay artículos con faltante para los pedidos visibles."
+                    "No hay faltantes ni diferencias para los pedidos visibles."
                 )
             else:
                 st.dataframe(
                     resumen_codigos_faltantes,
                     hide_index=True,
                     width="stretch",
-                    height=750,
+                    height=600,
                     column_config={
-                        "ArticuloCodigo": st.column_config.TextColumn(
-                            "Código",
-                            width="small",
+                        "ArticuloCodigo": (
+                            st.column_config.TextColumn(
+                                "Código",
+                                width="small",
+                            )
                         ),
-                        "ArticuloDescripcion": st.column_config.TextColumn(
-                            "Descripción",
-                            width="large",
+                        "ArticuloDescripcion": (
+                            st.column_config.TextColumn(
+                                "Descripción",
+                                width="large",
+                            )
                         ),
-                        "Disponible": st.column_config.NumberColumn(
-                            "Disponible",
-                            format="%d",
+                        "DisponibleERP": (
+                            st.column_config.NumberColumn(
+                                "ERP disponible",
+                                format="%d",
+                            )
                         ),
-                        "Comprometido": st.column_config.NumberColumn(
-                            "Comprometido",
-                            format="%d",
+                        "TransitoERP": (
+                            st.column_config.NumberColumn(
+                                "ERP tránsito",
+                                format="%d",
+                            )
                         ),
-                        "Faltante": st.column_config.NumberColumn(
-                            "Faltante",
-                            format="%d",
+                        "DisponibleWMS": (
+                            st.column_config.NumberColumn(
+                                "WMS disponible",
+                                format="%d",
+                            )
                         ),
-                        "PedidosAfectados": st.column_config.NumberColumn(
-                            "Pedidos",
-                            format="%d",
+                        "DiferenciaERPvsWMS": (
+                            st.column_config.NumberColumn(
+                                "Dif. ERP-WMS",
+                                format="%d",
+                            )
+                        ),
+                        "Comprometido": (
+                            st.column_config.NumberColumn(
+                                "Comprometido",
+                                format="%d",
+                            )
+                        ),
+                        "FaltanteInmediato": (
+                            st.column_config.NumberColumn(
+                                "Faltante inmediato",
+                                format="%d",
+                            )
+                        ),
+                        "FaltanteLuegoTransito": (
+                            st.column_config.NumberColumn(
+                                "Faltante real",
+                                format="%d",
+                            )
                         ),
                     },
                 )
 
         col_descarga1, col_descarga2, col_descarga3 = st.columns(3)
+
         with col_descarga1:
             st.download_button(
                 "⬇️ Descargar resumen",
-                data=vista_resumen.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
-                file_name="Pedidos_ERP_Sin_Cobertura.csv", mime="text/csv",
-                key="descargar_resumen_cobertura_erp", width="stretch",
+                data=vista_resumen.to_csv(
+                    index=False,
+                    sep=";",
+                    encoding="utf-8-sig",
+                ).encode("utf-8-sig"),
+                file_name="Pedidos_ERP_Sin_Cobertura.csv",
+                mime="text/csv",
+                key="descargar_resumen_cobertura_erp",
+                width="stretch",
             )
+
         with col_descarga2:
             st.download_button(
                 "⬇️ Descargar detalle",
-                data=vista_lineas.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig"),
-                file_name="Detalle_Pedidos_ERP_Sin_Cobertura.csv", mime="text/csv",
-                key="descargar_detalle_cobertura_erp", width="stretch",
+                data=vista_lineas.to_csv(
+                    index=False,
+                    sep=";",
+                    encoding="utf-8-sig",
+                ).encode("utf-8-sig"),
+                file_name="Detalle_Pedidos_ERP_Sin_Cobertura.csv",
+                mime="text/csv",
+                key="descargar_detalle_cobertura_erp",
+                width="stretch",
             )
+
         with col_descarga3:
             st.download_button(
-                "⬇️ Descargar artículos",
+                "⬇️ Descargar diagnóstico",
                 data=resumen_codigos_faltantes.to_csv(
                     index=False,
                     sep=";",
                     encoding="utf-8-sig",
                 ).encode("utf-8-sig"),
-                file_name="Articulos_Comprometidos_Sin_Stock.csv",
+                file_name="Diagnostico_Stock_ERP_WMS.csv",
                 mime="text/csv",
-                key="descargar_articulos_sin_stock_erp",
+                key="descargar_diagnostico_stock_erp_wms",
                 width="stretch",
             )
 

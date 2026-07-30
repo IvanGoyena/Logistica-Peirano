@@ -1149,6 +1149,33 @@ with tab_dashboard:
         "Los pedidos RETIRA no consumen capacidad de reparto."
     )
 
+    filtro_cencosud_1, filtro_cencosud_2, espacio_filtro = st.columns(
+        [0.9, 0.9, 4.2],
+        vertical_alignment="center",
+    )
+
+    with filtro_cencosud_1:
+        incluir_cencosud_dashboard = st.toggle(
+            "Incluir Cencosud",
+            value=True,
+            key="despachos_incluir_cencosud_dashboard",
+            help=(
+                "Encendido: incluye los pedidos de Cencosud. "
+                "Apagado: muestra el dashboard sin Cencosud."
+            ),
+        )
+
+    with filtro_cencosud_2:
+        ver_solo_cencosud_dashboard = st.toggle(
+            "Ver Cencosud",
+            value=False,
+            key="despachos_ver_solo_cencosud_dashboard",
+            help=(
+                "Encendido: muestra únicamente los pedidos "
+                "de Cencosud."
+            ),
+        )
+
     CAPACIDAD_CAMIONETA_M3 = 8.0
     CAPACIDAD_CAMION_M3 = 15.0
 
@@ -1223,6 +1250,31 @@ with tab_dashboard:
     )
 
     base_dashboard = tabla_disponible_planificacion.copy()
+
+    cliente_dashboard = (
+        base_dashboard["ClienteDescripcion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    mascara_cencosud_dashboard = cliente_dashboard.str.contains(
+        "CENCOSUD",
+        regex=False,
+    )
+
+    # "Ver Cencosud" tiene prioridad sobre "Incluir Cencosud"
+    # para evitar que ambos controles se contradigan.
+    if ver_solo_cencosud_dashboard:
+        base_dashboard = base_dashboard.loc[
+            mascara_cencosud_dashboard
+        ].copy()
+
+    elif not incluir_cencosud_dashboard:
+        base_dashboard = base_dashboard.loc[
+            ~mascara_cencosud_dashboard
+        ].copy()
 
     base_dashboard["PlanificacionDashboard"] = (
         base_dashboard["Planificacion"]
@@ -1782,7 +1834,7 @@ with tab_dashboard:
         .reset_index()
         .rename(
             columns={
-                "PlanificacionDashboard": "Planificación",
+                "Planificaciones": "Planificación",
             }
         )
         .sort_values(
@@ -1851,46 +1903,129 @@ with tab_dashboard:
 
     with panel_camion:
 
-        st.markdown("#### 🚛 Pedidos candidatos a camión (> 8 m³)")
+        st.markdown("#### 🚛 Clientes candidatos a camión (> 8 m³)")
 
-        if base_camion_dashboard.empty:
+        # La necesidad de transporte se analiza por cliente completo.
+        # Por eso se parte de TODOS los pedidos de reparto y recién después
+        # se filtran los clientes cuyo volumen acumulado supera 8 m³.
+        # Regla especial para Cencosud:
+        # solamente se consolidan como carga de camión los pedidos
+        # cuya planificación es EASY. Los pedidos Cencosud con
+        # planificación semanal/diaria continúan en los repartos normales.
+        cliente_reparto_normalizado = (
+            base_reparto_dashboard["ClienteDescripcion"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        planificacion_reparto_normalizada = (
+            base_reparto_dashboard["PlanificacionDashboard"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        es_cencosud_reparto = cliente_reparto_normalizado.str.contains(
+            "CENCOSUD",
+            regex=False,
+        )
+
+        base_clientes_camion = base_reparto_dashboard.loc[
+            ~es_cencosud_reparto
+            | planificacion_reparto_normalizada.eq("EASY")
+        ].copy()
+
+        clientes_camion_dashboard = (
+            base_clientes_camion
+            .groupby(
+                [
+                    "ClienteCodigo",
+                    "ClienteDescripcion",
+                ],
+                as_index=False,
+                dropna=False,
+            )
+            .agg(
+                Planificaciones=(
+                    "PlanificacionDashboard",
+                    lambda serie: ", ".join(
+                        sorted(
+                            {
+                                str(valor).strip()
+                                for valor in serie
+                                if str(valor).strip()
+                            }
+                        )
+                    ),
+                ),
+                Pedidos=(
+                    "Pedido",
+                    lambda serie: ", ".join(
+                        sorted(
+                            {
+                                str(valor).strip()
+                                for valor in serie
+                                if str(valor).strip()
+                            }
+                        )
+                    ),
+                ),
+                CantidadPedidos=("Pedido", "nunique"),
+                VolumenM3=("VolumenDashboard", "sum"),
+                Unidades=("UnidadesDashboard", "sum"),
+            )
+        )
+
+        clientes_camion_dashboard = clientes_camion_dashboard.loc[
+            clientes_camion_dashboard["VolumenM3"]
+            .gt(CAPACIDAD_CAMIONETA_M3)
+        ].copy()
+
+        if clientes_camion_dashboard.empty:
             st.success(
-                "No hay pedidos individuales que superen 8 m³.",
+                "No hay clientes con volumen acumulado superior a 8 m³.",
                 icon="✅",
             )
         else:
-            columnas_camion_dashboard = [
-                "Pedido",
-                "ClienteCodigo",
-                "ClienteDescripcion",
-                "PlanificacionDashboard",
-                "VolumenDashboard",
-                "UnidadesDashboard",
-                "CodigoDespacho",
-            ]
+            clientes_camion_dashboard["CamionetasEstimadas"] = (
+                clientes_camion_dashboard["VolumenM3"]
+                .div(CAPACIDAD_CAMIONETA_M3)
+                .apply(math.ceil)
+                .astype(int)
+            )
 
-            columnas_camion_dashboard = [
-                columna
-                for columna in columnas_camion_dashboard
-                if columna in base_camion_dashboard.columns
-            ]
+            clientes_camion_dashboard["Nivel"] = (
+                clientes_camion_dashboard["CamionetasEstimadas"]
+                .map(
+                    lambda cantidad: (
+                        "🟢 1 vehículo"
+                        if cantidad == 1
+                        else (
+                            "🟡 2 vehículos"
+                            if cantidad == 2
+                            else f"🔴 {cantidad} vehículos"
+                        )
+                    )
+                )
+            )
 
             vista_camion_dashboard = (
-                base_camion_dashboard[
-                    columnas_camion_dashboard
-                ]
+                clientes_camion_dashboard
                 .sort_values(
-                    "VolumenDashboard",
-                    ascending=False,
+                    ["CamionetasEstimadas", "VolumenM3"],
+                    ascending=[False, False],
                 )
                 .rename(
                     columns={
                         "ClienteCodigo": "Código cliente",
                         "ClienteDescripcion": "Cliente",
                         "PlanificacionDashboard": "Planificación",
-                        "VolumenDashboard": "Volumen m³",
-                        "UnidadesDashboard": "Unidades",
-                        "CodigoDespacho": "Código despacho",
+                        "CantidadPedidos": "Cant. pedidos",
+                        "VolumenM3": "Volumen m³",
+                        "CamionetasEstimadas": "Vehículos estimados",
                     }
                 )
             )
@@ -1904,6 +2039,14 @@ with tab_dashboard:
                     80 + len(vista_camion_dashboard) * 35,
                 ),
                 column_config={
+                    "Pedidos": st.column_config.TextColumn(
+                        "Pedidos",
+                        width="large",
+                    ),
+                    "Cant. pedidos": st.column_config.NumberColumn(
+                        "Cant. pedidos",
+                        format="%d",
+                    ),
                     "Volumen m³": st.column_config.NumberColumn(
                         "Volumen m³",
                         format="%.3f",
@@ -1911,6 +2054,81 @@ with tab_dashboard:
                     "Unidades": st.column_config.NumberColumn(
                         "Unidades",
                         format="%d",
+                    ),
+                    "Vehículos estimados": (
+                        st.column_config.NumberColumn(
+                            "Vehículos estimados",
+                            format="%d",
+                        )
+                    ),
+                },
+            )
+
+        st.markdown("#### 🏬 Pedidos RETIRA")
+
+        if base_retira_dashboard.empty:
+            st.info(
+                "No hay pedidos RETIRA pendientes de preparación."
+            )
+        else:
+            columnas_retira_dashboard = [
+                "Pedido",
+                "ClienteCodigo",
+                "ClienteDescripcion",
+                "PlanificacionDashboard",
+                "UnidadesDashboard",
+                "TotalSKUs",
+                "VolumenDashboard",
+                "CodigoDespacho",
+            ]
+
+            columnas_retira_dashboard = [
+                columna
+                for columna in columnas_retira_dashboard
+                if columna in base_retira_dashboard.columns
+            ]
+
+            vista_retira_dashboard = (
+                base_retira_dashboard[
+                    columnas_retira_dashboard
+                ]
+                .sort_values(
+                    ["ClienteDescripcion", "Pedido"],
+                    ascending=[True, True],
+                )
+                .rename(
+                    columns={
+                        "ClienteCodigo": "Código cliente",
+                        "ClienteDescripcion": "Cliente",
+                        "PlanificacionDashboard": "Planificación",
+                        "UnidadesDashboard": "Unidades",
+                        "TotalSKUs": "SKUs",
+                        "VolumenDashboard": "Volumen m³",
+                        "CodigoDespacho": "Código despacho",
+                    }
+                )
+            )
+
+            st.dataframe(
+                vista_retira_dashboard,
+                width="stretch",
+                hide_index=True,
+                height=min(
+                    330,
+                    80 + len(vista_retira_dashboard) * 35,
+                ),
+                column_config={
+                    "Unidades": st.column_config.NumberColumn(
+                        "Unidades",
+                        format="%d",
+                    ),
+                    "SKUs": st.column_config.NumberColumn(
+                        "SKUs",
+                        format="%d",
+                    ),
+                    "Volumen m³": st.column_config.NumberColumn(
+                        "Volumen m³",
+                        format="%.3f",
                     ),
                 },
             )
@@ -2294,13 +2512,32 @@ with tab_planificador:
             "NumeroCamionetaLogica"
         ] = resultado["NumeroCamioneta"]
 
-        # El número visible se extrae del nombre real.
-        resultado["NumeroCamioneta"] = (
+        # El número visible normalmente se extrae del nombre real
+        # del agrupador, por ejemplo "CAMIONETA LUN 2" -> 2.
+        #
+        # RETIRA es una excepción porque el agrupador se llama
+        # simplemente "RETIRA" y no termina en un número. En ese caso
+        # conservamos el número lógico generado por el planificador.
+        numero_desde_despacho = pd.to_numeric(
             resultado["DespachoDIGIP"]
+            .fillna("")
+            .astype(str)
             .str.extract(
                 r"(\d+)$",
                 expand=False
-            )
+            ),
+            errors="coerce",
+        )
+
+        numero_logico = pd.to_numeric(
+            resultado["NumeroCamionetaLogica"],
+            errors="coerce",
+        )
+
+        resultado["NumeroCamioneta"] = (
+            numero_desde_despacho
+            .fillna(numero_logico)
+            .fillna(1)
             .astype(int)
         )
 
