@@ -23,12 +23,15 @@ def render(contexto: dict) -> None:
         "Centro de control del ingreso y la existencia física del depósito."
     )
 
-    tab_recepcion, tab_stock_consolidado = st.tabs([
-        "📥 Recepción",
-        "📦 Stock consolidado",
-    ])
+    vista_existencia = st.segmented_control(
+        "Vista de existencia",
+        options=["📥 Recepción", "📦 Stock consolidado"],
+        default="📥 Recepción",
+        key="vista_existencia_stock",
+        label_visibility="collapsed",
+    )
 
-    with tab_recepcion:
+    if vista_existencia == "📥 Recepción":
         st.markdown("### 📥 Pendientes de ingreso")
         st.caption(
             "Mercadería pendiente informada por COMEX. Se excluyen las líneas "
@@ -772,7 +775,8 @@ def render(contexto: dict) -> None:
             },
         )
 
-    with tab_stock_consolidado:
+
+    else:
         st.markdown("### 🏭 Stock físico consolidado")
         st.caption(
             "Existencia física consolidada considerando Almacén/Picking y Recepción."

@@ -211,11 +211,26 @@ def render(contexto: dict) -> None:
 
 
 
-    # ---------------- MAPA VISUAL ----------------
-    mostrar_mapa_visual_deposito(
-        tabla_ocupacion,
-        tabla_stock_total_detallado=tabla_stock_total_detallado,
+    # ---------------- MAPA VISUAL (CARGA BAJO DEMANDA) ----------------
+    st.markdown("---")
+    mostrar_mapa = st.toggle(
+        "🗺️ Cargar mapa visual del depósito",
+        value=False,
+        key="cargar_mapa_visual_stock",
+        help=(
+            "El mapa realiza cruces y gráficos pesados. Se procesa solamente "
+            "cuando necesitás consultarlo."
+        ),
     )
+
+    if mostrar_mapa:
+        with st.spinner("Preparando mapa de ubicaciones..."):
+            mostrar_mapa_visual_deposito(
+                tabla_ocupacion,
+                tabla_stock_total_detallado=tabla_stock_total_detallado,
+            )
+    else:
+        st.info("El mapa está desactivado para reducir el consumo de memoria y procesamiento.")
 
     st.caption("ℹ️ Los datos se actualizan según la última extracción del stock y el Maestro Ubicaciones.")
 

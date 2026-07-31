@@ -17,7 +17,8 @@ def construir_tabla_pedidos(
     df_detalle,
     df_articulos,
     df_clientes,
-    df_volumetria
+    df_volumetria,
+    tabla_detalle_preparada=None,
 ):
 
     # ==========================================================
@@ -44,10 +45,14 @@ def construir_tabla_pedidos(
     # TABLA DETALLE
     # ==========================================================
 
-    tabla_detalle = construir_tabla_detalle(
-        df_detalle,
-        df_articulos,
-        df_volumetria
+    tabla_detalle = (
+        tabla_detalle_preparada
+        if tabla_detalle_preparada is not None
+        else construir_tabla_detalle(
+            df_detalle,
+            df_articulos,
+            df_volumetria,
+        )
     )
 
     # ==========================================================

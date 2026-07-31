@@ -123,7 +123,7 @@ st.set_page_config(
 @st.cache_data(
     show_spinner="Cargando datos operativos..."
 )
-def cargar_datos_operativos():
+def cargar_datos_base():
     """
     Lee los archivos una sola vez y conserva los DataFrames
     durante los reruns normales de Streamlit.
@@ -174,20 +174,54 @@ def cargar_datos_operativos():
             "Maestro Volumetria",
             cache=True
         ),
-        "stock_detallado": leer_archivo_flexible(
-            CARPETA_DATOS, ["stock_detallado"], cache=False
-        )[0],
-        "stock_recepcion": leer_archivo_flexible(
-            CARPETA_DATOS, ["stock_recepcion"], cache=False
-        )[0],
+    }
+
+
+@st.cache_data(show_spinner="Cargando fuentes de cobertura...")
+def cargar_datos_cobertura():
+    """Carga únicamente las fuentes necesarias para la vista de cobertura."""
+    return {
         "disponible_digip": leer_archivo_flexible(
-            CARPETA_DATOS, ["Disponible Digip", "disponible_digip"], cache=False
+            CARPETA_DATOS,
+            ["Disponible Digip", "disponible_digip"],
+            cache=False,
         )[0],
         "stock_total_erp": leer_archivo_flexible(
             CARPETA_DATOS,
             ["info stock total", "Info Stock Total", "stock total erp"],
             cache=False,
         )[0],
+    }
+
+
+@st.cache_data(show_spinner="Preparando tablas de pedidos...")
+def construir_tablas_base_cacheadas(
+    df_pedidos,
+    df_detalle,
+    df_articulos,
+    df_clientes,
+    df_volumetria,
+    df_transmisiones,
+    df_expresos,
+    df_pendientes_erp,
+):
+    """Construye una sola vez las tablas comunes a todas las vistas."""
+    detalle = construir_tabla_detalle(df_detalle, df_articulos, df_volumetria)
+    pedidos = construir_tabla_pedidos(
+        df_pedidos,
+        df_detalle,
+        df_articulos,
+        df_clientes,
+        df_volumetria,
+        tabla_detalle_preparada=detalle,
+    )
+    return {
+        "detalle": detalle,
+        "pedidos": pedidos,
+        "transmisiones": construir_tabla_transmisiones(df_transmisiones),
+        "expresos": construir_tabla_expresos(df_expresos),
+        "clientes": construir_tabla_clientes(df_clientes),
+        "pendientes_erp": construir_tabla_pendientes(df_pendientes_erp),
     }
 
 
@@ -220,7 +254,9 @@ with col_actualizacion_2:
 
 if actualizar_datos:
 
-    cargar_datos_operativos.clear()
+    cargar_datos_base.clear()
+    cargar_datos_cobertura.clear()
+    construir_tablas_base_cacheadas.clear()
 
     claves_planificacion = [
         "asignacion_camionetas",
@@ -264,7 +300,7 @@ if actualizar_datos:
     st.rerun()
 
 
-datos_operativos = cargar_datos_operativos()
+datos_operativos = cargar_datos_base()
 
 # Se entregan copias para evitar que las transformaciones
 # posteriores modifiquen accidentalmente la caché.
@@ -280,43 +316,29 @@ df_transmisiones = datos_operativos[
 ].copy()
 df_expresos = datos_operativos["expresos"].copy()
 df_volumetria = datos_operativos["volumetria"].copy()
-df_stock_detallado = datos_operativos["stock_detallado"].copy()
-df_stock_recepcion = datos_operativos["stock_recepcion"].copy()
-df_disponible_digip = datos_operativos["disponible_digip"].copy()
-df_stock_total_erp = datos_operativos["stock_total_erp"].copy()
 
 
 # =====================================================
-# CONSTRUIR TABLA PRINCIAL
+# CONSTRUIR TABLAS BASE CACHEADAS
 # =====================================================
 
-tabla = construir_tabla_pedidos(
+tablas_base = construir_tablas_base_cacheadas(
     df_pedidos,
     df_detalle,
     df_articulos,
     df_clientes,
-    df_volumetria
+    df_volumetria,
+    df_transmisiones,
+    df_expresos,
+    df_pendientes_erp,
 )
 
-# =====================================================
-# CONSTRUIR TABLAS SATÉLITES
-# =====================================================
-
-tabla_transmisiones = construir_tabla_transmisiones(
-    df_transmisiones
-)
-
-tabla_expresos = construir_tabla_expresos(
-    df_expresos
-)
-
-tabla_clientes = construir_tabla_clientes(
-    df_clientes
-)
-
-tabla_pendientes_erp = construir_tabla_pendientes(
-    df_pendientes_erp
-)
+tabla = tablas_base["pedidos"].copy()
+tabla_detalle_dashboard = tablas_base["detalle"]
+tabla_transmisiones = tablas_base["transmisiones"]
+tabla_expresos = tablas_base["expresos"]
+tabla_clientes = tablas_base["clientes"]
+tabla_pendientes_erp = tablas_base["pendientes_erp"]
 
 
 # =====================================================
@@ -1090,35 +1112,20 @@ st.caption(
 
 datos_dashboard = preparar_datos_dashboard(tabla)
 
-# Detalle enriquecido con Maestro de Artículos.
-# Se utiliza para analizar la composición real del pendiente.
-tabla_detalle_dashboard = construir_tabla_detalle(
-    df_detalle,
-    df_articulos,
-    df_volumetria,
-)
-
-lineas_cobertura_erp, resumen_cobertura_erp = analizar_cobertura_pedidos_erp(
-    tabla_detalle_erp=tabla_detalle_dashboard,
-    # Se utiliza el reporte crudo para conservar:
-    # nro_com, fec_com, cod_cli y nombre.
-    tabla_pendientes_erp=df_pendientes_erp,
-    df_pedidos_digip=df_pedidos,
-    df_disponible=df_disponible_digip,
-    df_stock_erp=df_stock_total_erp,
-    tabla_clientes=tabla_clientes,
-)
-
-tab_dashboard, tab_inteligencia, tab_cobertura, tab_operacion = st.tabs(
-    [
+vista_pedidos = st.segmented_control(
+    "Vista del módulo",
+    options=[
         "📊 Dashboard",
         "🧠 Inteligencia analítica",
         "🚨 Compromisos sin cobertura",
         "📋 Tabla y gestiones",
-    ]
+    ],
+    default="📊 Dashboard",
+    key="vista_principal_pedidos",
+    label_visibility="collapsed",
 )
 
-with tab_dashboard:
+if vista_pedidos == "📊 Dashboard":
     st.subheader("📊 Panorama operativo de pedidos")
     st.caption(
         "Lectura ejecutiva del pendiente, su volumen, antigüedad "
@@ -1842,7 +1849,7 @@ with tab_dashboard:
                 )
 
 
-with tab_inteligencia:
+elif vista_pedidos == "🧠 Inteligencia analítica":
     st.subheader("🧠 Inteligencia analítica del pendiente")
     st.caption(
         "Lectura de concentración, tendencia, antigüedad y dimensión "
@@ -1905,6 +1912,75 @@ with tab_inteligencia:
                 "Comparación contra el bloque anterior",
             ),
         ]
+
+        st.markdown(
+            """
+            <style>
+            .pedidos-kpi-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 12px;
+                margin: 8px 0 18px 0;
+            }
+            .pedidos-kpi-card {
+                background: linear-gradient(145deg, #121923 0%, #0f151e 100%);
+                border: 1px solid #2a3442;
+                border-radius: 10px;
+                padding: 16px 18px;
+                min-height: 118px;
+            }
+            .pedidos-kpi-label {
+                color: #d8dee9;
+                font-size: 0.84rem;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }
+            .pedidos-kpi-value {
+                color: #f8fafc;
+                font-size: 1.85rem;
+                font-weight: 700;
+                line-height: 1.1;
+            }
+            .pedidos-kpi-detail {
+                color: #9ba8b7;
+                font-size: 0.76rem;
+                margin-top: 9px;
+            }
+            .inteligencia-grid {
+                grid-template-columns: repeat(6, minmax(0, 1fr));
+                margin-bottom: 1rem;
+            }
+            .inteligencia-card {
+                min-height: 128px;
+                background: linear-gradient(
+                    145deg,
+                    rgba(20, 29, 41, 0.98),
+                    rgba(11, 17, 25, 0.98)
+                );
+            }
+            .inteligencia-card .pedidos-kpi-value {
+                font-size: 1.42rem;
+                overflow-wrap: anywhere;
+            }
+            @media (max-width: 1400px) {
+                .inteligencia-grid {
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                }
+            }
+            @media (max-width: 900px) {
+                .inteligencia-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }
+            }
+            @media (max-width: 640px) {
+                .inteligencia-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
         html_inteligencia = '<div class="pedidos-kpi-grid inteligencia-grid">'
         for etiqueta, valor, detalle in tarjetas_inteligencia:
@@ -2222,7 +2298,19 @@ with tab_inteligencia:
         )
 
 
-with tab_cobertura:
+elif vista_pedidos == "🚨 Compromisos sin cobertura":
+    datos_cobertura = cargar_datos_cobertura()
+    df_disponible_digip = datos_cobertura["disponible_digip"]
+    df_stock_total_erp = datos_cobertura["stock_total_erp"]
+
+    lineas_cobertura_erp, resumen_cobertura_erp = analizar_cobertura_pedidos_erp(
+        tabla_detalle_erp=tabla_detalle_dashboard,
+        tabla_pendientes_erp=df_pendientes_erp,
+        df_pedidos_digip=df_pedidos,
+        df_disponible=df_disponible_digip,
+        df_stock_erp=df_stock_total_erp,
+        tabla_clientes=tabla_clientes,
+    )
     st.subheader("🚨 Compromisos ERP sin cobertura")
     st.caption(
         "La cobertura inmediata se calcula con el disponible aprobado del ERP "
@@ -2799,7 +2887,7 @@ with tab_cobertura:
             )
 
 
-with tab_operacion:
+elif vista_pedidos == "📋 Tabla y gestiones":
     # =====================================================
     # AVISO Y GESTIÓN DE SOLICITUDES COMERCIALES
     # =====================================================

@@ -1,10 +1,6 @@
-import math
 import pandas as pd
-import altair as alt
 import streamlit as st
 
-from config import CARPETA_DATOS
-from utils.confirmaciones_oc import guardar_confirmaciones_oc, eliminar_confirmaciones_oc
 from utils.stock_helpers import dataframe_a_csv, formato_entero, aplicar_busqueda, dataframe_para_streamlit
 
 

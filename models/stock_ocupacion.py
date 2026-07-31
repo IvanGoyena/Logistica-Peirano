@@ -197,6 +197,13 @@ def construir_ocupacion_deposito(
             "Cantidad Disponible",
         ],
     )
+    columna_articulo = _buscar_columna(
+        stock_detallado,
+        [
+            "ArticuloCodigo", "Artículo Código", "CodigoArticulo",
+            "Código Artículo", "CodArticulo", "Articulo", "Artículo",
+        ],
+    )
 
     if columna_ubicacion is None:
         resultado["CapacidadDisponible"] = resultado["CapacidadNumerica"].where(
@@ -206,9 +213,19 @@ def construir_ocupacion_deposito(
         return resultado, diagnostico
 
     stock = stock_detallado.copy()
+
+    # Una ubicación se considera ocupada únicamente cuando existe stock real.
+    # Se eliminan filas auxiliares del reporte con cantidad cero o sin artículo,
+    # que anteriormente podían marcar ubicaciones vacías como ocupadas.
     if columna_cantidad is not None:
-        cantidad = pd.to_numeric(stock[columna_cantidad], errors="coerce").fillna(0)
-        stock = stock.loc[cantidad.gt(0)].copy()
+        stock["_CantidadOcupacion"] = pd.to_numeric(
+            stock[columna_cantidad], errors="coerce"
+        ).fillna(0)
+        stock = stock.loc[stock["_CantidadOcupacion"].gt(0)].copy()
+
+    if columna_articulo is not None:
+        stock["_ArticuloOcupacion"] = stock[columna_articulo].map(_texto_normalizado)
+        stock = stock.loc[stock["_ArticuloOcupacion"].ne("")].copy()
 
     stock["_UbicacionOriginal"] = stock[columna_ubicacion].map(_texto_normalizado)
     stock = stock.loc[stock["_UbicacionOriginal"].ne("")].copy()
@@ -244,39 +261,104 @@ def construir_ocupacion_deposito(
 
         return salida
 
+    # ------------------------------------------------------
+    # CRUCE SEGURO CONTRA EL MAESTRO
+    # ------------------------------------------------------
+    # No se utiliza un único formato global "sin área" para todas las filas.
+    # Esa estrategia podía asociar una ubicación de otra área con varias
+    # ubicaciones del maestro que compartían Pasillo-Posición-Nivel.
+    #
+    # Prioridad del cruce:
+    # 1. Clave completa con abreviatura de área.
+    # 2. Texto original, solamente cuando coincide exactamente con el maestro.
+    # 3. Clave sin área, únicamente si es única dentro del maestro.
+
+    claves_exactas = {
+        str(clave): str(clave)
+        for clave in resultado["ClaveUbicacion"].dropna().astype(str)
+    }
+
+    claves_sin_area_df = (
+        resultado[["ClaveSinArea", "ClaveUbicacion"]]
+        .dropna()
+        .drop_duplicates()
+    )
+    conteo_sin_area = claves_sin_area_df["ClaveSinArea"].value_counts()
+    claves_sin_area_unicas = {
+        str(fila.ClaveSinArea): str(fila.ClaveUbicacion)
+        for fila in claves_sin_area_df.itertuples(index=False)
+        if conteo_sin_area.get(fila.ClaveSinArea, 0) == 1
+    }
+
+    variantes_stock = stock["_UbicacionOriginal"].map(variantes)
+    stock["_VarianteTexto"] = variantes_stock.map(
+        lambda valor: valor.get("texto", "")
+    )
+    stock["_VarianteConArea"] = variantes_stock.map(
+        lambda valor: valor.get("con_area", "")
+    )
+    stock["_VarianteSinArea"] = variantes_stock.map(
+        lambda valor: valor.get("sin_area", "")
+    )
+
+    stock["_ClaveMapa"] = stock["_VarianteConArea"].map(claves_exactas)
+
+    faltantes = stock["_ClaveMapa"].isna()
+    stock.loc[faltantes, "_ClaveMapa"] = (
+        stock.loc[faltantes, "_VarianteTexto"].map(claves_exactas)
+    )
+
+    faltantes = stock["_ClaveMapa"].isna()
+    stock.loc[faltantes, "_ClaveMapa"] = (
+        stock.loc[faltantes, "_VarianteSinArea"].map(claves_sin_area_unicas)
+    )
+
     muestras = stock["_UbicacionOriginal"].drop_duplicates()
-    candidatos = {}
-
-    for nombre_formato in ["texto", "con_area", "sin_area"]:
-        serie = muestras.map(lambda valor: variantes(valor).get(nombre_formato, ""))
-        universo = claves_sin_area if nombre_formato == "sin_area" else claves_maestro
-        coincidencias = int(serie.isin(universo).sum())
-        candidatos[nombre_formato] = (coincidencias, serie)
-
-    formato_detectado = max(candidatos, key=lambda clave: candidatos[clave][0])
-    coincidencias = candidatos[formato_detectado][0]
-
-    stock["_ClaveCruce"] = stock["_UbicacionOriginal"].map(
-        lambda valor: variantes(valor).get(formato_detectado, "")
+    coincidencias = int(
+        stock.loc[stock["_ClaveMapa"].notna(), "_UbicacionOriginal"].nunique()
     )
-    clave_maestro = (
-        "ClaveSinArea" if formato_detectado == "sin_area"
-        else "ClaveUbicacion"
-    )
+
+    diagnostico.update({
+        "columna_ubicacion": columna_ubicacion,
+        "formato_detectado": "cruce_exacto_con_fallback_unico",
+        "coincidencias": coincidencias,
+        "ubicaciones_stock": int(muestras.size),
+        "porcentaje_match": (
+            coincidencias / muestras.size * 100 if muestras.size else 0
+        ),
+    })
+
+    # Solo las filas que pudieron vincularse de forma inequívoca participan
+    # del cálculo. Las claves sin área duplicadas se descartan para evitar
+    # ocupaciones falsas en PASILLO, ALMACÉN o PICKING.
+    stock_cruzado = stock.loc[stock["_ClaveMapa"].notna()].copy()
 
     if columna_contenedor is not None:
-        stock["_Contenedor"] = stock[columna_contenedor].map(_texto_normalizado)
-        stock["_Contenedor"] = stock["_Contenedor"].where(
-            stock["_Contenedor"].ne(""),
-            stock.index.astype(str),
+        stock_cruzado["_Contenedor"] = stock_cruzado[columna_contenedor].map(
+            _texto_normalizado
         )
         ocupacion_stock = (
-            stock.groupby("_ClaveCruce", dropna=False)["_Contenedor"]
-            .nunique().rename("ContenedoresOcupados").reset_index()
+            stock_cruzado.groupby("_ClaveMapa", dropna=False)
+            .agg(
+                ContenedoresValidos=(
+                    "_Contenedor",
+                    lambda serie: serie.loc[serie.ne("")].nunique(),
+                ),
+                FilasStock=("_ClaveMapa", "size"),
+            )
+            .reset_index()
         )
+        ocupacion_stock["ContenedoresOcupados"] = (
+            ocupacion_stock["ContenedoresValidos"]
+            .where(ocupacion_stock["ContenedoresValidos"].gt(0), 1)
+            .astype(int)
+        )
+        ocupacion_stock = ocupacion_stock[
+            ["_ClaveMapa", "ContenedoresOcupados"]
+        ]
     else:
         ocupacion_stock = (
-            stock.groupby("_ClaveCruce", dropna=False)
+            stock_cruzado.groupby("_ClaveMapa", dropna=False)
             .size().clip(upper=1)
             .rename("ContenedoresOcupados").reset_index()
         )
@@ -284,17 +366,22 @@ def construir_ocupacion_deposito(
     resultado = resultado.merge(
         ocupacion_stock,
         how="left",
-        left_on=clave_maestro,
-        right_on="_ClaveCruce",
+        left_on="ClaveUbicacion",
+        right_on="_ClaveMapa",
         suffixes=("", "_Stock"),
+        validate="one_to_one",
     )
     resultado["ContenedoresOcupados"] = pd.to_numeric(
-        resultado.get("ContenedoresOcupados_Stock", resultado.get("ContenedoresOcupados")),
+        resultado.get(
+            "ContenedoresOcupados_Stock",
+            resultado.get("ContenedoresOcupados"),
+        ),
         errors="coerce",
     ).fillna(0)
     resultado.drop(
         columns=[
-            columna for columna in ["_ClaveCruce", "ContenedoresOcupados_Stock"]
+            columna
+            for columna in ["_ClaveMapa", "ContenedoresOcupados_Stock"]
             if columna in resultado.columns
         ],
         inplace=True,
@@ -340,8 +427,8 @@ def construir_ocupacion_deposito(
         return serie.fillna("").astype(str).str.contains(patron, regex=True, na=False)
 
     mascara_loza_stock = (
-        contiene_token(stock["_AreaStock"], r"(^|[^A-Z0-9])(LOZA|ACEITUNA|LOZ)([^A-Z0-9]|$)")
-        | contiene_token(stock["_VarianteTexto"], r"(^|[- ])(LOZA|ACEITUNA|LOZ)([- ]|$)")
+        contiene_token(stock["_AreaStock"], r"(?:^|[^A-Z0-9])(?:LOZA|ACEITUNA|LOZ)(?:[^A-Z0-9]|$)")
+        | contiene_token(stock["_VarianteTexto"], r"(?:^|[- ])(?:LOZA|ACEITUNA|LOZ)(?:[- ]|$)")
         | stock["_VarianteConArea"].isin(claves_aceituna)
         | stock["_UbicacionOriginal"].isin(verificadores_aceituna)
         | stock["_UbicacionCompacta"].isin(
@@ -350,8 +437,8 @@ def construir_ocupacion_deposito(
     )
 
     mascara_entrepiso_stock = (
-        contiene_token(stock["_AreaStock"], r"(^|[^A-Z0-9])(ENTRE[ -]?PISO|ENTREPISO|ENT)([^A-Z0-9]|$)")
-        | contiene_token(stock["_VarianteTexto"], r"(^|[- ])(ENTRE[ -]?PISO|ENTREPISO|ENT)([- ]|$)")
+        contiene_token(stock["_AreaStock"], r"(?:^|[^A-Z0-9])(?:ENTRE[ -]?PISO|ENTREPISO|ENT)(?:[^A-Z0-9]|$)")
+        | contiene_token(stock["_VarianteTexto"], r"(?:^|[- ])(?:ENTRE[ -]?PISO|ENTREPISO|ENT)(?:[- ]|$)")
         | stock["_VarianteConArea"].isin(claves_entrepiso)
         | stock["_UbicacionOriginal"].isin(verificadores_entrepiso)
         | stock["_UbicacionCompacta"].isin(
@@ -409,16 +496,6 @@ def construir_ocupacion_deposito(
         .fillna(0)
         .clip(0, 100)
     )
-
-    diagnostico = {
-        "columna_ubicacion": columna_ubicacion,
-        "formato_detectado": formato_detectado,
-        "coincidencias": coincidencias,
-        "ubicaciones_stock": int(muestras.size),
-        "porcentaje_match": (
-            coincidencias / muestras.size * 100 if muestras.size else 0
-        ),
-    }
 
     return resultado, diagnostico
 

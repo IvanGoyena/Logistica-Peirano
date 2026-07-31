@@ -47,7 +47,12 @@ def render(contexto: dict) -> None:
         height=470,
     )
 
-    with st.expander("🧪 Stock de Calidad / Laboratorio"):
+    mostrar_calidad = st.toggle(
+        "🧪 Mostrar stock de Calidad / Laboratorio",
+        value=False,
+        key="mostrar_stock_calidad_operativo",
+    )
+    if mostrar_calidad:
         st.dataframe(
             dataframe_para_streamlit(tabla_calidad),
             hide_index=True,

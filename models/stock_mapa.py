@@ -206,7 +206,24 @@ def enriquecer_mapa_con_stock(
     resultado["ContenedoresDetalleMapa"] = pd.to_numeric(
         resultado["ContenedoresDetalleMapa"], errors="coerce"
     ).fillna(0).astype(int)
-    resultado["ArticulosMapa"] = resultado["ArticulosMapa"].fillna("")
+    resultado["ArticulosMapa"] = resultado["ArticulosMapa"].fillna("").astype(str)
+
+    # Mantener el color, el estado y el detalle con una única fuente de verdad.
+    # Una ubicación sin SKU, unidades ni contenedores reales debe verse vacía.
+    tiene_stock_detalle = (
+        resultado["SKUsMapa"].gt(0)
+        | resultado["UnidadesMapa"].gt(0)
+        | resultado["ContenedoresDetalleMapa"].gt(0)
+    )
+    resultado["Ocupada"] = tiene_stock_detalle
+    resultado["ContenedoresMapa"] = resultado["ContenedoresDetalleMapa"]
+    resultado["EstadoMapa"] = "Vacía"
+    resultado.loc[~resultado["Disponible"].fillna(False), "EstadoMapa"] = "No disponible"
+    resultado.loc[
+        resultado["Disponible"].fillna(False) & tiene_stock_detalle,
+        "EstadoMapa",
+    ] = "Ocupada"
+
     return resultado
 
 
