@@ -644,6 +644,33 @@ def enriquecer_detalle_metricas(
         )
     )
 
+    # Ninguna línea operativa se elimina por falta de clasificación.
+    # Los valores vacíos quedan identificados para auditoría y corrección
+    # posterior del Maestro de Artículos.
+    detalle["FamiliaFinal"] = (
+        detalle["FamiliaFinal"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "SIN FAMILIA")
+    )
+
+    detalle["Sectorizacion"] = (
+        detalle["Sectorizacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "SIN SECTORIZACIÓN")
+    )
+
+    detalle["Familia2"] = (
+        detalle["Familia2"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "SIN FAMILIA 2")
+    )
+
     columnas_numericas_volumetria = [
         "AltoMM",
         "AnchoMM",

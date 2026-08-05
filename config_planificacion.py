@@ -302,7 +302,7 @@ ZONAS_PLANIFICACION = {
     },
     "0607": {
         "descripcion": 'SAN JUSTO',
-        "grupo": '2',
+        "grupo": '1',
         "planificacion": 'MIERCOLES',
     },
     "0608": {
@@ -317,7 +317,7 @@ ZONAS_PLANIFICACION = {
     },
     "02010009": {
         "descripcion": 'SAN JUSTO',
-        "grupo": '2',
+        "grupo": '1',
         "planificacion": 'MIERCOLES',
     },
     "04010002": {

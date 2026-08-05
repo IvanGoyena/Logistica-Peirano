@@ -3,7 +3,7 @@ import altair as alt
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils.stock_helpers import dataframe_para_streamlit, formato_entero
+from utils.stock.helpers import dataframe_para_streamlit, formato_entero
 
 def _ordenar_segmento_mapa(valor):
     texto = str(valor or "").strip()

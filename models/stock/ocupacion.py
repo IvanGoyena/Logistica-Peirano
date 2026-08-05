@@ -2,7 +2,7 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from utils.stock_helpers import formato_entero
+from utils.stock.helpers import formato_entero
 
 def _texto_normalizado(valor: object) -> str:
     if pd.isna(valor):
@@ -119,6 +119,35 @@ def preparar_maestro_ubicaciones(dataframe: pd.DataFrame) -> pd.DataFrame:
             return "Aceituna"
         if tipo == "ENTRE PISO" or area == "ENTRE PISO":
             return "Entrepiso"
+
+        clave = (
+            f"{_texto_normalizado(fila.get('Ab'))}-"
+            f"{_segmento_ubicacion(fila.get('Pasillo'))}-"
+            f"{_segmento_ubicacion(fila.get('Posicion'))}-"
+            f"{_segmento_ubicacion(fila.get('Nivel'))}"
+        )
+
+        # CAL-001 es una ubicación de tránsito y queda fuera de los
+        # indicadores de mercadería no apta.
+        if clave == "LAB-001-001-001":
+            return "Calidad Laboratorio"
+
+        if clave in {
+            "CAL-002-001-001",
+            "CAL-003-001-001",
+        }:
+            return "Calidad Piso"
+
+        if (
+            _texto_normalizado(fila.get("Ab")) == "CAL"
+            and clave not in {
+                "CAL-001-001-001",
+                "CAL-002-001-001",
+                "CAL-003-001-001",
+            }
+        ):
+            return "Calidad Racks"
+
         if tipo == "ALMACEN" and area == "ALMACEN":
             return "Almacén"
         if tipo == "PICKING":
@@ -145,12 +174,64 @@ def construir_ocupacion_deposito(
 
     maestro = preparar_maestro_ubicaciones(maestro_ubicaciones)
 
+    # El Maestro de Ubicaciones puede contener filas repetidas para la misma
+    # ubicación física. Antes del cruce se consolida una única fila por
+    # ClaveUbicacion, priorizando ubicaciones disponibles y con mayor capacidad.
+    cantidad_duplicados_maestro = 0
+
+    if not maestro.empty and "ClaveUbicacion" in maestro.columns:
+        mascara_duplicados = maestro["ClaveUbicacion"].duplicated(keep=False)
+        cantidad_duplicados_maestro = int(mascara_duplicados.sum())
+
+        if cantidad_duplicados_maestro > 0:
+            maestro = (
+                maestro
+                .assign(
+                    _PrioridadDisponible=(
+                        maestro.get(
+                            "Disponible",
+                            pd.Series(False, index=maestro.index),
+                        )
+                        .fillna(False)
+                        .astype(bool)
+                        .astype(int)
+                    ),
+                    _PrioridadCapacidad=pd.to_numeric(
+                        maestro.get(
+                            "CapacidadNumerica",
+                            pd.Series(1, index=maestro.index),
+                        ),
+                        errors="coerce",
+                    ).fillna(1),
+                )
+                .sort_values(
+                    [
+                        "ClaveUbicacion",
+                        "_PrioridadDisponible",
+                        "_PrioridadCapacidad",
+                    ],
+                    ascending=[True, False, False],
+                )
+                .drop_duplicates(
+                    subset=["ClaveUbicacion"],
+                    keep="first",
+                )
+                .drop(
+                    columns=[
+                        "_PrioridadDisponible",
+                        "_PrioridadCapacidad",
+                    ]
+                )
+                .reset_index(drop=True)
+            )
+
     diagnostico = {
         "columna_ubicacion": None,
         "formato_detectado": None,
         "coincidencias": 0,
         "ubicaciones_stock": 0,
         "porcentaje_match": 0.0,
+        "duplicados_maestro_consolidados": cantidad_duplicados_maestro,
     }
 
     if maestro.empty:
@@ -509,8 +590,10 @@ def resumir_ocupacion(
 
     - Almacén, Pasillo, Picking y Estanterías: una ubicación con stock
       cuenta como ocupada, independientemente de cuántos pallets contenga.
-    - Aceituna y Entrepiso: son superficies de piso y se dimensionan por
-      capacidad de pallets versus contenedores distintos alojados.
+    - Aceituna, Entrepiso, Calidad Laboratorio y Calidad Piso:
+      son superficies de piso y se dimensionan por capacidad de pallets
+      versus contenedores distintos alojados.
+    - Calidad Racks: una ubicación física equivale a un pallet.
     - Global: incluye exclusivamente Almacén + Pasillo.
     """
     vacio = {
@@ -543,7 +626,12 @@ def resumir_ocupacion(
     elif grupo:
         base = base.loc[base["GrupoOcupacion"].eq(grupo)]
 
-    usa_capacidad_pallets = grupo in {"Aceituna", "Entrepiso"}
+    usa_capacidad_pallets = grupo in {
+        "Aceituna",
+        "Entrepiso",
+        "Calidad Laboratorio",
+        "Calidad Piso",
+    }
 
     if usa_capacidad_pallets:
         capacidad = float(base["CapacidadNumerica"].sum())

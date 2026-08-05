@@ -762,6 +762,65 @@ def enriquecer_pedidos_planificacion(
         "DiaEntregaConfigurado"
     ] = "RETIRA"
 
+    # ------------------------------------------------------
+    # FALLBACK PARA PLANIFICACIONES OPERATIVAS VÁLIDAS
+    # ------------------------------------------------------
+    # Un pedido no debe desaparecer del Planificador solamente
+    # porque su CodigoDespacho todavía no esté configurado en
+    # ZONAS_PLANIFICACION. Si ya posee una planificación operativa
+    # válida, se lo conserva y se utiliza el grupo informado en el
+    # texto o, en su defecto, el Grupo 1.
+    planificacion_valida = (
+        tabla["Planificacion"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .ne("")
+    )
+
+    mascara_fallback_planificacion = (
+        planificacion_valida
+        & ~tabla["EsRetira"]
+        & ~tabla["EsExpreso"]
+        & ~tabla["ZonaConfigurada"]
+    )
+
+    if mascara_fallback_planificacion.any():
+        planificacion_fallback = (
+            tabla.loc[mascara_fallback_planificacion, "Planificacion"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        grupo_fallback = (
+            planificacion_fallback
+            .apply(extraer_grupo_entrega)
+            .replace("", "1")
+        )
+
+        tabla.loc[
+            mascara_fallback_planificacion,
+            "PlanificacionConfigurada",
+        ] = planificacion_fallback
+
+        tabla.loc[
+            mascara_fallback_planificacion,
+            "GrupoDespacho",
+        ] = grupo_fallback
+
+        tabla.loc[
+            mascara_fallback_planificacion,
+            "ZonaDescripcion",
+        ] = planificacion_fallback
+
+        tabla.loc[
+            mascara_fallback_planificacion,
+            "ZonaConfigurada",
+        ] = True
+
     tabla["CoincidePlanificacion"] = (
         tabla["Planificacion"].eq(
             tabla["PlanificacionConfigurada"]
@@ -855,6 +914,12 @@ def construir_resumen_clientes_planificacion(
         errors="coerce"
     )
 
+    # El Dashboard puede mostrar pedidos cuya fecha venga vacía o con
+    # un formato no reconocido. Eso no debe impedir su planificación.
+    # Para ordenar esos casos se usa la fecha actual como respaldo.
+    fecha_respaldo = pd.Timestamp.today().normalize()
+    tabla["Fecha"] = tabla["Fecha"].fillna(fecha_respaldo)
+
     tabla["TotalUnidades"] = (
         pd.to_numeric(
             tabla["TotalUnidades"],
@@ -880,7 +945,6 @@ def construir_resumen_clientes_planificacion(
         tabla["Pedido"].ne("")
         & tabla["ClienteCodigo"].ne("")
         & tabla["Planificacion"].ne("")
-        & tabla["Fecha"].notna()
         & tabla["ZonaConfigurada"]
         & tabla["GrupoDespacho"].notna()
         & ~tabla["GrupoDespacho"].isin(
@@ -904,7 +968,8 @@ def construir_resumen_clientes_planificacion(
                 "PrioridadConfigurada",
                 "EsExpreso",
             ],
-            as_index=False
+            as_index=False,
+            dropna=False,
         )
         .agg(
             FechaPrioridad=("Fecha", "min"),

@@ -2,15 +2,22 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from utils.stock_helpers import dataframe_para_streamlit
-from models.stock_ocupacion import resumir_ocupacion, mostrar_tarjeta_donut
-from models.stock_mapa import mostrar_mapa_visual_deposito
+from utils.stock.helpers import dataframe_para_streamlit
+from models.stock.ocupacion import resumir_ocupacion, mostrar_tarjeta_donut
+from models.stock.mapa import mostrar_mapa_visual_deposito
 
 
 def render(contexto: dict) -> None:
     tabla_maestro_ubicaciones = contexto["tabla_maestro_ubicaciones"]
     tabla_ocupacion = contexto["tabla_ocupacion"]
-    tabla_stock_total_detallado = contexto.get("tabla_stock_total_detallado", pd.DataFrame())
+    tabla_stock_total_detallado = contexto.get(
+        "tabla_stock_total_detallado",
+        pd.DataFrame(),
+    )
+    resumen_global_calidad = contexto.get(
+        "resumen_global_calidad",
+        {},
+    )
 
     st.subheader("🗺️ Ocupación del depósito")
     st.caption("Visión general de ocupación por sectores, pasillos y ubicaciones.")
@@ -28,6 +35,7 @@ def render(contexto: dict) -> None:
               <span><b style="color:#8B5CF6">●</b> Picking</span>
               <span><b style="color:#65A30D">●</b> Estanterías</span>
               <span><b style="color:#F59E0B">●</b> Pisos</span>
+              <span><b style="color:#DC2626">●</b> Calidad / No apto</span>
             </div>
           </div>
         </div>
@@ -121,6 +129,80 @@ def render(contexto: dict) -> None:
                 """
             )
 
+    # ---------------- CALIDAD / NO APTO ----------------
+    st.markdown(
+        "### 🧪 CALIDAD Y REPROCESO"
+    )
+    st.markdown(
+        "<hr style='border-color:#DC2626;margin-top:-.55rem'>",
+        unsafe_allow_html=True,
+    )
+
+    resumen_calidad_global = {
+        "capacidad": float(
+            resumen_global_calidad.get(
+                "capacidad_total",
+                0,
+            )
+        ),
+        "ocupado": float(
+            resumen_global_calidad.get(
+                "ocupado_total",
+                0,
+            )
+        ),
+        "libre": float(
+            resumen_global_calidad.get(
+                "libre_total",
+                0,
+            )
+        ),
+        "porcentaje": float(
+            resumen_global_calidad.get(
+                "porcentaje_total",
+                0,
+            )
+        ),
+        "ubicaciones": 0,
+        "unidad": "contenedores",
+    }
+
+    calidad_resumen_col, calidad_info_col = (
+        st.columns(
+            [1, 2],
+            vertical_alignment="top",
+        )
+    )
+
+    with calidad_resumen_col:
+        mostrar_tarjeta_donut(
+            "Calidad consolidada",
+            resumen_calidad_global,
+            key="donut_calidad_global_ocupacion",
+            color_ocupado="#DC2626",
+            color_libre="#FEE2E2",
+            icono="🧪",
+        )
+
+    with calidad_info_col:
+        with st.container(
+            border=True
+        ):
+            st.markdown(
+                "#### ⚠️ Mercadería no apta para la venta"
+            )
+            st.markdown(
+                """
+                La ocupación consolidada incluye **Laboratorio**,
+                **Mercadería de segunda**, **Reproceso pendiente**
+                y **Racks de Calidad**.
+
+                El análisis por condición, artículos, contenedores,
+                antigüedad y detalle operativo se encuentra en la
+                pestaña **🧪 Calidad y Reproceso**.
+                """
+            )
+
     # ---------------- DETALLES ----------------
     st.markdown("---")
     picking = tabla_ocupacion.loc[
@@ -195,6 +277,15 @@ def render(contexto: dict) -> None:
                     "Vacías / Libres": r["libre"],
                     "% Ocupación": r["porcentaje"],
                 })
+            filas_resumen.append({
+                "Grupo": "Calidad y Reproceso",
+                "Tipo": "Espacio consolidado",
+                "Total": resumen_calidad_global["capacidad"],
+                "Ocupadas": resumen_calidad_global["ocupado"],
+                "Vacías / Libres": resumen_calidad_global["libre"],
+                "% Ocupación": resumen_calidad_global["porcentaje"],
+            })
+
             resumen_grupos = pd.DataFrame(filas_resumen)
             st.dataframe(
                 dataframe_para_streamlit(resumen_grupos),
@@ -211,26 +302,11 @@ def render(contexto: dict) -> None:
 
 
 
-    # ---------------- MAPA VISUAL (CARGA BAJO DEMANDA) ----------------
-    st.markdown("---")
-    mostrar_mapa = st.toggle(
-        "🗺️ Cargar mapa visual del depósito",
-        value=False,
-        key="cargar_mapa_visual_stock",
-        help=(
-            "El mapa realiza cruces y gráficos pesados. Se procesa solamente "
-            "cuando necesitás consultarlo."
-        ),
+    # ---------------- MAPA VISUAL ----------------
+    mostrar_mapa_visual_deposito(
+        tabla_ocupacion,
+        tabla_stock_total_detallado=tabla_stock_total_detallado,
     )
-
-    if mostrar_mapa:
-        with st.spinner("Preparando mapa de ubicaciones..."):
-            mostrar_mapa_visual_deposito(
-                tabla_ocupacion,
-                tabla_stock_total_detallado=tabla_stock_total_detallado,
-            )
-    else:
-        st.info("El mapa está desactivado para reducir el consumo de memoria y procesamiento.")
 
     st.caption("ℹ️ Los datos se actualizan según la última extracción del stock y el Maestro Ubicaciones.")
 
