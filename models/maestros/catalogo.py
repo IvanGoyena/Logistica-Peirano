@@ -11,6 +11,7 @@ class FuenteMaestro:
     grupo: str
     nombres: tuple[str, ...]
     descarga: str
+    origen: str
     tipo: str = "crudo"
     cache: bool = False
 
@@ -23,6 +24,7 @@ FUENTES_MAESTROS = (
         "Dinámicas",
         ("Informe Tareas",),
         "Informe_Tareas.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "pedidos",
@@ -31,6 +33,7 @@ FUENTES_MAESTROS = (
         "Dinámicas",
         ("Pedidos DIGIP",),
         "Pedidos_DIGIP.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "detalle",
@@ -39,6 +42,7 @@ FUENTES_MAESTROS = (
         "ERP",
         ("Detalle Pendientes",),
         "Detalle_Pendientes.csv",
+        "ERP",
     ),
     FuenteMaestro(
         "pendientes_erp",
@@ -47,6 +51,7 @@ FUENTES_MAESTROS = (
         "ERP",
         ("Pedidos Pendientes",),
         "Pedidos_Pendientes_ERP_Limpio.csv",
+        "ERP",
         tipo="pendientes",
     ),
     FuenteMaestro(
@@ -56,6 +61,7 @@ FUENTES_MAESTROS = (
         "ERP",
         ("Pedidos Transmicion", "Pedidos Transmisión"),
         "Transmisiones_ERP_Limpio.csv",
+        "ERP",
         tipo="transmisiones",
     ),
     FuenteMaestro(
@@ -63,32 +69,51 @@ FUENTES_MAESTROS = (
         "Stock detallado",
         "🏭",
         "Stock",
-        ("stock_detallado", "Stock Detallado", "Informe Stock Total"),
+        (
+            "stock_detallado",
+            "Stock Detallado",
+            "Informe Stock Total",
+        ),
         "Stock_Detallado.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "stock_recepcion",
         "Stock recepción",
         "📥",
         "Stock",
-        ("stock_recepcion", "Stock Recepcion", "Stock Recepción"),
+        (
+            "stock_recepcion",
+            "Stock Recepcion",
+            "Stock Recepción",
+        ),
         "Stock_Recepcion.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "disponible",
         "Disponible DIGIP",
         "📦",
         "Stock",
-        ("Disponible DIGIP", "Disponible Digip", "disponible_digip"),
+        (
+            "Disponible DIGIP",
+            "Disponible Digip",
+            "disponible_digip",
+        ),
         "Disponible_DIGIP.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "stock_calidad",
         "Stock Calidad / Laboratorio",
         "🧪",
         "Stock",
-        ("stock_calidad_laboratorio", "Stock Calidad Laboratorio"),
+        (
+            "stock_calidad_laboratorio",
+            "Stock Calidad Laboratorio",
+        ),
         "Stock_Calidad_Laboratorio.csv",
+        "WMS",
     ),
     FuenteMaestro(
         "max_min",
@@ -97,6 +122,7 @@ FUENTES_MAESTROS = (
         "Stock",
         ("Max & Min", "Max_Min", "max_min"),
         "Max_y_Min_Picking.csv",
+        "MAESTROS",
     ),
     FuenteMaestro(
         "articulos",
@@ -105,6 +131,7 @@ FUENTES_MAESTROS = (
         "Maestros",
         ("Maestro Articulo", "Maestro Artículos"),
         "Maestro_Articulos.csv",
+        "MAESTROS",
         cache=True,
     ),
     FuenteMaestro(
@@ -114,6 +141,7 @@ FUENTES_MAESTROS = (
         "Maestros",
         ("Maestro Clientes",),
         "Maestro_Clientes_Limpio.csv",
+        "MAESTROS",
         tipo="clientes",
     ),
     FuenteMaestro(
@@ -123,6 +151,7 @@ FUENTES_MAESTROS = (
         "Maestros",
         ("Datos Expresos",),
         "Maestro_Expresos_Limpio.csv",
+        "MAESTROS",
         tipo="expresos",
         cache=True,
     ),
@@ -133,15 +162,18 @@ FUENTES_MAESTROS = (
         "Maestros",
         ("Maestro Volumetria", "Maestro Volumetría"),
         "Maestro_Volumetria_Limpio.csv",
+        "MAESTROS",
         tipo="volumetria",
         cache=True,
     ),
 )
 
+
 FUENTES_POR_CLAVE = {
     fuente.clave: fuente
     for fuente in FUENTES_MAESTROS
 }
+
 
 GRUPOS_FUENTES = (
     "Dinámicas",

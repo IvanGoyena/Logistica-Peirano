@@ -7,11 +7,31 @@ from models.maestros.catalogo import FuenteMaestro
 from utils.maestros.descargas import dataframe_a_csv
 
 
+UBICACIONES_POR_ORIGEN = {
+    "WMS": "Data_WMS",
+    "ERP": "Data_ERP",
+    "MAESTROS": "Data_Maestros",
+}
+
+
 def mostrar_tarjeta_fuente(
     fuente: FuenteMaestro,
     resultado,
 ) -> None:
     estado = "🟢" if resultado.disponible else "🟠"
+
+    origen = str(
+        getattr(
+            fuente,
+            "origen",
+            "Sin definir",
+        )
+    ).strip().upper()
+
+    ubicacion = UBICACIONES_POR_ORIGEN.get(
+        origen,
+        "Sin definir",
+    )
 
     with st.container(border=True):
         st.markdown(
@@ -39,9 +59,18 @@ def mostrar_tarjeta_fuente(
             )
 
         st.caption(
-            f"Fuente: "
+            "Fuente: "
             f"{resultado.nombre_resuelto or 'No detectada'}"
         )
+
+        st.caption(
+            f"Origen: {origen}"
+        )
+
+        st.caption(
+            f"Ubicación: {ubicacion}"
+        )
+
         st.caption(
             f"Actualización: {resultado.fecha}"
         )

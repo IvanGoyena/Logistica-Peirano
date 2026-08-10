@@ -666,6 +666,74 @@ def preparar_disponible_articulo(tabla_disponible: pd.DataFrame) -> pd.DataFrame
     return agregado.merge(descripcion, on="ArticuloCodigo", how="left")[columnas]
 
 
+
+def preparar_pendiente_erp_articulo(
+    tabla_detalle_pendientes: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Resume el saldo pendiente real ERP por artículo."""
+    columnas = ["ArticuloCodigo", "PendienteERP"]
+
+    if tabla_detalle_pendientes is None or tabla_detalle_pendientes.empty:
+        return pd.DataFrame(columns=columnas)
+
+    origen = tabla_detalle_pendientes.copy()
+
+    codigo_col = _buscar_columna(
+        origen,
+        [
+            "ArticuloCodigo", "CodigoArticulo", "Codigo Articulo",
+            "Código Artículo", "cod_art", "Codigo", "Artículo",
+        ],
+    )
+    if codigo_col is None:
+        return pd.DataFrame(columns=columnas)
+
+    pendiente_col = _buscar_columna(
+        origen,
+        ["CantidadPendiente", "Pendiente", "can_pen"],
+    )
+    original_col = _buscar_columna(
+        origen,
+        ["can_art", "CantidadArticulo", "CantidadOriginal", "Cantidad", "Unidades"],
+    )
+    remitida_col = _buscar_columna(
+        origen,
+        ["can_rem", "CantidadRemitida", "Remitido", "UnidadesRemitidas"],
+    )
+
+    salida = pd.DataFrame(index=origen.index)
+    salida["ArticuloCodigo"] = _codigo(origen[codigo_col])
+
+    if pendiente_col is not None:
+        pendiente = _numero(origen[pendiente_col])
+    elif original_col is not None:
+        original = _numero(origen[original_col])
+        remitida = (
+            _numero(origen[remitida_col])
+            if remitida_col is not None
+            else pd.Series(0, index=origen.index, dtype=float)
+        )
+        pendiente = (original - remitida).clip(lower=0)
+    else:
+        return pd.DataFrame(columns=columnas)
+
+    salida["PendienteERP"] = pendiente
+    salida = salida.loc[
+        salida["ArticuloCodigo"].ne("")
+        & salida["PendienteERP"].gt(0)
+    ].copy()
+
+    if salida.empty:
+        return pd.DataFrame(columns=columnas)
+
+    return (
+        salida.groupby("ArticuloCodigo", as_index=False)["PendienteERP"]
+        .sum()
+        .sort_values("ArticuloCodigo")
+        .reset_index(drop=True)
+    )
+
+
 def _asignar_categoria_venta(
     tabla: pd.DataFrame,
 ) -> pd.Series:
@@ -752,6 +820,7 @@ def construir_tabla_cobertura(
     tabla_articulos: pd.DataFrame | None = None,
     tabla_max_min: pd.DataFrame | None = None,
     tabla_stock_detallado: pd.DataFrame | None = None,
+    tabla_detalle_pendientes: pd.DataFrame | None = None,
     meses_analisis: int = 3,
     dias_producto_nuevo: int = 90,
     dias_ingreso_reciente: int = 30,
@@ -826,12 +895,40 @@ def construir_tabla_cobertura(
         ventas["VentaPromedioMensual"] = ventas["UnidadesPeriodo"] / meses_periodo
         ventas["VentaPromedioDiaria"] = ventas["UnidadesPeriodo"] / max(dias_periodo, 1)
 
-    tabla = disponible.merge(ventas, on="ArticuloCodigo", how="outer")
+    pendientes_erp = preparar_pendiente_erp_articulo(
+        tabla_detalle_pendientes
+    )
+
+    universo = disponible.copy()
+
+    if not pendientes_erp.empty:
+        universo = universo.merge(
+            pendientes_erp,
+            on="ArticuloCodigo",
+            how="outer",
+            validate="one_to_one",
+        )
+    else:
+        universo["PendienteERP"] = 0
+
+    universo["PendienteERP"] = pd.to_numeric(
+        universo.get("PendienteERP", pd.Series(0, index=universo.index)),
+        errors="coerce",
+    ).fillna(0)
+
+    # El histórico no incorpora artículos nuevos: solo enriquece el universo.
+    tabla = universo.merge(
+        ventas,
+        on="ArticuloCodigo",
+        how="left",
+        validate="one_to_one",
+    )
     tabla["ArticuloCodigo"] = tabla["ArticuloCodigo"].fillna("").astype(str)
 
     for columna in [
         "Recepcion", "Bloqueados", "Pedidas", "Reservado", "Disponible", "Transito",
         "Preparacion", "Despacho", "Vencidas", "Scrap", "Inconsistencia",
+        "PendienteERP",
         "UnidadesPeriodo", "VentaPromedioMensual", "VentaPromedioDiaria", "MesesConVenta",
     ]:
         if columna not in tabla:

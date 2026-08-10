@@ -5,7 +5,11 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
-from config import CARPETA_DATOS
+from config import (
+    CARPETA_WMS,
+    CARPETA_ERP,
+    CARPETA_MAESTROS,
+)
 from models.clientes import construir_tabla_clientes
 from models.expresos import construir_tabla_expresos
 from models.pendiente import construir_tabla_pendientes
@@ -32,6 +36,23 @@ class ResultadoFuente:
             isinstance(self.dataframe, pd.DataFrame)
             and not self.dataframe.empty
         )
+
+
+def _resolver_carpeta(origen: str):
+    origen_normalizado = str(origen).strip().upper()
+
+    if origen_normalizado == "WMS":
+        return CARPETA_WMS
+
+    if origen_normalizado == "ERP":
+        return CARPETA_ERP
+
+    if origen_normalizado == "MAESTROS":
+        return CARPETA_MAESTROS
+
+    raise ValueError(
+        f"Origen de datos no reconocido: {origen}"
+    )
 
 
 def _transformar(
@@ -72,8 +93,12 @@ def cargar_fuente_maestros(
     fuente = FUENTES_POR_CLAVE[clave]
 
     try:
+        carpeta = _resolver_carpeta(
+            fuente.origen
+        )
+
         tabla, nombre = leer_archivo_flexible(
-            CARPETA_DATOS,
+            carpeta,
             fuente.nombres,
             cache=fuente.cache,
         )
@@ -84,7 +109,7 @@ def cargar_fuente_maestros(
         )
 
         fecha = fecha_archivo_flexible(
-            CARPETA_DATOS,
+            carpeta,
             nombre,
             fuente.nombres,
         )
@@ -124,22 +149,31 @@ def cargar_crudos_clientes() -> dict[str, pd.DataFrame]:
     """
 
     fuente_clientes = FUENTES_POR_CLAVE["clientes"]
+    carpeta_clientes = _resolver_carpeta(
+        fuente_clientes.origen
+    )
     clientes_crudo, _ = leer_archivo_flexible(
-        CARPETA_DATOS,
+        carpeta_clientes,
         fuente_clientes.nombres,
         cache=fuente_clientes.cache,
     )
 
     fuente_pendientes = FUENTES_POR_CLAVE["pendientes_erp"]
+    carpeta_pendientes = _resolver_carpeta(
+        fuente_pendientes.origen
+    )
     pendientes_crudo, _ = leer_archivo_flexible(
-        CARPETA_DATOS,
+        carpeta_pendientes,
         fuente_pendientes.nombres,
         cache=False,
     )
 
     fuente_pedidos = FUENTES_POR_CLAVE["pedidos"]
+    carpeta_pedidos = _resolver_carpeta(
+        fuente_pedidos.origen
+    )
     pedidos_crudo, _ = leer_archivo_flexible(
-        CARPETA_DATOS,
+        carpeta_pedidos,
         fuente_pedidos.nombres,
         cache=False,
     )

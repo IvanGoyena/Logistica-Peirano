@@ -11,6 +11,13 @@ except ImportError:
 # ENTORNO Y CARPETAS
 # ==========================================================
 
+BASE_DIR = Path(__file__).resolve().parent
+
+CARPETA_WMS = BASE_DIR / "Data_WMS"
+CARPETA_ERP = BASE_DIR / "Data_ERP"
+CARPETA_MAESTROS = BASE_DIR / "Data_Maestros"
+
+
 CARPETA_DATOS_LOCAL = Path(
     r"G:\Mi unidad\Sistema_Logistico_Peirano\data"
 )

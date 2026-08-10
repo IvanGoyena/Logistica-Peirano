@@ -53,15 +53,52 @@ def construir_tabla_tareas(
     ]
 ].copy()
 
+    # Claves auxiliares para cruzar preparaciones sin modificar
+    # los IDs originales ni convertir nulos en cadenas vacías.
+    tabla["_PreparacionKey"] = (
+        tabla["PreparacionId"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    pedidos["_PreparacionKey"] = (
+        pedidos["PreparacionID"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    # Evitar que valores vacíos se crucen entre sí.
+    tabla.loc[
+        tabla["_PreparacionKey"].fillna("").eq(""),
+        "_PreparacionKey"
+    ] = pd.NA
+    pedidos.loc[
+        pedidos["_PreparacionKey"].fillna("").eq(""),
+        "_PreparacionKey"
+    ] = pd.NA
+
+    # Una preparación debe tener una única referencia de pedido.
+    pedidos = (
+        pedidos
+        .sort_values("Fecha")
+        .drop_duplicates(
+            subset=["_PreparacionKey"],
+            keep="last",
+        )
+    )
+
     tabla = tabla.merge(
-
         pedidos,
+        on="_PreparacionKey",
+        how="left",
+        suffixes=("", "_pedido"),
+    )
 
-        left_on="PreparacionId",
-        right_on="PreparacionID",
-
-        how="left"
-
+    tabla = tabla.drop(
+        columns=["_PreparacionKey"],
+        errors="ignore",
     )
 
     # ------------------------------------------------------
@@ -485,7 +522,20 @@ def obtener_pendiente_pick(
     # PREPARACIONES PENDIENTES DE INICIAR
     # ---------------------------------------
 
+    estado_activo = (
+        tabla_pedidos["Estado"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(["PENDIENTE", "PREPARACION"])
+    )
+
     pendientes = tabla_pedidos[
+
+        estado_activo
+
+        &
 
         (~tabla_pedidos["PreparacionID"].isin(preparaciones_en_curso))
 

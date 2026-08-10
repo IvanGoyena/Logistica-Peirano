@@ -157,6 +157,10 @@ def render(contexto: dict) -> None:
     historico_ventas = contexto.get("historico_ventas_stock", pd.DataFrame())
     tabla_articulos = contexto.get("tabla_articulos", pd.DataFrame())
     tabla_max_min = contexto.get("tabla_max_min", pd.DataFrame())
+    tabla_detalle_pendientes = contexto.get(
+        "tabla_detalle_pendientes",
+        pd.DataFrame(),
+    )
     tabla_stock_detallado = contexto.get(
         "tabla_stock_detallado",
         pd.DataFrame(),
@@ -204,6 +208,7 @@ def render(contexto: dict) -> None:
             tabla_articulos=tabla_articulos,
             tabla_max_min=tabla_max_min,
             tabla_stock_detallado=tabla_stock_detallado,
+            tabla_detalle_pendientes=tabla_detalle_pendientes,
             meses_analisis=int(meses_analisis),
             dias_producto_nuevo=90,
             dias_ingreso_reciente=30,
@@ -394,10 +399,10 @@ def render(contexto: dict) -> None:
         )
 
         # Criterio 2: artículos sin clasificación en el maestro.
-        # R = Repuestos
         # A / U = Partes y piezas
+        # Los códigos R se mantienen en el análisis normal.
         excluir_por_codigo = codigo_articulo.str.startswith(
-            ("R","A","U","S","F",),
+            ("A", "U", "S", "F"),
             na=False,
         )
 
@@ -962,6 +967,7 @@ def render(contexto: dict) -> None:
         "Reservado",
         "Bloqueados",
         "Transito",
+        "PendienteERP",
         "StockComprometido",
         "PorcentajeDisponible",
         "UnidadesPeriodo",
@@ -1006,6 +1012,7 @@ def render(contexto: dict) -> None:
             "Reservado",
             "Bloqueados",
             "Transito",
+            "PendienteERP",
             "StockComprometido",
             "StockOperativoTotal",
             "PorcentajeDisponible",
@@ -1057,6 +1064,7 @@ def render(contexto: dict) -> None:
             "Reservado",
             "Bloqueados",
             "Transito",
+            "PendienteERP",
             "StockComprometido",
             "PorcentajeDisponible",
             "UnidadesPeriodo",
@@ -1149,6 +1157,11 @@ def render(contexto: dict) -> None:
             "Transito":
                 st.column_config.NumberColumn(
                     "Tránsito",
+                    format="%.0f",
+                ),
+            "PendienteERP":
+                st.column_config.NumberColumn(
+                    "Pendiente ERP",
                     format="%.0f",
                 ),
             "StockComprometido":

@@ -32,6 +32,10 @@ FUENTES_DINAMICAS_STOCK = {
         "Stock Disponible", "Stock_Disponible", "stock_disponible",
         "Disponible Digip", "Disponible_Digip", "disponible_digip",
     ],
+    "detalle_pendientes": [
+        "Detalle Pendientes", "Detalle_Pendientes",
+        "detalle pendientes", "detalle_pendientes",
+    ],
     "stock_detallado": [
         "Stock Digip", "Stock DIGIP", "Stock_Digip", "stock_digip",
         "stock_detallado", "Stock_Detallado", "Stock Detallado",
@@ -483,6 +487,9 @@ def construir_contexto_cobertura(
     # La firma forma parte de la clave de caché del contexto.
     _ = firma_base_historica
     disponible = cargar_fuente_dinamica_stock("disponible")
+    detalle_pendientes = cargar_fuente_dinamica_stock(
+        "detalle_pendientes"
+    )
     stock_detallado = cargar_fuente_dinamica_stock(
         "stock_detallado"
     )
@@ -507,6 +514,7 @@ def construir_contexto_cobertura(
 
     return {
         "tabla_disponible": preparar_tabla_stock(disponible["df"], "Stock Disponible"),
+        "tabla_detalle_pendientes": detalle_pendientes["df"].copy(),
         "historico_ventas_stock": historico,
         "tabla_articulos": articulos["df"].copy(),
         "tabla_max_min": preparar_max_min(max_min["df"]),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from models.pedidos import construir_tabla_pedidos
+from models.tareas_modulo.pedidos_tareas import construir_tabla_pedidos_tareas
 from models.tareas import (
     construir_tabla_tareas,
     obtener_avance_despachos,
@@ -148,7 +148,7 @@ def construir_contexto_tareas(
     df_volumetria: pd.DataFrame,
     df_control: pd.DataFrame | None = None,
 ) -> dict[str, object]:
-    tabla_pedidos = construir_tabla_pedidos(
+    tabla_pedidos = construir_tabla_pedidos_tareas(
         df_pedidos,
         df_detalle,
         df_articulos,
@@ -169,8 +169,18 @@ def construir_contexto_tareas(
     pendiente_pick = obtener_pendiente_pick(tabla_tareas, tabla_pedidos)
     control_dia_anterior = obtener_control_dia_anterior(df_control)
 
+    mascara_estado_activo = (
+        tabla_pedidos["Estado"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(["PENDIENTE", "PREPARACION"])
+    )
+
     pedidos_sin_preparacion = tabla_pedidos.loc[
-        tabla_pedidos["PreparacionID"].isna()
+        mascara_estado_activo
+        & tabla_pedidos["PreparacionID"].isna()
     ].copy()
 
     tareas_unidades = tabla_tareas.merge(
