@@ -11,10 +11,14 @@ from views.maestros.fuentes import (
 from views.maestros.historicos import (
     render_historicos,
 )
+from views.maestros.publicacion import (
+    render_publicacion,
+)
 
 
 def render_maestros() -> None:
     st.title("⚙️ Maestros y Fuentes")
+
     st.caption(
         "Centro de administración de reportes, "
         "maestros e históricos del Sistema Logístico."
@@ -26,6 +30,7 @@ def render_maestros() -> None:
             "📂 Fuentes y descargas",
             "👥 Maestro Clientes",
             "📈 Históricos",
+            "⬆️ Publicación manual",
         ],
         default="📂 Fuentes y descargas",
         label_visibility="collapsed",
@@ -36,7 +41,12 @@ def render_maestros() -> None:
 
     if vista == "📂 Fuentes y descargas":
         render_fuentes()
+
     elif vista == "👥 Maestro Clientes":
         render_clientes()
-    else:
+
+    elif vista == "📈 Históricos":
         render_historicos()
+
+    else:
+        render_publicacion()
