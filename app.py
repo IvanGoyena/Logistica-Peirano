@@ -1,14 +1,5 @@
 import streamlit as st
 
-from config import (
-    CARPETA_DATOS,
-    ES_STREAMLIT_CLOUD,
-)
-
-from utils.google_drive import (
-    sincronizar_carpeta_drive,
-)
-
 from utils.cache_app import (
     limpiar_cache_aplicacion,
 )
@@ -62,19 +53,11 @@ with st.sidebar:
         use_container_width=True,
         key="sidebar_actualizar_datos_global",
         help=(
-            "Limpia la caché de datos de toda la aplicación y vuelve "
-            "a leer las fuentes actualizadas."
+            "Limpia la caché de datos de toda la aplicación "
+            "y vuelve a leer las fuentes disponibles en el repositorio."
         ),
     ):
         with st.spinner("Actualizando fuentes..."):
-
-            # En Streamlit Cloud los archivos se sincronizan primero
-            # desde Google Drive para que el rerun lea la versión nueva.
-            if ES_STREAMLIT_CLOUD:
-                sincronizar_carpeta_drive(
-                    carpeta_destino=CARPETA_DATOS,
-                )
-
             limpiar_cache_aplicacion()
 
         st.toast(
@@ -82,34 +65,6 @@ with st.sidebar:
             icon="✅",
         )
         st.rerun()
-
-
-# ==========================================================
-# SINCRONIZACIÓN DE DATOS EN STREAMLIT CLOUD
-# ==========================================================
-
-if ES_STREAMLIT_CLOUD:
-
-    try:
-
-        with st.spinner(
-            "Sincronizando datos desde Google Drive..."
-        ):
-
-            sincronizar_carpeta_drive(
-                carpeta_destino=CARPETA_DATOS,
-            )
-
-    except Exception as error:
-
-        st.error(
-            "No se pudieron sincronizar los datos "
-            "desde Google Drive."
-        )
-
-        st.exception(error)
-
-        st.stop()
 
 
 # ==========================================================
