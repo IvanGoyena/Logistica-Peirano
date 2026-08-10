@@ -52,7 +52,7 @@ def render(contexto: dict) -> None:
                 "Horas",
             ],
             label_visibility="collapsed",
-            key="metrica_evolucion",
+            key="metricas_resumen_metrica_evolucion",
         )
 
         evolucion = (
@@ -171,10 +171,10 @@ def render(contexto: dict) -> None:
         )
 
         categoria_mix = st.selectbox(
-            label="",
+            label="Categoría del mix",
             options=["Familia", "Sector"],
             index=1,
-            key="categoria_mix",
+            key="metricas_resumen_categoria_mix",
             label_visibility="collapsed",
         )
 
@@ -442,7 +442,7 @@ def render(contexto: dict) -> None:
                 "Unidades/hora",
             ],
             label_visibility="collapsed",
-            key="metrica_carga_dia",
+            key="metricas_resumen_metrica_carga_dia",
         )
 
         base_dia = tareas_filtradas.copy()

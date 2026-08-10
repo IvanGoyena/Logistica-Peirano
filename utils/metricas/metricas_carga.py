@@ -97,11 +97,11 @@ def cargar_ciclo_pedidos(
 ) -> dict:
     _ = firma_historicos, firma_proceso, firma_clientes, momento_evaluacion
     try:
-        pedidos = leer_archivo(CARPETA_DATOS, "Pedidos DIGIP", cache=True)
+        pedidos = leer_archivo(CARPETA_DATOS, "Pedidos DIGIP", cache=False)
     except Exception:
         pedidos = pd.DataFrame()
     try:
-        hojas = leer_archivo(CARPETA_DATOS, "Hojas de Ruta", cache=True)
+        hojas = leer_archivo(CARPETA_DATOS, "Hojas de Ruta", cache=False)
     except Exception:
         hojas = pd.DataFrame()
     try:

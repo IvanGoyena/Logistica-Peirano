@@ -111,9 +111,9 @@ ZONAS_PLANIFICACION = {
         "planificacion": 'LUNES',
     },
     "01010006": {
-        "descripcion": 'SAN MARTIN',
+        "descripcion": 'CASEROS',
         "grupo": '1',
-        "planificacion": 'LUNES',
+        "planificacion": 'VIERNES',
     },
     "01010007": {
         "descripcion": 'SAN MIGUEL',

@@ -9,6 +9,10 @@ from utils.google_drive import (
     sincronizar_carpeta_drive,
 )
 
+from utils.cache_app import (
+    limpiar_cache_aplicacion,
+)
+
 from utils.autenticacion import (
     crear_autenticador,
     inicializar_sesion,
@@ -44,6 +48,40 @@ if st.session_state.get("authentication_status") is not True:
 
 sincronizar_usuario()
 mostrar_usuario_sidebar(autenticador)
+
+
+# ==========================================================
+# ACTUALIZACIÓN GLOBAL DE DATOS
+# ==========================================================
+
+with st.sidebar:
+    st.divider()
+
+    if st.button(
+        "🔄 Actualizar datos",
+        use_container_width=True,
+        key="sidebar_actualizar_datos_global",
+        help=(
+            "Limpia la caché de datos de toda la aplicación y vuelve "
+            "a leer las fuentes actualizadas."
+        ),
+    ):
+        with st.spinner("Actualizando fuentes..."):
+
+            # En Streamlit Cloud los archivos se sincronizan primero
+            # desde Google Drive para que el rerun lea la versión nueva.
+            if ES_STREAMLIT_CLOUD:
+                sincronizar_carpeta_drive(
+                    carpeta_destino=CARPETA_DATOS,
+                )
+
+            limpiar_cache_aplicacion()
+
+        st.toast(
+            "Fuentes actualizadas correctamente.",
+            icon="✅",
+        )
+        st.rerun()
 
 
 # ==========================================================
@@ -200,6 +238,13 @@ pagina_devoluciones = st.Page(
 )
 
 
+pagina_inventario = st.Page(
+    "pages/10_Inventario.py",
+    title="Gestión de Inventario",
+    icon="🧮",
+)
+
+
 
 # ==========================================================
 # MENÚ SEGÚN ROL
@@ -220,6 +265,7 @@ if tiene_rol("admin"):
         pagina_pedidos,
         pagina_despachos,
         pagina_stock,
+        pagina_inventario,
         pagina_devoluciones,
     ]
 
@@ -245,6 +291,7 @@ elif tiene_rol("gerencia"):
         pagina_pedidos,
         pagina_despachos,
         pagina_stock,
+        pagina_inventario,
         pagina_devoluciones,
     ]
 
@@ -264,6 +311,7 @@ elif tiene_rol("logistica"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
+        pagina_inventario,
         pagina_devoluciones,
     ]
 
@@ -283,6 +331,7 @@ elif tiene_rol("supervisor"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
+        pagina_inventario,
         pagina_devoluciones,
     ]
 

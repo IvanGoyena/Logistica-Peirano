@@ -308,16 +308,19 @@ def analizar_cobertura_pedidos_erp(
     Analiza compromisos pendientes fuera de DIGIP.
 
     Fuente principal de cobertura:
-    - est_1 del reporte ERP: stock aprobado bruto;
-    - stk_res del reporte ERP: stock ya reservado;
-    - disponible real para nuevas ventas: max(est_1 - stk_res, 0);
-    - est_8 del reporte ERP: pendiente / tránsito.
+    - est_1 del reporte ERP: stock aprobado disponible para cobertura;
+    - est_8 del reporte ERP: pendiente / tránsito;
+    - stk_res se conserva únicamente como dato informativo y NO se
+      descuenta de est_1 para este análisis.
 
     El disponible WMS se conserva como contraste para detectar
     diferencias entre ambos sistemas.
 
-    La asignación de stock se realiza por código y en orden de fecha/pedido
-    para evitar contar el mismo disponible más de una vez.
+    La demanda utilizada es exclusivamente el saldo todavía pendiente
+    de cada línea (preferentemente CantidadPendiente; en su defecto
+    can_art - can_rem). La asignación de est_1 se realiza por código y
+    en orden de fecha/pedido para evitar contar el mismo disponible más
+    de una vez.
     """
 
     columnas_lineas = [
@@ -328,6 +331,8 @@ def analizar_cobertura_pedidos_erp(
         "Planificacion",
         "ArticuloCodigo",
         "ArticuloDescripcion",
+        "CantidadOriginal",
+        "CantidadRemitida",
         "CantidadSolicitada",
         "DisponibleERPInicial",
         "TransitoERP",
@@ -348,6 +353,11 @@ def analizar_cobertura_pedidos_erp(
         "ClienteCodigo",
         "ClienteDescripcion",
         "Planificacion",
+        "CategoriaPedidoPendiente",
+        "LineasOriginales",
+        "LineasYaCerradas",
+        "LineasPendientes",
+        "LineasRemanentes",
         "UnidadesSolicitadas",
         "UnidadesCubiertas",
         "UnidadesFaltantes",
@@ -394,14 +404,45 @@ def analizar_cobertura_pedidos_erp(
         ],
         obligatoria=False,
     )
-    col_cantidad = _buscar_columna(
+    # Cantidad original de la línea.
+    # En el detalle ERP suele venir como can_art.
+    col_cantidad_original = _buscar_columna(
+        detalle,
+        [
+            "can_art",
+            "CantidadArticulo",
+            "CantidadOriginal",
+            "Cantidad",
+            "Unidades",
+        ],
+    )
+
+    # Cantidad ya remitida / transmitida de la línea.
+    # El saldo que realmente debe analizar cobertura es:
+    #
+    #     Pendiente real = can_art - can_rem
+    #
+    # Si la fuente ya trae una columna explícita de pendiente,
+    # se utiliza como prioridad.
+    col_cantidad_pendiente = _buscar_columna(
         detalle,
         [
             "CantidadPendiente",
-            "Cantidad",
-            "Unidades",
             "Pendiente",
+            "can_pen",
         ],
+        obligatoria=False,
+    )
+
+    col_cantidad_remitida = _buscar_columna(
+        detalle,
+        [
+            "can_rem",
+            "CantidadRemitida",
+            "Remitido",
+            "UnidadesRemitidas",
+        ],
+        obligatoria=False,
     )
     col_fecha_det = _buscar_columna(
         detalle,
@@ -620,11 +661,11 @@ def analizar_cobertura_pedidos_erp(
                 errors="ignore",
             )
 
-    pedidos_activos = _pedidos_activos_digip(df_pedidos_digip)
-
+    # Se evalúan todos los pedidos que todavía figuran pendientes en ERP.
+    # Estar presente en DIGIP no elimina la necesidad de cobertura:
+    # mientras el pedido siga pendiente, sus unidades deben competir contra est_1.
     base_pedidos = base_pedidos.loc[
         base_pedidos["Pedido"].ne("")
-        & ~base_pedidos["Pedido"].isin(pedidos_activos)
     ].copy()
 
     if base_pedidos.empty:
@@ -632,6 +673,37 @@ def analizar_cobertura_pedidos_erp(
             pd.DataFrame(columns=columnas_lineas),
             pd.DataFrame(columns=columnas_resumen),
         )
+
+    cantidad_original = _serie_numerica(
+        detalle,
+        col_cantidad_original,
+    )
+
+    cantidad_remitida = (
+        _serie_numerica(detalle, col_cantidad_remitida)
+        if col_cantidad_remitida
+        else pd.Series(0.0, index=detalle.index)
+    )
+
+    if col_cantidad_pendiente:
+        # Si el ERP ya entrega el saldo pendiente explícito,
+        # se usa como referencia del saldo de la línea.
+        cantidad_pendiente_real = _serie_numerica(
+            detalle,
+            col_cantidad_pendiente,
+        )
+    elif col_cantidad_remitida:
+        cantidad_pendiente_real = (
+            cantidad_original - cantidad_remitida
+        ).clip(lower=0)
+    else:
+        cantidad_pendiente_real = cantidad_original
+
+    # Nunca una línea puede quedar pendiente por encima de su cantidad original.
+    cantidad_pendiente_real = pd.concat(
+        [cantidad_pendiente_real, cantidad_original],
+        axis=1,
+    ).min(axis=1).clip(lower=0)
 
     lineas = pd.DataFrame({
         "Pedido": detalle[col_pedido_det].map(_normalizar_texto),
@@ -646,9 +718,55 @@ def analizar_cobertura_pedidos_erp(
             if col_descripcion
             else ""
         ),
-        "CantidadSolicitada": _serie_numerica(detalle, col_cantidad),
+        "CantidadOriginal": cantidad_original,
+        "CantidadRemitida": cantidad_remitida,
+        "CantidadSolicitada": cantidad_pendiente_real,
     })
 
+    # Categoría operativa de la línea pendiente.
+    #
+    # REMANENTE PARCIAL:
+    #   parte de la línea ya salió y todavía queda saldo.
+    #
+    # LÍNEA SIN REMITIR:
+    #   la línea continúa pendiente completa.
+    lineas["CategoriaPendiente"] = "LÍNEA SIN REMITIR"
+    mascara_remanente = (
+        lineas["CantidadSolicitada"].gt(0)
+        & lineas["CantidadRemitida"].gt(0)
+        & lineas["CantidadRemitida"].lt(lineas["CantidadOriginal"])
+    )
+    lineas.loc[
+        mascara_remanente,
+        "CategoriaPendiente",
+    ] = "REMANENTE PARCIAL"
+
+    # -----------------------------------------------------
+    # ESTRUCTURA ORIGINAL DEL PEDIDO
+    # -----------------------------------------------------
+    # Se conserva antes de filtrar las líneas ya cerradas para poder
+    # distinguir pedidos nuevos de pedidos que ya fueron despachados
+    # parcialmente y sólo conservan remanentes pendientes.
+    estructura_pedido = (
+        lineas.loc[
+            lineas["Pedido"].isin(set(base_pedidos["Pedido"]))
+            & lineas["ArticuloCodigo"].ne("")
+            & lineas["CantidadOriginal"].gt(0)
+        ]
+        .groupby("Pedido", as_index=False)
+        .agg(
+            LineasOriginales=("ArticuloCodigo", "size"),
+            LineasYaCerradas=(
+                "CantidadSolicitada",
+                lambda serie: int(serie.le(0).sum()),
+            ),
+        )
+    )
+
+    # MUY IMPORTANTE:
+    # del pedido completo sólo quedan en el análisis las líneas que
+    # todavía tienen saldo real pendiente. Las líneas ya cerradas/remitidas
+    # del mismo pedido se eliminan por completo de cobertura.
     lineas = lineas.loc[
         lineas["Pedido"].isin(set(base_pedidos["Pedido"]))
         & lineas["ArticuloCodigo"].ne("")
@@ -667,6 +785,23 @@ def analizar_cobertura_pedidos_erp(
         how="left",
         validate="many_to_one",
     )
+    lineas = lineas.merge(
+        estructura_pedido,
+        on="Pedido",
+        how="left",
+        validate="many_to_one",
+    )
+    lineas["LineasOriginales"] = (
+        pd.to_numeric(lineas["LineasOriginales"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    lineas["LineasYaCerradas"] = (
+        pd.to_numeric(lineas["LineasYaCerradas"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
     lineas["Fecha"] = lineas["FechaPedido"].fillna(
         lineas["FechaDetalle"]
     )
@@ -724,23 +859,21 @@ def analizar_cobertura_pedidos_erp(
         )
 
     # -----------------------------------------------------
-    # DISPONIBLE REAL PARA NUEVAS VENTAS
+    # DISPONIBLE ERP PARA COBERTURA
     # -----------------------------------------------------
     #
-    # Confirmado por operación:
-    # est_1 representa stock aprobado bruto y stk_res contiene
-    # las unidades ya reservadas. Para analizar nuevos pedidos,
-    # el disponible real debe ser:
+    # Regla operativa:
+    # est_1 es la referencia directa de stock aprobado disponible
+    # contra la que se compara la demanda pendiente.
     #
-    #     Disponible ERP real = est_1 - stk_res
-    #
-    # Nunca se permiten valores negativos.
+    # stk_res se conserva como dato informativo del ERP, pero NO
+    # se descuenta nuevamente porque eso distorsiona la referencia est_1.
     lineas["StockAprobadoERP"] = lineas["DisponibleERP"]
 
     lineas["DisponibleERP"] = (
         lineas["StockAprobadoERP"]
-        - lineas["ReservadoERP"]
-    ).clip(lower=0)
+        .clip(lower=0)
+    )
 
     sin_descripcion = lineas["ArticuloDescripcion"].eq("")
     lineas.loc[sin_descripcion, "ArticuloDescripcion"] = (
@@ -885,6 +1018,13 @@ def analizar_cobertura_pedidos_erp(
             dropna=False,
         )
         .agg(
+            LineasOriginales=("LineasOriginales", "max"),
+            LineasYaCerradas=("LineasYaCerradas", "max"),
+            LineasPendientes=("ArticuloCodigo", "size"),
+            LineasRemanentes=(
+                "CategoriaPendiente",
+                lambda serie: int(serie.eq("REMANENTE PARCIAL").sum()),
+            ),
             UnidadesSolicitadas=("CantidadSolicitada", "sum"),
             UnidadesCubiertas=("CantidadCubierta", "sum"),
             UnidadesFaltantes=("CantidadFaltante", "sum"),
@@ -923,6 +1063,119 @@ def analizar_cobertura_pedidos_erp(
         )
     )
 
+    # -----------------------------------------------------
+    # ESTADO DE COBERTURA A NIVEL PEDIDO
+    # -----------------------------------------------------
+    # La categoría se calcula con las líneas pendientes del pedido:
+    #
+    # SIN COBERTURA TOTAL:
+    #   todas las líneas pendientes carecen de cobertura inmediata (est_1).
+    #
+    # SIN COBERTURA PARCIAL:
+    #   mezcla líneas con cobertura inmediata y líneas sin cobertura;
+    #   al menos una de las líneas sin stock tampoco queda resuelta
+    #   completamente con tránsito.
+    #
+    # COBERTURA EN TRÁNSITO:
+    #   mezcla líneas con cobertura inmediata y líneas sin stock,
+    #   pero TODAS las líneas sin stock quedan cubiertas por est_8.
+    #
+    # COBERTURA COMPLETA:
+    #   todas las líneas pendientes están cubiertas inmediatamente con est_1.
+    diagnostico_pedido = (
+        lineas.assign(
+            _ConStock=lineas["CantidadFaltante"].le(0),
+            _SinStock=lineas["CantidadFaltante"].gt(0),
+            _SinStockCubiertaTransito=(
+                lineas["CantidadFaltante"].gt(0)
+                & lineas["FaltanteLuegoTransito"].le(0)
+            ),
+            _SinCoberturaReal=lineas["FaltanteLuegoTransito"].gt(0),
+        )
+        .groupby("Pedido", as_index=False)
+        .agg(
+            TotalLineasPendientes=("ArticuloCodigo", "size"),
+            LineasConStock=("_ConStock", "sum"),
+            LineasSinStock=("_SinStock", "sum"),
+            LineasSinStockCubiertasTransito=(
+                "_SinStockCubiertaTransito",
+                "sum",
+            ),
+            LineasSinCoberturaReal=("_SinCoberturaReal", "sum"),
+        )
+    )
+
+    resumen = resumen.merge(
+        diagnostico_pedido,
+        on="Pedido",
+        how="left",
+        validate="one_to_one",
+    )
+
+    for columna in [
+        "TotalLineasPendientes",
+        "LineasConStock",
+        "LineasSinStock",
+        "LineasSinStockCubiertasTransito",
+        "LineasSinCoberturaReal",
+    ]:
+        resumen[columna] = (
+            pd.to_numeric(resumen[columna], errors="coerce")
+            .fillna(0)
+            .astype(int)
+        )
+
+    resumen["CategoriaPedidoPendiente"] = "COBERTURA COMPLETA"
+
+    # 1) Todas las líneas pendientes están sin stock inmediato.
+    mascara_total = (
+        resumen["TotalLineasPendientes"].gt(0)
+        & resumen["LineasSinStock"].eq(
+            resumen["TotalLineasPendientes"]
+        )
+    )
+    resumen.loc[
+        mascara_total,
+        "CategoriaPedidoPendiente",
+    ] = "SIN COBERTURA TOTAL"
+
+    # 2) Hay líneas con stock y líneas sin stock.
+    mascara_mixta = (
+        resumen["LineasConStock"].gt(0)
+        & resumen["LineasSinStock"].gt(0)
+    )
+    resumen.loc[
+        mascara_mixta,
+        "CategoriaPedidoPendiente",
+    ] = "SIN COBERTURA PARCIAL"
+
+    # 3) Caso mixto, pero todas las líneas sin stock quedan cubiertas
+    # completamente por tránsito.
+    mascara_transito = (
+        mascara_mixta
+        & resumen["LineasSinStockCubiertasTransito"].eq(
+            resumen["LineasSinStock"]
+        )
+    )
+    resumen.loc[
+        mascara_transito,
+        "CategoriaPedidoPendiente",
+    ] = "COBERTURA EN TRÁNSITO"
+
+    # EstadoCobertura del resumen queda sincronizado con la categoría del pedido.
+    resumen["EstadoCobertura"] = resumen["CategoriaPedidoPendiente"]
+
+    resumen = resumen.drop(
+        columns=[
+            "TotalLineasPendientes",
+            "LineasConStock",
+            "LineasSinStock",
+            "LineasSinStockCubiertasTransito",
+            "LineasSinCoberturaReal",
+        ],
+        errors="ignore",
+    )
+
     resumen["PorcentajeCobertura"] = (
         resumen["UnidadesCubiertas"]
         .div(resumen["UnidadesSolicitadas"].replace(0, pd.NA))
@@ -931,12 +1184,7 @@ def analizar_cobertura_pedidos_erp(
         .clip(lower=0, upper=100)
     )
 
-    inverso_estado = {valor: clave for clave, valor in orden_estado.items()}
-    resumen["EstadoCobertura"] = (
-        resumen["_OrdenEstado"]
-        .map(inverso_estado)
-        .fillna("Con cobertura")
-    )
+    # EstadoCobertura ya fue calculado a nivel pedido.
     resumen["AlertaStock"] = resumen["Alertas"].fillna("")
     resumen["ProximoIngresoOC"] = pd.to_datetime(
         resumen["ProximoIngresoOC"],
@@ -954,6 +1202,8 @@ def analizar_cobertura_pedidos_erp(
     resumen.loc[con_fecha_resumen & dias_resumen_oc.gt(15), "EstadoIngresoOC"] = "Más de 15 días"
 
     for columna in [
+        "CantidadOriginal",
+        "CantidadRemitida",
         "CantidadSolicitada",
         "DisponibleERPInicial",
         "TransitoERP",

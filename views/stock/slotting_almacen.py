@@ -101,7 +101,7 @@ def _estado_formulario() -> dict:
     return defaults
 
 
-def render(
+def _render_distribucion(
     contexto: dict,
 ) -> None:
     defaults = _estado_formulario()
@@ -734,3 +734,34 @@ def render(
                 width="stretch",
                 height=280,
             )
+
+
+# ==========================================================
+# NAVEGACIÓN INTERNA DE SLOTTING DE ALMACÉN
+# ==========================================================
+
+def render(
+    contexto: dict,
+) -> None:
+    """
+    Mantiene el Slotting existente y suma, sin alterar su motor,
+    una vista operativa independiente para consolidar pallets parciales.
+    """
+    vista = st.segmented_control(
+        "Vista de Slotting de Almacén",
+        options=[
+            "🗺️ Distribución y relocalización",
+            "♻️ Consolidación de pallets",
+        ],
+        default="🗺️ Distribución y relocalización",
+        key="almacen_vista_interna",
+        label_visibility="collapsed",
+    )
+
+    if vista == "♻️ Consolidación de pallets":
+        from views.stock.pallets_parciales import render as render_pallets_parciales
+
+        render_pallets_parciales(contexto)
+        return
+
+    _render_distribucion(contexto)

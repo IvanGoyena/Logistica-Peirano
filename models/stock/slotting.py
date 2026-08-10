@@ -305,6 +305,8 @@ def preparar_max_min_slotting(
             "ArticuloCodigo",
             "Codigo",
             "articulo_codigo",
+            "Articulo",
+            "Artículo",
         ],
         "",
     )
@@ -319,8 +321,10 @@ def preparar_max_min_slotting(
         _serie(
             origen,
             [
-                "articulo",
-                "Articulo",
+                "Descripcion",
+                "Descripción",
+                "ArticuloDescripcion",
+                "Artículo Descripción",
                 "Producto",
             ],
             "",
@@ -364,6 +368,8 @@ def preparar_max_min_slotting(
             [
                 "unidades_disponibles",
                 "UnidadesDisponibles",
+                "Unidades en ubicacion",
+                "Unidades en ubicación",
                 "StockPicking",
                 "DisponiblePicking",
             ],
@@ -378,6 +384,8 @@ def preparar_max_min_slotting(
                 "StockMinimo",
                 "Minimo",
                 "Mínimo",
+                "Unidades Minimas",
+                "Unidades Mínimas",
             ],
             0,
         )
@@ -390,6 +398,8 @@ def preparar_max_min_slotting(
                 "StockMaximo",
                 "Maximo",
                 "Máximo",
+                "Unidades Maximas",
+                "Unidades Máximas",
             ],
             0,
         )

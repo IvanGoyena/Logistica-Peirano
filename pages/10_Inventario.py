@@ -5,14 +5,16 @@ from utils.autenticacion import requerir_roles
 requerir_roles(
     "admin",
     "gerencia",
+    "logistica",
+    "supervisor",
 )
 
 st.set_page_config(
-    page_title="Maestros y Fuentes",
-    page_icon="⚙️",
+    page_title="Inventario",
+    page_icon="🧮",
     layout="wide",
 )
 
-from views.maestros.principal import render_maestros
+from views.inventario.principal import render_inventario
 
-render_maestros()
+render_inventario()

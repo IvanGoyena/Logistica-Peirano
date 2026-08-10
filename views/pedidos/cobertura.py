@@ -38,22 +38,34 @@ def render_cobertura(
         )
 
         if resumen_cobertura_erp.empty:
-            st.success("No hay pedidos pendientes fuera de DIGIP para evaluar.")
+            st.success("No hay pedidos con saldo pendiente para evaluar.")
         else:
-            total_pedidos = int(
-                resumen_cobertura_erp["Pedido"].nunique()
-            )
-            con_faltante = int(
-                resumen_cobertura_erp["UnidadesFaltantes"].gt(0).sum()
-            )
-            sin_cobertura = int(
+            casos_sin_cobertura = int(
                 resumen_cobertura_erp["EstadoCobertura"]
-                .eq("Sin cobertura")
+                .isin([
+                    "SIN COBERTURA TOTAL",
+                    "SIN COBERTURA PARCIAL",
+                ])
+                .sum()
+            )
+            sin_cobertura_total = int(
+                resumen_cobertura_erp["EstadoCobertura"]
+                .eq("SIN COBERTURA TOTAL")
+                .sum()
+            )
+            sin_cobertura_parcial = int(
+                resumen_cobertura_erp["EstadoCobertura"]
+                .eq("SIN COBERTURA PARCIAL")
                 .sum()
             )
             cobertura_transito = int(
                 resumen_cobertura_erp["EstadoCobertura"]
-                .eq("Cobertura en tránsito")
+                .eq("COBERTURA EN TRÁNSITO")
+                .sum()
+            )
+            cobertura_completa = int(
+                resumen_cobertura_erp["EstadoCobertura"]
+                .eq("COBERTURA COMPLETA")
                 .sum()
             )
             con_diferencias = int(
@@ -63,24 +75,28 @@ def render_cobertura(
                 resumen_cobertura_erp["UnidadesFaltantes"].sum()
             )
 
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric(
-                "Pendientes fuera de DIGIP",
-                f"{total_pedidos:,}".replace(",", "."),
+                "Casos sin cobertura",
+                f"{casos_sin_cobertura:,}".replace(",", "."),
             )
             c2.metric(
-                "Pedidos con faltante",
-                f"{con_faltante:,}".replace(",", "."),
+                "Sin cobertura total",
+                f"{sin_cobertura_total:,}".replace(",", "."),
             )
             c3.metric(
-                "Sin cobertura real",
-                f"{sin_cobertura:,}".replace(",", "."),
+                "Sin cobertura parcial",
+                f"{sin_cobertura_parcial:,}".replace(",", "."),
             )
             c4.metric(
-                "Cubiertos por tránsito",
+                "Cobertura en tránsito",
                 f"{cobertura_transito:,}".replace(",", "."),
             )
             c5.metric(
+                "Cobertura completa",
+                f"{cobertura_completa:,}".replace(",", "."),
+            )
+            c6.metric(
                 "Diferencias ERP/WMS",
                 f"{con_diferencias:,}".replace(",", "."),
             )
@@ -102,8 +118,8 @@ def render_cobertura(
                     value=True,
                     key="pedidos_solo_problemas_cobertura",
                     help=(
-                        "Muestra únicamente Sin cobertura y "
-                        "Cobertura en tránsito."
+                        "Oculta Cobertura completa y muestra únicamente "
+                        "los pedidos que requieren seguimiento."
                     ),
                 )
 
@@ -115,16 +131,24 @@ def render_cobertura(
                 )
 
             with filtro_3:
-                estados_cobertura = st.multiselect(
+                etiquetas_estado = {
+                    "Sin cobertura total": "SIN COBERTURA TOTAL",
+                    "Sin cobertura parcial": "SIN COBERTURA PARCIAL",
+                    "Cobertura en tránsito": "COBERTURA EN TRÁNSITO",
+                    "Cobertura completa": "COBERTURA COMPLETA",
+                }
+
+                estados_cobertura_ui = st.multiselect(
                     "Estado de cobertura",
-                    options=[
-                        "Sin cobertura",
-                        "Cobertura en tránsito",
-                        "Con cobertura",
-                    ],
+                    options=list(etiquetas_estado.keys()),
                     default=[],
                     key="filtro_estado_cobertura_erp",
                 )
+
+                estados_cobertura = [
+                    etiquetas_estado[estado]
+                    for estado in estados_cobertura_ui
+                ]
 
             vista_resumen = resumen_cobertura_erp.copy()
 
@@ -138,8 +162,9 @@ def render_cobertura(
                 vista_resumen = vista_resumen.loc[
                     vista_resumen["EstadoCobertura"].isin(
                         [
-                            "Sin cobertura",
-                            "Cobertura en tránsito",
+                            "SIN COBERTURA TOTAL",
+                            "SIN COBERTURA PARCIAL",
+                            "COBERTURA EN TRÁNSITO",
                         ]
                     )
                 ].copy()
@@ -374,8 +399,27 @@ def render_cobertura(
                         st.rerun()
 
             st.markdown("#### Resumen por pedido")
+
+            vista_resumen_display = vista_resumen.copy()
+            etiquetas_estado_display = {
+                "SIN COBERTURA TOTAL": "Sin cobertura total",
+                "SIN COBERTURA PARCIAL": "Sin cobertura parcial",
+                "COBERTURA EN TRÁNSITO": "Cobertura en tránsito",
+                "COBERTURA COMPLETA": "Cobertura completa",
+            }
+
+            for columna_estado in [
+                "EstadoCobertura",
+                "CategoriaPedidoPendiente",
+            ]:
+                if columna_estado in vista_resumen_display.columns:
+                    vista_resumen_display[columna_estado] = (
+                        vista_resumen_display[columna_estado]
+                        .replace(etiquetas_estado_display)
+                    )
+
             st.dataframe(
-                vista_resumen,
+                vista_resumen_display,
                 hide_index=True,
                 width="stretch",
                 height=300,

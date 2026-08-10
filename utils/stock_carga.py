@@ -128,6 +128,30 @@ def cargar_fuente_maestra_stock(clave: str) -> dict:
     return _leer_fuente(clave, FUENTES_MAESTRAS_STOCK, usar_cache=True)
 
 
+@st.cache_data(max_entries=10, show_spinner=False)
+def cargar_fuente_maestra_versionada_stock(
+    clave: str,
+    firma_fuente: tuple,
+) -> dict:
+    """
+    Lee un maestro usando la firma física del archivo como parte de la clave
+    de caché.
+
+    Se usa especialmente en Configuración/Slotting para Max & Min y Maestro
+    Ubicaciones. Si alguno de esos archivos se reemplaza manteniendo el mismo
+    nombre, la firma cambia y Streamlit reconstruye únicamente esa fuente.
+
+    La lectura interna se hace sin la caché del lector de Drive para evitar
+    reutilizar bytes antiguos después de detectar una versión nueva.
+    """
+    _ = firma_fuente
+    return _leer_fuente(
+        clave,
+        FUENTES_MAESTRAS_STOCK,
+        usar_cache=False,
+    )
+
+
 def cargar_fuentes_dinamicas_stock() -> dict[str, dict]:
     """Compatibilidad para código anterior; no usar en las vistas nuevas."""
     return {clave: cargar_fuente_dinamica_stock(clave) for clave in FUENTES_DINAMICAS_STOCK}
@@ -495,6 +519,7 @@ def construir_contexto_cobertura(
 def construir_contexto_configuracion(
     firma_base_historica: tuple,
     firma_max_min: tuple,
+    firma_ubicaciones: tuple,
 ) -> dict:
     """
     Carga solamente las fuentes necesarias para Slotting V1.
@@ -503,12 +528,19 @@ def construir_contexto_configuracion(
     """
     _ = firma_base_historica
     _ = firma_max_min
+    _ = firma_ubicaciones
 
     articulos = cargar_fuente_maestra_stock("articulos")
     volumetria = cargar_fuente_maestra_stock("volumetria")
-    max_min = cargar_fuente_maestra_stock("max_min")
+    max_min = cargar_fuente_maestra_versionada_stock(
+        "max_min",
+        firma_max_min,
+    )
     stock_detallado = cargar_fuente_dinamica_stock("stock_detallado")
-    ubicaciones = cargar_fuente_maestra_stock("ubicaciones")
+    ubicaciones = cargar_fuente_maestra_versionada_stock(
+        "ubicaciones",
+        firma_ubicaciones,
+    )
 
     from models.stock.cobertura import (
         cargar_historico_ventas_stock,
@@ -555,10 +587,12 @@ def construir_contexto_stock(vista: str | None = None) -> dict:
             CARPETA_DATOS
         )
         firma_max_min = firma_fuente_stock("max_min")
+        firma_ubicaciones = firma_fuente_stock("ubicaciones")
 
         return construir_contexto_configuracion(
             firma_base,
             firma_max_min,
+            firma_ubicaciones,
         )
     return construir_contexto_existencia()
 
@@ -585,6 +619,7 @@ def limpiar_cache_stock_completa() -> None:
     """
     cargar_fuente_dinamica_stock.clear()
     cargar_fuente_maestra_stock.clear()
+    cargar_fuente_maestra_versionada_stock.clear()
     construir_contexto_existencia.clear()
     construir_contexto_ocupacion.clear()
     construir_contexto_calidad.clear()

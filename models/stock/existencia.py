@@ -315,19 +315,23 @@ def preparar_max_min(df: pd.DataFrame) -> pd.DataFrame:
 
     columna_codigo = _buscar_columna(
         tabla,
-        ["codigo_articulo", "CodigoArticulo", "ArticuloCodigo"],
+        [
+            "codigo_articulo", "CodigoArticulo", "ArticuloCodigo",
+            "Articulo", "Artículo",
+        ],
     )
 
     if columna_codigo:
         tabla[columna_codigo] = normalizar_codigo(tabla[columna_codigo])
 
-    for nombre in [
-        "unidades_disponibles",
-        "stock_minimo",
-        "stock_maximo",
-        "stock_maximo_Preparar",
-    ]:
-        columna = _buscar_columna(tabla, [nombre])
+    alias_numericos = [
+        ["unidades_disponibles", "UnidadesDisponibles", "Unidades en ubicacion", "Unidades en ubicación"],
+        ["stock_minimo", "StockMinimo", "Minimo", "Mínimo", "Unidades Minimas", "Unidades Mínimas"],
+        ["stock_maximo", "StockMaximo", "Maximo", "Máximo", "Unidades Maximas", "Unidades Máximas"],
+        ["stock_maximo_Preparar", "StockMaximoPreparar", "MaximoPreparar"],
+    ]
+    for alias in alias_numericos:
+        columna = _buscar_columna(tabla, alias)
         if columna:
             tabla[columna] = convertir_numero(tabla[columna])
 

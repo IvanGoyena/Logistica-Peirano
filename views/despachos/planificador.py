@@ -39,7 +39,8 @@ def render_planificador_despachos(
         "MIERCOLES": [
             "CAMIONETA MIE 1",
             "CAMIONETA MIE 2",
-            "CAMIONETA MIE 3",
+            "CAMIONETA MIE 3"
+            "CAMIONETA MIE 4",
         ],
         "JUEVES": [
             "CAMIONETA JUE 1",

@@ -165,6 +165,136 @@ COLUMNAS_CANCELACIONES_ENTREGA = [
     "UltimaActualizacion",
 ]
 
+# ==========================================================
+# INVENTARIOS CÍCLICOS
+# ==========================================================
+
+COLUMNAS_INVENTARIO_PLANES = [
+    "InventarioID",
+    "FechaCreacion",
+    "FechaPlanificada",
+    "TipoInventario",
+    "GrupoInventario",
+    "Responsable",
+    "ResponsableNombre",
+    "Estado",
+    "CantidadArticulos",
+    "CantidadUbicaciones",
+    "UsuarioCreacion",
+    "UsuarioCreacionNombre",
+    "Observaciones",
+    "FechaInicio",
+    "FechaFinalizacion",
+]
+
+COLUMNAS_INVENTARIO_ITEMS = [
+    "ItemID",
+    "InventarioID",
+    "ArticuloCodigo",
+    "ArticuloDescripcion",
+    "GrupoInventario",
+    "Familia",
+    "Familia2",
+    "Sectorizacion",
+    "Ubicacion",
+    "Contenedor",
+    "FuenteDetalle",
+    "CantidadSistemaUbicacion",
+    "StockERPInicial",
+    "StockWMSInicial",
+    "DiferenciaInicial",
+    "PrioridadInicial",
+    "ScorePrioridad",
+    "MotivoPrioridad",
+    "EstadoItem",
+    "OrdenConteo",
+    "TipoUbicacion",
+    "AreaUbicacion",
+    "PasilloUbicacion",
+]
+
+COLUMNAS_INVENTARIO_CONTEOS = [
+    "ConteoID",
+    "InventarioID",
+    "ItemID",
+    "ArticuloCodigo",
+    "Ubicacion",
+    "Contenedor",
+    "CantidadContada",
+    "UsuarioConteo",
+    "UsuarioConteoNombre",
+    "FechaConteo",
+    "Observacion",
+    "OrigenConteo",
+    "ImportacionID",
+    "ArchivoOrigen",
+    "FilaArchivo",
+    "CantidadFotoUnidades",
+    "CantidadFotoCajas",
+    "CantidadRelevadaUnidades",
+    "CantidadRelevadaCajas",
+    "DiferenciaArchivo",
+    "FotoPertenece",
+    "ClaveImportacion",
+    "EstadoValidacion",
+]
+
+COLUMNAS_INVENTARIO_RECONTEOS = [
+    "ReconteoID",
+    "InventarioID",
+    "ItemID",
+    "ArticuloCodigo",
+    "Ubicacion",
+    "Contenedor",
+    "CantidadRecontada",
+    "UsuarioReconteo",
+    "UsuarioReconteoNombre",
+    "FechaReconteo",
+    "Observacion",
+]
+
+
+COLUMNAS_INVENTARIO_IMPORTACIONES = [
+    "ImportacionID",
+    "InventarioID",
+    "TipoImportacion",
+    "NombreArchivo",
+    "HashArchivo",
+    "FechaCarga",
+    "UsuarioCarga",
+    "UsuarioCargaNombre",
+    "RegistrosOriginales",
+    "RegistrosValidos",
+    "DuplicadosArchivo",
+    "FueraDelPlan",
+    "Ambiguos",
+    "Errores",
+    "EstadoImportacion",
+]
+
+COLUMNAS_INVENTARIO_ACCIONES = [
+    "AccionID", "InventarioID", "ArticuloCodigo", "ArticuloDescripcion",
+    "Diagnostico", "AccionSugerida", "SistemaObjetivo", "TipoUbicacion",
+    "UbicacionesSugeridas", "DiferenciaERPvsWMS", "DiferenciaFisicavsWMS",
+    "EstadoAccion", "Responsable", "FechaCreacion", "FechaActualizacion",
+    "UsuarioUltimaActualizacion", "CausaRaiz", "Resolucion", "Observaciones",
+]
+
+COLUMNAS_INVENTARIO_HISTORIAL = [
+    "HistorialID",
+    "InventarioID",
+    "ItemID",
+    "ArticuloCodigo",
+    "Accion",
+    "EstadoAnterior",
+    "EstadoNuevo",
+    "Usuario",
+    "UsuarioNombre",
+    "Fecha",
+    "Detalle",
+]
+
+
 ESTRUCTURA_HOJAS = {
 
     "Solicitudes": COLUMNAS_SOLICITUDES,
@@ -184,6 +314,20 @@ ESTRUCTURA_HOJAS = {
     "ConfirmacionesIngresoOC": COLUMNAS_CONFIRMACIONES_INGRESO_OC,
 
     "CoberturaInformados": COLUMNAS_COBERTURA_INFORMADOS,
+
+    "InventarioPlanes": COLUMNAS_INVENTARIO_PLANES,
+
+    "InventarioItems": COLUMNAS_INVENTARIO_ITEMS,
+
+    "InventarioConteos": COLUMNAS_INVENTARIO_CONTEOS,
+
+    "InventarioReconteos": COLUMNAS_INVENTARIO_RECONTEOS,
+
+    "InventarioImportaciones": COLUMNAS_INVENTARIO_IMPORTACIONES,
+
+    "InventarioAcciones": COLUMNAS_INVENTARIO_ACCIONES,
+
+    "InventarioHistorial": COLUMNAS_INVENTARIO_HISTORIAL,
 
 }
 
@@ -296,6 +440,7 @@ def nombre_rango(nombre_hoja: str, rango: str = "") -> str:
 # VALIDACIÓN DE LA PLANILLA
 # ==========================================================
 
+@st.cache_data(ttl=300, show_spinner=False)
 def obtener_nombres_hojas() -> list[str]:
     """
     Devuelve las pestañas existentes en la planilla.
@@ -342,6 +487,7 @@ def crear_hoja(nombre_hoja: str) -> None:
     ).execute()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def leer_encabezados(nombre_hoja: str) -> list[str]:
     """
     Lee la primera fila de una hoja.
@@ -389,6 +535,7 @@ def escribir_encabezados(
             "values": [columnas],
         },
     ).execute()
+    limpiar_cache_google_sheets(metadata=True)
 
 
 def asegurar_hoja(nombre_hoja: str) -> None:
@@ -479,13 +626,42 @@ def inicializar_planilla() -> dict[str, Any]:
 # LECTURA
 # ==========================================================
 
+@st.cache_data(ttl=20, max_entries=40, show_spinner=False)
+def _leer_hoja_cache(
+    nombre_hoja: str,
+    columnas_cache: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Lectura cacheada para reducir requests a Google Sheets."""
+
+    columnas = (
+        list(columnas_cache)
+        if columnas_cache is not None
+        else None
+    )
+    return _leer_hoja_sin_cache(
+        nombre_hoja,
+        columnas,
+    )
+
+
 def leer_hoja(
     nombre_hoja: str,
     columnas: list[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Lee una pestaña completa y devuelve un DataFrame.
-    """
+    """Lee una hoja usando una caché corta y devuelve una copia."""
+
+    resultado = _leer_hoja_cache(
+        nombre_hoja,
+        tuple(columnas) if columnas else None,
+    )
+    return resultado.copy()
+
+
+def _leer_hoja_sin_cache(
+    nombre_hoja: str,
+    columnas: list[str] | None = None,
+) -> pd.DataFrame:
+    """Lectura real de Google Sheets."""
 
     if nombre_hoja not in ESTRUCTURA_HOJAS:
         raise ValueError(
@@ -551,6 +727,19 @@ def leer_hoja(
     ].copy()
 
 
+def limpiar_cache_google_sheets(
+    *,
+    metadata: bool = False,
+) -> None:
+    """Invalida sólo las capas de lectura de Google Sheets."""
+
+    _leer_hoja_cache.clear()
+
+    if metadata:
+        obtener_nombres_hojas.clear()
+        leer_encabezados.clear()
+
+
 # ==========================================================
 # INSERCIÓN
 # ==========================================================
@@ -559,72 +748,64 @@ def agregar_registro(
     nombre_hoja: str,
     registro: dict[str, Any],
 ) -> None:
-    """
-    Agrega una fila respetando los encabezados REALES de la hoja.
-
-    Esto evita corrimientos cuando la estructura configurada en Python
-    y las columnas existentes en Google Sheets no coinciden exactamente.
-    """
+    """Agrega una fila sin volver a leer encabezados."""
 
     if nombre_hoja not in ESTRUCTURA_HOJAS:
         raise ValueError(
             f"Hoja no configurada: {nombre_hoja}"
         )
 
-    servicio = crear_servicio_sheets()
-
-    respuesta_encabezados = (
-        servicio
-        .spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(nombre_hoja, "1:1"),
-        )
-        .execute()
-    )
-
-    filas_encabezado = respuesta_encabezados.get(
-        "values",
-        [],
-    )
-
-    if filas_encabezado and filas_encabezado[0]:
-        columnas = [
-            limpiar_valor(columna)
-            for columna in filas_encabezado[0]
-            if limpiar_valor(columna)
-        ]
-    else:
-        columnas = ESTRUCTURA_HOJAS[nombre_hoja]
-
-    columnas_esperadas = ESTRUCTURA_HOJAS[nombre_hoja]
-    faltantes = [
-        columna
-        for columna in columnas_esperadas
-        if columna not in columnas
-    ]
-
-    if faltantes:
-        raise ValueError(
-            f"La hoja '{nombre_hoja}' no contiene las columnas "
-            f"requeridas: {', '.join(faltantes)}"
-        )
-
+    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
     fila = [
         limpiar_valor(registro.get(columna, ""))
         for columna in columnas
     ]
 
+    servicio = crear_servicio_sheets()
     servicio.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=nombre_rango(nombre_hoja, "A1"),
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
-        body={
-            "values": [fila],
-        },
+        body={"values": [fila]},
     ).execute()
+
+    limpiar_cache_google_sheets()
+
+
+def agregar_registros(
+    nombre_hoja: str,
+    registros: list[dict[str, Any]],
+) -> None:
+    """Agrega múltiples filas en una sola llamada."""
+
+    if not registros:
+        return
+
+    if nombre_hoja not in ESTRUCTURA_HOJAS:
+        raise ValueError(
+            f"Hoja no configurada: {nombre_hoja}"
+        )
+
+    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+    filas = [
+        [
+            limpiar_valor(registro.get(columna, ""))
+            for columna in columnas
+        ]
+        for registro in registros
+    ]
+
+    servicio = crear_servicio_sheets()
+    servicio.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=nombre_rango(nombre_hoja, "A1"),
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": filas},
+    ).execute()
+
+    limpiar_cache_google_sheets()
 
 
 # ==========================================================
@@ -756,6 +937,8 @@ def actualizar_registro(
         },
     ).execute()
 
+    limpiar_cache_google_sheets()
+
 
 def eliminar_registro(
     nombre_hoja: str,
@@ -824,6 +1007,8 @@ def eliminar_registro(
             ]
         },
     ).execute()
+
+    limpiar_cache_google_sheets()
 
 
 # ==========================================================
