@@ -3,7 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from config import CARPETA_DATOS
+from config import (
+    CARPETA_ERP,
+    CARPETA_MAESTROS,
+    CARPETA_WMS,
+)
 from utils.leer_datos import leer_archivo
 from models.metricas.metricas import (
     construir_fuentes_metricas,
@@ -41,34 +45,64 @@ def cargar_base_metricas(
     firma_proceso: tuple,
 ) -> dict:
     _ = firma_historicos, firma_proceso
-    fuentes = construir_fuentes_metricas(CARPETA_DATOS)
+
+    # Históricos operativos de Control y Preparación.
+    fuentes = construir_fuentes_metricas(
+        CARPETA_WMS
+    )
+
     etl = ejecutar_etl_metricas(
         df_control=fuentes["control"],
         df_preparacion=fuentes["preparacion"],
     )
-    historico_proceso = cargar_historico_proceso(CARPETA_DATOS)
-    tareas_con_pedido, detalle_con_pedido, diagnostico_pedidos = (
-        enriquecer_metricas_con_pedido(
-            etl["tareas"],
-            etl["detalle"],
-            historico_proceso["detalle"],
-        )
+
+    # Filtrar Preparación [mes/año] también vive en Data_WMS.
+    historico_proceso = cargar_historico_proceso(
+        CARPETA_WMS
     )
+
+    (
+        tareas_con_pedido,
+        detalle_con_pedido,
+        diagnostico_pedidos,
+    ) = enriquecer_metricas_con_pedido(
+        etl["tareas"],
+        etl["detalle"],
+        historico_proceso["detalle"],
+    )
+
     etl["tareas"] = tareas_con_pedido
     etl["detalle"] = detalle_con_pedido
-    df_articulos = leer_archivo(CARPETA_DATOS, "Maestro Articulo", cache=True)
-    df_volumetria = leer_archivo(CARPETA_DATOS, "Maestro Volumetria", cache=True)
-    tabla_volumetria = construir_tabla_volumetria(df_volumetria)
+
+    # Maestros.
+    df_articulos = leer_archivo(
+        CARPETA_MAESTROS,
+        "Maestro Articulo",
+        cache=True,
+    )
+
+    df_volumetria = leer_archivo(
+        CARPETA_MAESTROS,
+        "Maestro Volumetria",
+        cache=True,
+    )
+
+    tabla_volumetria = construir_tabla_volumetria(
+        df_volumetria
+    )
+
     enriquecimiento = ejecutar_enriquecimiento_metricas(
         df_tareas=etl["tareas"],
         df_detalle=etl["detalle"],
         df_articulos=df_articulos,
         tabla_volumetria=tabla_volumetria,
     )
+
     tareas, detalle = preparar_base_analitica(
         enriquecimiento["tareas_enriquecidas"],
         enriquecimiento["detalle_enriquecido"],
     )
+
     return {
         "fuentes": fuentes,
         "etl": etl,
@@ -95,54 +129,70 @@ def cargar_ciclo_pedidos(
     detalle_proceso: pd.DataFrame,
     momento_evaluacion: str,
 ) -> dict:
-    _ = firma_historicos, firma_proceso, firma_clientes, momento_evaluacion
+    _ = (
+        firma_historicos,
+        firma_proceso,
+        firma_clientes,
+        momento_evaluacion,
+    )
+
     try:
-        pedidos = leer_archivo(CARPETA_DATOS, "Pedidos DIGIP", cache=False)
+        pedidos = leer_archivo(
+            CARPETA_WMS,
+            "Pedidos DIGIP",
+            cache=False,
+        )
     except Exception:
         pedidos = pd.DataFrame()
+
     try:
-        hojas = leer_archivo(CARPETA_DATOS, "Hojas de Ruta", cache=False)
+        hojas = leer_archivo(
+            CARPETA_ERP,
+            "Hojas de Ruta",
+            cache=False,
+        )
     except Exception:
         hojas = pd.DataFrame()
+
     try:
-        clientes = leer_archivo(CARPETA_DATOS, "Maestro Clientes", cache=True)
+        clientes = leer_archivo(
+            CARPETA_MAESTROS,
+            "Maestro Clientes",
+            cache=True,
+        )
     except Exception:
         clientes = pd.DataFrame()
+
     try:
         base_fillrate, diagnostico_fillrate = construir_base_fillrate(
             df_pedidos=pedidos,
             df_proceso_pedidos=detalle_proceso,
             df_clientes=clientes,
         )
+
         ciclo, diagnostico = construir_ciclo_vida_pedidos(
             df_pedidos=pedidos,
             df_tareas=tareas,
             df_hojas_ruta=hojas,
             df_proceso_pedidos=detalle_proceso,
         )
-        # Primer cruce con el maestro para obtener una clave de cliente sólida.
+
         ciclo, diagnostico_planificacion = enriquecer_ciclo_con_planificacion(
             ciclo,
             clientes,
         )
 
-        # Cuenta 0008 no genera HR propia. Hereda de un pedido cerrado de
-        # cuenta 0001 del mismo cliente dentro de la ventana operativa.
         ciclo, diagnostico_vinculacion = asignar_hr_pedidos_cuenta_2(
             ciclo,
             ventana_maxima_horas=72,
             ventana_cliente_dias=7,
         )
 
-        # Se vuelve a enriquecer porque la HR heredada puede aportar código de
-        # entrega, zona y datos útiles para resolver el maestro del pedido 0008.
         ciclo, diagnostico_planificacion_final = enriquecer_ciclo_con_planificacion(
             ciclo,
             clientes,
         )
-        # El universo de servicio se depura antes de los KPI: pedidos internos,
-        # anulados operativos y pedidos todavía dentro de las 48 h de maduración
-        # no deben contaminar el análisis de cumplimiento.
+
         ciclo_activo, ciclo_excluido, diagnostico_universo = (
             construir_universo_servicio(
                 ciclo,
@@ -170,12 +220,17 @@ def cargar_ciclo_pedidos(
                 for clave, valor in diagnostico_universo.items()
             },
         }
+
         ciclo = ciclo_activo
         error = None
+
     except Exception as exc:
-        ciclo, ciclo_excluido, base_fillrate, diagnostico, error = (
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}, exc
-        )
+        ciclo = pd.DataFrame()
+        ciclo_excluido = pd.DataFrame()
+        base_fillrate = pd.DataFrame()
+        diagnostico = {}
+        error = exc
+
     return {
         "df_ciclo_pedidos": ciclo,
         "df_fillrate_pedidos": base_fillrate,
@@ -186,19 +241,38 @@ def cargar_ciclo_pedidos(
 
 
 def construir_contexto_base_metricas() -> dict:
-    firma = firma_fuentes_metricas(CARPETA_DATOS)
-    firma_proceso = firma_archivos_proceso(CARPETA_DATOS)
-    firma_clientes = firma_maestro_clientes(CARPETA_DATOS)
-    datos = cargar_base_metricas(firma, firma_proceso)
+    # Cada firma apunta ahora a su origen real.
+    firma = firma_fuentes_metricas(
+        CARPETA_WMS
+    )
+
+    firma_proceso = firma_archivos_proceso(
+        CARPETA_WMS
+    )
+
+    firma_clientes = firma_maestro_clientes(
+        CARPETA_MAESTROS
+    )
+
+    datos = cargar_base_metricas(
+        firma,
+        firma_proceso,
+    )
+
     try:
         estado_publicacion = publicar_base_historica_metricas(
             tareas=datos["df_tareas"],
             detalle=datos["df_detalle"],
             firma_historicos=firma,
+            carpeta_datos=CARPETA_WMS,
+            publicar_github=True,
         )
         error_publicacion = None
+
     except Exception as exc:
-        estado_publicacion, error_publicacion = {}, exc
+        estado_publicacion = {}
+        error_publicacion = exc
+
     return {
         **datos,
         "firma_historicos": firma,
@@ -206,13 +280,21 @@ def construir_contexto_base_metricas() -> dict:
         "firma_maestro_clientes": firma_clientes,
         "estado_publicacion": estado_publicacion,
         "error_publicacion": error_publicacion,
-        "df_calidad_enriquecimiento": datos["enriquecimiento"]["calidad_enriquecimiento"],
+        "df_calidad_enriquecimiento": datos[
+            "enriquecimiento"
+        ]["calidad_enriquecimiento"],
     }
 
 
-def completar_contexto_vista(vista: str, contexto: dict) -> dict:
+def completar_contexto_vista(
+    vista: str,
+    contexto: dict,
+) -> dict:
     """Completa solamente los datos pesados requeridos por la vista activa."""
-    nombre_vista = str(vista or "").strip().upper()
+
+    nombre_vista = str(
+        vista or ""
+    ).strip().upper()
 
     es_vista_cumplimiento = (
         "CUMPLIMIENTO" in nombre_vista
@@ -228,7 +310,10 @@ def completar_contexto_vista(vista: str, contexto: dict) -> dict:
                 contexto["firma_proceso_pedidos"],
                 contexto["firma_maestro_clientes"],
                 contexto["df_tareas"],
-                contexto.get("historico_proceso", {}).get(
+                contexto.get(
+                    "historico_proceso",
+                    {},
+                ).get(
                     "detalle",
                     pd.DataFrame(),
                 ),

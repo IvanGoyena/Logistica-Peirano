@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 
 from config import (
-    CARPETA_DATOS,
     CARPETA_ERP,
     CARPETA_MAESTROS,
     CARPETA_WMS,
@@ -1317,12 +1316,9 @@ def construir_contexto_stock(
         or "situación" in texto
         or "situacion" in texto
     ):
-        # TEMPORAL:
-        # la base histórica de Métricas todavía no fue
-        # migrada a la nueva arquitectura.
         firma_base = (
             firma_base_historica_metricas(
-                CARPETA_DATOS
+                CARPETA_WMS
             )
         )
 
@@ -1334,12 +1330,9 @@ def construir_contexto_stock(
         "configuración" in texto
         or "configuracion" in texto
     ):
-        # TEMPORAL:
-        # la base histórica de Métricas todavía no fue
-        # migrada a la nueva arquitectura.
         firma_base = (
             firma_base_historica_metricas(
-                CARPETA_DATOS
+                CARPETA_WMS
             )
         )
 
