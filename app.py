@@ -4,7 +4,8 @@ from utils.cache_app import (
     limpiar_cache_aplicacion,
 )
 from utils.estado_actualizacion import (
-    preparar_indicador_sidebar,
+    obtener_ultima_actualizacion,
+    registrar_actualizacion_manual,
 )
 
 from utils.autenticacion import (
@@ -48,6 +49,30 @@ mostrar_usuario_sidebar(autenticador)
 # ACTUALIZACIÓN GLOBAL DE DATOS
 # ==========================================================
 
+@st.fragment(run_every="5s")
+def mostrar_ultima_actualizacion() -> None:
+    """
+    Refresca solamente el indicador del sidebar.
+
+    La hora se registra fuera de la UI cuando cualquier fuente
+    detecta una versión nueva.
+    """
+    ultima_actualizacion = (
+        obtener_ultima_actualizacion()
+    )
+
+    if ultima_actualizacion is None:
+        st.caption(
+            "🕒 Última actualización: --"
+        )
+        return
+
+    st.caption(
+        "🕒 Última actualización: "
+        f"{ultima_actualizacion.strftime('%d/%m/%Y %H:%M:%S')}"
+    )
+
+
 with st.sidebar:
     st.divider()
 
@@ -60,16 +85,21 @@ with st.sidebar:
             "y vuelve a leer las fuentes disponibles en el repositorio."
         ),
     ):
-        with st.spinner("Actualizando fuentes..."):
+        with st.spinner(
+            "Actualizando fuentes..."
+        ):
             limpiar_cache_aplicacion()
+
+        registrar_actualizacion_manual()
 
         st.toast(
             "Fuentes actualizadas correctamente.",
             icon="✅",
         )
+
         st.rerun()
 
-    preparar_indicador_sidebar()
+    mostrar_ultima_actualizacion()
 
 
 # ==========================================================

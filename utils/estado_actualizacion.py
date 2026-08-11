@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from threading import Lock
 from zoneinfo import ZoneInfo
 
-import streamlit as st
 
-
-CLAVE_ULTIMA_ACTUALIZACION = "ultima_actualizacion_datos"
-CLAVE_VERSIONES_FUENTES = "_versiones_fuentes_datos"
-CLAVE_PLACEHOLDER = "_placeholder_ultima_actualizacion"
+_LOCK = Lock()
+_ULTIMA_ACTUALIZACION: datetime | None = None
+_VERSIONES_FUENTES: dict[str, str] = {}
 
 
 def _ahora_buenos_aires() -> datetime:
@@ -17,51 +16,19 @@ def _ahora_buenos_aires() -> datetime:
     )
 
 
-def _texto_ultima_actualizacion() -> str:
-    fecha = st.session_state.get(
-        CLAVE_ULTIMA_ACTUALIZACION
-    )
-
-    if fecha is None:
-        return "🕒 Última actualización: --"
-
-    return (
-        "🕒 Última actualización: "
-        f"{fecha.strftime('%d/%m/%Y %H:%M:%S')}"
-    )
-
-
-def preparar_indicador_sidebar() -> None:
-    """
-    Crea el indicador en el sidebar.
-
-    El placeholder permite que una lectura realizada más tarde,
-    dentro de cualquier módulo, actualice el texto en la misma
-    ejecución de Streamlit.
-    """
-    placeholder = st.empty()
-
-    st.session_state[
-        CLAVE_PLACEHOLDER
-    ] = placeholder
-
-    placeholder.caption(
-        _texto_ultima_actualizacion()
-    )
-
-
 def registrar_version_fuente(
     fuente: str,
     version: object,
 ) -> bool:
     """
-    Registra una nueva versión física/remota de una fuente.
+    Registra la versión observada de una fuente SIN ejecutar comandos
+    de Streamlit ni tocar st.session_state.
 
-    La hora general solo cambia cuando la versión detectada es
-    distinta de la última versión conocida para esa fuente.
-
-    Devuelve True si se detectó una actualización real.
+    Esto es seguro aunque la lectura ocurra dentro de una función
+    decorada con @st.cache_data.
     """
+    global _ULTIMA_ACTUALIZACION
+
     clave_fuente = str(
         fuente or ""
     ).strip()
@@ -73,49 +40,40 @@ def registrar_version_fuente(
         version if version is not None else ""
     )
 
-    versiones = st.session_state.setdefault(
-        CLAVE_VERSIONES_FUENTES,
-        {},
-    )
+    with _LOCK:
+        version_anterior = _VERSIONES_FUENTES.get(
+            clave_fuente
+        )
 
-    version_anterior = versiones.get(
-        clave_fuente
-    )
+        _VERSIONES_FUENTES[
+            clave_fuente
+        ] = version_texto
 
-    versiones[
-        clave_fuente
-    ] = version_texto
+        cambio = (
+            version_anterior is None
+            or version_anterior != version_texto
+        )
 
-    # La primera lectura válida se considera el estado inicial
-    # de datos de la sesión y también deja una referencia visible.
-    cambio = (
-        version_anterior is None
-        or version_anterior != version_texto
-    )
-
-    if not cambio:
-        return False
-
-    st.session_state[
-        CLAVE_ULTIMA_ACTUALIZACION
-    ] = _ahora_buenos_aires()
-
-    placeholder = st.session_state.get(
-        CLAVE_PLACEHOLDER
-    )
-
-    if placeholder is not None:
-        try:
-            placeholder.caption(
-                _texto_ultima_actualizacion()
+        if cambio:
+            _ULTIMA_ACTUALIZACION = (
+                _ahora_buenos_aires()
             )
-        except Exception:
-            pass
 
-    return True
+        return cambio
 
 
-def obtener_ultima_actualizacion():
-    return st.session_state.get(
-        CLAVE_ULTIMA_ACTUALIZACION
-    )
+def registrar_actualizacion_manual() -> None:
+    """
+    Registra una actualización general solicitada manualmente.
+    """
+    global _ULTIMA_ACTUALIZACION
+
+    with _LOCK:
+        _ULTIMA_ACTUALIZACION = (
+            _ahora_buenos_aires()
+        )
+
+
+def obtener_ultima_actualizacion() -> datetime | None:
+    with _LOCK:
+        return _ULTIMA_ACTUALIZACION
