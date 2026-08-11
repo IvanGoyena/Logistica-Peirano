@@ -3,7 +3,6 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from config import CARPETA_DATOS
 from utils.confirmaciones_oc import guardar_confirmaciones_oc, eliminar_confirmaciones_oc
 from utils.stock.helpers import dataframe_a_csv, formato_entero, aplicar_busqueda, dataframe_para_streamlit
 
@@ -1532,7 +1531,7 @@ def render(contexto: dict) -> None:
         with st.expander("📅 Confirmar fecha exacta de ingreso", expanded=False):
             st.caption(
                 "La confirmación se aplica a toda la OC y se guarda en "
-                "Confirmaciones_Ingreso_OC.csv, sin modificar el reporte de COMEX."
+                "Google Sheets, sin modificar el reporte de COMEX."
             )
             c1, c2 = st.columns([1.6, 1], vertical_alignment="bottom")
             with c1:
@@ -1576,7 +1575,7 @@ def render(contexto: dict) -> None:
             if guardar_fecha:
                 try:
                     resumen_guardado = guardar_confirmaciones_oc(
-                        CARPETA_DATOS,
+                        "",
                         oc_confirmar,
                         fecha_confirmacion,
                         usuario_confirmacion,
@@ -1593,7 +1592,7 @@ def render(contexto: dict) -> None:
             if quitar_fecha:
                 try:
                     resumen_eliminado = eliminar_confirmaciones_oc(
-                        CARPETA_DATOS,
+                        "",
                         oc_confirmar,
                     )
                     st.success(

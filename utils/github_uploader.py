@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -176,54 +177,78 @@ def subir_archivo_github(
     archivo_local: str | Path,
     ruta_github: str,
     mensaje_commit: str | None = None,
+    max_reintentos: int = 4,
 ) -> dict:
     """
     Crea o reemplaza un archivo del repositorio en GitHub.
-    """
 
-    ruta_local = validar_archivo_local(
-        archivo_local
-    )
+    Ante un conflicto 409 por cambio de SHA remoto, vuelve a consultar
+    el SHA actual y reintenta automáticamente.
+    """
+    ruta_local = validar_archivo_local(archivo_local)
 
     contenido_base64 = base64.b64encode(
         ruta_local.read_bytes()
     ).decode("ascii")
 
-    sha_actual = obtener_sha_remoto(
-        ruta_github
-    )
-
     if mensaje_commit is None:
-        mensaje_commit = (
-            f"Actualizar {ruta_github}"
-        )
+        mensaje_commit = f"Actualizar {ruta_github}"
 
-    payload = {
-        "message": mensaje_commit,
-        "content": contenido_base64,
-        "branch": GITHUB_BRANCH,
-    }
+    ultimo_error = None
 
-    if sha_actual:
-        payload["sha"] = sha_actual
+    for intento in range(1, max_reintentos + 1):
+        # IMPORTANTE: el SHA se obtiene nuevamente en CADA intento.
+        sha_actual = obtener_sha_remoto(ruta_github)
 
-    status, respuesta = _hacer_request(
-        _url_contenido(ruta_github),
-        method="PUT",
-        payload=payload,
+        payload = {
+            "message": mensaje_commit,
+            "content": contenido_base64,
+            "branch": GITHUB_BRANCH,
+        }
+
+        if sha_actual:
+            payload["sha"] = sha_actual
+
+        try:
+            status, respuesta = _hacer_request(
+                _url_contenido(ruta_github),
+                method="PUT",
+                payload=payload,
+            )
+
+            commit = respuesta.get("commit", {})
+
+            return {
+                "ok": status in (200, 201),
+                "status": status,
+                "archivo_local": str(ruta_local),
+                "ruta_github": ruta_github,
+                "sha_anterior": sha_actual,
+                "commit_sha": commit.get("sha", ""),
+                "commit_url": commit.get("html_url", ""),
+                "intentos": intento,
+            }
+
+        except GitHubUploaderError as error:
+            ultimo_error = error
+
+            if (
+                "GitHub API 409:" in str(error)
+                and intento < max_reintentos
+            ):
+                espera = 0.75 * intento
+                print(
+                    f"Conflicto GitHub 409 en {ruta_github}. "
+                    f"Se actualizará el SHA y se reintentará "
+                    f"({intento}/{max_reintentos - 1})..."
+                )
+                time.sleep(espera)
+                continue
+
+            raise
+
+    raise GitHubUploaderError(
+        f"No se pudo publicar {ruta_github} después de "
+        f"{max_reintentos} intentos: {ultimo_error}"
     )
 
-    commit = respuesta.get(
-        "commit",
-        {},
-    )
-
-    return {
-        "ok": status in (200, 201),
-        "status": status,
-        "archivo_local": str(ruta_local),
-        "ruta_github": ruta_github,
-        "sha_anterior": sha_actual,
-        "commit_sha": commit.get("sha", ""),
-        "commit_url": commit.get("html_url", ""),
-    }

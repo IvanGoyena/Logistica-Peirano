@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from config import (
-    CARPETA_DATOS,
+    CARPETA_MAESTROS,
     ES_STREAMLIT_CLOUD,
 )
 from models.maestros.resumen import (
@@ -321,7 +321,7 @@ def render_clientes() -> None:
             try:
                 resumen = actualizar_maestro_clientes(
                     registros_seleccionados=registros,
-                    carpeta_datos=CARPETA_DATOS,
+                    carpeta_datos=CARPETA_MAESTROS,
                     nombre_base="Maestro Clientes",
                 )
 

@@ -205,13 +205,6 @@ pagina_metricas = st.Page(
     icon="📈",
 )
 
-pagina_auditoria = st.Page(
-    "pages/07_Auditoria_ETL.py",
-    title="Auditoría ETL",
-    icon="🧪",
-)
-
-
 pagina_consultas = st.Page(
     "pages/08_Consultas.py",
     title="Consultas Comerciales",
@@ -268,7 +261,6 @@ if tiene_rol("admin"):
 
     paginas["Configuración"] = [
         pagina_maestros,
-        pagina_auditoria,
     ]
 
 

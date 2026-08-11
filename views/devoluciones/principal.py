@@ -1,4 +1,4 @@
-﻿# pages/09_Devoluciones.py
+# pages/09_Devoluciones.py
 from __future__ import annotations
 
 from datetime import timedelta
@@ -176,7 +176,7 @@ def render() -> None:
 
     def construir_mensaje(registro: dict) -> str:
         remitos = "\n".join(
-            f"â€¢ {valor.strip()}"
+            f"• {valor.strip()}"
             for valor in str(registro.get("Remito", ""))
             .replace(",", "\n")
             .splitlines()
@@ -184,12 +184,12 @@ def render() -> None:
         )
 
         return (
-            "ðŸš¨ CANCELACIÃ“N DE ENTREGA ðŸš¨\n\n"
+            "🚨 CANCELACIÓN DE ENTREGA 🚨\n\n"
             f"Remitos:\n{remitos}\n\n"
             f"Cliente: {registro.get('Cliente', '')}\n"
             f"Motivo: {registro.get('Motivo', '')}\n"
-            f"ObservaciÃ³n: {registro.get('Observacion', '')}\n\n"
-            "â›” NO CARGAR NI DESPACHAR ESTA MERCADERÃA.\n\n"
+            f"Observación: {registro.get('Observacion', '')}\n\n"
+            "⛔ NO CARGAR NI DESPACHAR ESTA MERCADERÍA.\n\n"
             f"ID: {registro.get('CancelacionEntregaID', '')}"
         )
 
@@ -198,9 +198,9 @@ def render() -> None:
         return f"https://wa.me/{telefono}?text={quote(construir_mensaje(registro))}"
 
 
-    st.title("â†©ï¸ Devoluciones")
+    st.title("↩️ Devoluciones")
     st.caption(
-        "GestiÃ³n operativa, seguimiento e indicadores de cancelaciones de entrega."
+        "Gestión operativa, seguimiento e indicadores de cancelaciones de entrega."
     )
 
     try:
@@ -212,18 +212,18 @@ def render() -> None:
         mensaje = str(error)
         if "429" in mensaje or "Quota exceeded" in mensaje:
             st.error(
-                "Google Sheets alcanzÃ³ temporalmente el lÃ­mite de lecturas por "
-                "minuto. EsperÃ¡ unos segundos y volvÃ© a intentar."
+                "Google Sheets alcanzó temporalmente el límite de lecturas por "
+                "minuto. Esperá unos segundos y volvé a intentar."
             )
-            if st.button("ðŸ”„ Reintentar lectura", width="stretch"):
+            if st.button("🔄 Reintentar lectura", width="stretch"):
                 invalidar_cache_devoluciones()
                 st.rerun()
         else:
-            st.error(f"No se pudo leer la gestiÃ³n: {error}")
+            st.error(f"No se pudo leer la gestión: {error}")
         st.stop()
 
     pestana_dashboard, pestana_activa, pestana_historico = st.tabs(
-        ["ðŸ“Š Dashboard", "ðŸ› ï¸ GestiÃ³n activa", "ðŸ“š HistÃ³rico"]
+        ["📊 Dashboard", "🛠️ Gestión activa", "📚 Histórico"]
     )
 
     with pestana_dashboard:
@@ -231,18 +231,18 @@ def render() -> None:
 
         fechas_validas = datos["FechaSolicitud"].dropna()
         if fechas_validas.empty:
-            st.info("No hay fechas vÃ¡lidas para construir el dashboard.")
+            st.info("No hay fechas válidas para construir el dashboard.")
         else:
             fecha_maxima = fechas_validas.max().date()
             fecha_minima = fechas_validas.min().date()
             fecha_inicial = max(fecha_minima, fecha_maxima - timedelta(days=59))
 
             with st.container(border=True):
-                st.markdown("##### ðŸ”Ž Filtros del dashboard")
+                st.markdown("##### 🔎 Filtros del dashboard")
                 f1, f2, f3, f4 = st.columns([1.2, 1, 1, 1])
             with f1:
                 rango = st.date_input(
-                    "PerÃ­odo",
+                    "Período",
                     value=(fecha_inicial, fecha_maxima),
                     min_value=fecha_minima,
                     max_value=fecha_maxima,
@@ -292,7 +292,7 @@ def render() -> None:
 
             tarjetas_devoluciones = [
                 (
-                    "â†©ï¸ Gestiones del perÃ­odo",
+                    "↩️ Gestiones del período",
                     f"{metricas.periodo:,}".replace(",", "."),
                     (
                         f"{fecha_desde.strftime('%d/%m/%Y')} al "
@@ -300,27 +300,27 @@ def render() -> None:
                     ),
                 ),
                 (
-                    "â³ Pendientes",
+                    "⏳ Pendientes",
                     f"{metricas.pendientes:,}".replace(",", "."),
                     "Requieren continuidad operativa",
                 ),
                 (
-                    "âœ… Finalizadas",
+                    "✅ Finalizadas",
                     f"{metricas.finalizadas:,}".replace(",", "."),
-                    "Gestiones cerradas en el perÃ­odo",
+                    "Gestiones cerradas en el período",
                 ),
                 (
-                    "ðŸ›‘ Entregas detenidas",
+                    "🛑 Entregas detenidas",
                     f"{metricas.porcentaje_detenidas:.1f}%",
-                    "MercaderÃ­a interceptada a tiempo",
+                    "Mercadería interceptada a tiempo",
                 ),
                 (
-                    "ðŸšš Ya despachadas",
+                    "🚚 Ya despachadas",
                     f"{metricas.porcentaje_despachadas:.1f}%",
                     "No pudieron detenerse antes de la salida",
                 ),
                 (
-                    "â±ï¸ Promedio de cierre",
+                    "⏱️ Promedio de cierre",
                     f"{metricas.tiempo_promedio_cierre_horas:.1f} h",
                     f"Promedio hasta IR: {metricas.tiempo_promedio_ir_horas:.1f} h",
                 ),
@@ -343,15 +343,15 @@ def render() -> None:
             )
 
             st.caption(
-                f"PerÃ­odo analizado: {fecha_desde.strftime('%d/%m/%Y')} al "
-                f"{fecha_hasta.strftime('%d/%m/%Y')} Â· "
+                f"Período analizado: {fecha_desde.strftime('%d/%m/%Y')} al "
+                f"{fecha_hasta.strftime('%d/%m/%Y')} · "
                 f"Promedio hasta generar IR: {metricas.tiempo_promedio_ir_horas:.1f} h"
             )
 
             st.divider()
             col_evolucion, col_motivos = st.columns([1.7, 1])
             with col_evolucion:
-                st.markdown("#### EvoluciÃ³n diaria")
+                st.markdown("#### Evolución diaria")
                 grafico_evolucion(resumen_evolucion_diaria(filtrados))
             with col_motivos:
                 st.markdown("#### Motivos")
@@ -370,7 +370,7 @@ def render() -> None:
 
             col_clientes, col_responsables = st.columns(2)
             with col_clientes:
-                st.markdown("#### Clientes con mÃ¡s gestiones")
+                st.markdown("#### Clientes con más gestiones")
                 grafico_barras(
                     top_clientes(filtrados),
                     "Cliente",
@@ -378,7 +378,7 @@ def render() -> None:
                     altura=340,
                 )
             with col_responsables:
-                st.markdown("#### GestiÃ³n por responsable")
+                st.markdown("#### Gestión por responsable")
                 grafico_responsables(ranking_responsables(filtrados))
 
             col_tiempos, col_rangos = st.columns(2)
@@ -386,7 +386,7 @@ def render() -> None:
                 st.markdown("#### Tiempo promedio por etapa")
                 grafico_tiempos_etapa(tiempos_por_etapa(filtrados))
             with col_rangos:
-                st.markdown("#### DistribuciÃ³n del tiempo total")
+                st.markdown("#### Distribución del tiempo total")
                 grafico_barras(
                     distribucion_tiempos(filtrados),
                     "Rango",
@@ -395,7 +395,7 @@ def render() -> None:
 
             col_dias, col_horas = st.columns(2)
             with col_dias:
-                st.markdown("#### Gestiones por dÃ­a de la semana")
+                st.markdown("#### Gestiones por día de la semana")
                 grafico_barras(
                     solicitudes_por_dia_semana(filtrados),
                     "DiaSemana",
@@ -407,7 +407,7 @@ def render() -> None:
                     "HoraSolicitud",
                 )
 
-            st.markdown("#### Ãšltimas gestiones del perÃ­odo")
+            st.markdown("#### Últimas gestiones del período")
             columnas_resumen = [
                 "CancelacionEntregaID",
                 "Remito",
@@ -431,7 +431,7 @@ def render() -> None:
                 column_config={
                     "CancelacionEntregaID": None,
                     "HorasResolucion": st.column_config.NumberColumn(
-                        "Horas de resoluciÃ³n", format="%.2f h"
+                        "Horas de resolución", format="%.2f h"
                     ),
                     "FechaSolicitud": st.column_config.DatetimeColumn(
                         "Fecha solicitud", format="DD/MM/YYYY HH:mm"
@@ -444,7 +444,7 @@ def render() -> None:
 
     with pestana_historico:
         if historial.empty:
-            st.info("TodavÃ­a no hay registros.")
+            st.info("Todavía no hay registros.")
         else:
             columnas = [
                 "CancelacionEntregaID",
@@ -498,10 +498,10 @@ def render() -> None:
                     estado = str(registro["EstadoCancelacion"]).strip()
 
                     if estado == "Alerta enviada":
-                        estado = "Enviada a LogÃ­stica"
+                        estado = "Enviada a Logística"
 
                     st.divider()
-                    st.subheader("Paso a paso de la gestiÃ³n")
+                    st.subheader("Paso a paso de la gestión")
 
                     d1, d2, d3 = st.columns(3)
                     d1.metric("Estado", estado)
@@ -515,15 +515,15 @@ def render() -> None:
                     )
 
                     st.write(
-                        f"**Remitos:** {registro.get('Remito', '')}  Â·  "
-                        f"**Cliente:** {registro.get('Cliente', '')}  Â·  "
+                        f"**Remitos:** {registro.get('Remito', '')}  ·  "
+                        f"**Cliente:** {registro.get('Cliente', '')}  ·  "
                         f"**Motivo:** {registro.get('Motivo', '')}"
                     )
 
                     w1, w2 = st.columns(2)
                     with w1:
                         st.link_button(
-                            "ðŸ“² Enviar a Leo",
+                            "📲 Enviar a Leo",
                             construir_url_whatsapp(
                                 registro.to_dict(),
                                 DESTINATARIOS_WHATSAPP["Leo"],
@@ -533,7 +533,7 @@ def render() -> None:
                         )
                     with w2:
                         st.link_button(
-                            "ðŸ“² Enviar a Juanma",
+                            "📲 Enviar a Juanma",
                             construir_url_whatsapp(
                                 registro.to_dict(),
                                 DESTINATARIOS_WHATSAPP["Juanma"],
@@ -544,25 +544,25 @@ def render() -> None:
 
                     usuario = usuario_actual()
 
-                    if estado in {"Enviada a LogÃ­stica", "Pendiente de envÃ­o"}:
+                    if estado in {"Enviada a Logística", "Pendiente de envío"}:
                         with st.form(f"tomar_{cancelacion_id}"):
                             responsable = st.text_input(
-                                "Responsable logÃ­stico",
+                                "Responsable logístico",
                                 value=usuario,
                             )
                             guardar = st.form_submit_button(
-                                "ðŸŸ  Tomar gestiÃ³n",
+                                "🟠 Tomar gestión",
                                 type="primary",
                                 width="stretch",
                             )
 
                         if guardar:
                             tomar_gestion(cancelacion_id, responsable)
-                            st.success("GestiÃ³n tomada.")
+                            st.success("Gestión tomada.")
                             invalidar_cache_devoluciones()
                             st.rerun()
 
-                    elif estado in {"En gestiÃ³n", "Ya despachado"}:
+                    elif estado in {"En gestión", "Ya despachado"}:
                         with st.form(f"resultado_{cancelacion_id}"):
                             resultado = st.radio(
                                 "Resultado operativo",
@@ -573,7 +573,7 @@ def render() -> None:
                                 "Responsable que confirma",
                                 value=usuario,
                             )
-                            observacion = st.text_area("ObservaciÃ³n")
+                            observacion = st.text_area("Observación")
                             guardar = st.form_submit_button(
                                 "Guardar resultado",
                                 type="primary",
@@ -593,14 +593,14 @@ def render() -> None:
 
                     elif estado == "Entrega detenida":
                         with st.form(f"ir_{cancelacion_id}"):
-                            numero_ir = st.text_input("NÃºmero de IR *")
+                            numero_ir = st.text_input("Número de IR *")
                             responsable = st.text_input(
                                 "Responsable del IR",
                                 value=usuario,
                             )
-                            observacion = st.text_area("ObservaciÃ³n del IR")
+                            observacion = st.text_area("Observación del IR")
                             guardar = st.form_submit_button(
-                                "ðŸ“„ Registrar IR",
+                                "📄 Registrar IR",
                                 type="primary",
                                 width="stretch",
                             )
@@ -625,9 +625,9 @@ def render() -> None:
                                 "Responsable del reingreso",
                                 value=usuario,
                             )
-                            observacion = st.text_area("ObservaciÃ³n del reingreso")
+                            observacion = st.text_area("Observación del reingreso")
                             guardar = st.form_submit_button(
-                                "ðŸ“¦ Confirmar reingreso",
+                                "📦 Confirmar reingreso",
                                 type="primary",
                                 width="stretch",
                             )
@@ -642,15 +642,15 @@ def render() -> None:
                             invalidar_cache_devoluciones()
                             st.rerun()
 
-                    elif estado == "MercaderÃ­a reingresada":
+                    elif estado == "Mercadería reingresada":
                         with st.form(f"cierre_{cancelacion_id}"):
                             responsable = st.text_input(
                                 "Responsable del cierre",
                                 value=usuario,
                             )
-                            observacion = st.text_area("ObservaciÃ³n final")
+                            observacion = st.text_area("Observación final")
                             guardar = st.form_submit_button(
-                                "âœ… Finalizar gestiÃ³n",
+                                "✅ Finalizar gestión",
                                 type="primary",
                                 width="stretch",
                             )
@@ -661,7 +661,7 @@ def render() -> None:
                                 responsable,
                                 observacion,
                             )
-                            st.success("GestiÃ³n finalizada.")
+                            st.success("Gestión finalizada.")
                             invalidar_cache_devoluciones()
                             st.rerun()
 

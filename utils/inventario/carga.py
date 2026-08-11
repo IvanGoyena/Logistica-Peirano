@@ -208,9 +208,6 @@ def cargar_fuentes_inventario() -> tuple[
     - Data_ERP
     - Data_WMS
     - Data_Maestros
-
-    Inventario deja de depender de CARPETA_DATOS / Google Drive
-    para sus reportes operativos y maestros.
     """
 
     datos: dict[str, pd.DataFrame] = {}

@@ -18,10 +18,6 @@ from models.metricas.metricas import (
 def cargar_historicos_maestros() -> dict[str, pd.DataFrame]:
     """
     Carga los históricos crudos de Control y Preparación desde Data_WMS.
-
-    Reutiliza exactamente los mismos lectores que usa el módulo Métricas,
-    evitando duplicar lógica y eliminando la dependencia antigua de
-    CARPETA_DATOS / Google Drive.
     """
 
     try:
