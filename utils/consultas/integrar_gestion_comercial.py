@@ -1,9 +1,9 @@
-
+﻿
 from __future__ import annotations
 
 import pandas as pd
 
-from utils.leer_gestion_consultas import (
+from utils.consultas.leer_gestion_consultas import (
     leer_solicitudes,
     leer_urgencias,
     leer_anulaciones,
@@ -12,7 +12,7 @@ from utils.leer_gestion_consultas import (
 
 
 # ==========================================================
-# NORMALIZACIÓN
+# NORMALIZACIÃ“N
 # ==========================================================
 
 def normalizar_pedido(valor):
@@ -78,7 +78,7 @@ def obtener_bloqueos(df_anulaciones):
         .isin(
             [
                 "SI",
-                "SÍ",
+                "SÃ",
                 "TRUE",
                 "1"
             ]

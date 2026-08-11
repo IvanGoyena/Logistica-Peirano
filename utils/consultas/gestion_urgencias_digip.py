@@ -1,4 +1,4 @@
-# utils/gestion_urgencias_digip.py
+﻿# utils/gestion_urgencias_digip.py
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from utils.google_sheets import (
     actualizar_registro,
 )
 
-from utils.leer_gestion_consultas import (
+from utils.consultas.leer_gestion_consultas import (
     leer_urgencias,
 )
 
 
 # ==========================================================
-# CONFIGURACIÓN
+# CONFIGURACIÃ“N
 # ==========================================================
 
 ZONA_HORARIA = ZoneInfo(
@@ -34,7 +34,7 @@ def normalizar_pedido(
     valor,
 ) -> str:
     """
-    Normaliza números de pedido y transmisiones.
+    Normaliza nÃºmeros de pedido y transmisiones.
     """
 
     if valor is None:
@@ -65,7 +65,7 @@ def obtener_fecha_hora() -> str:
 def obtener_urgencias_pendientes_digip(
 ) -> pd.DataFrame:
     """
-    Obtiene las urgencias que todavía deben ejecutarse
+    Obtiene las urgencias que todavÃ­a deben ejecutarse
     en DIGIP.
     """
 
@@ -169,7 +169,7 @@ def obtener_urgencias_pendientes_digip(
 def obtener_pedidos_pendientes_digip(
 ) -> list[str]:
     """
-    Devuelve los números de los pedidos pendientes.
+    Devuelve los nÃºmeros de los pedidos pendientes.
     """
 
     pendientes = (
@@ -194,7 +194,7 @@ def obtener_pedidos_pendientes_digip(
 
 
 # ==========================================================
-# ACTUALIZACIÓN DE ESTADOS
+# ACTUALIZACIÃ“N DE ESTADOS
 # ==========================================================
 
 def actualizar_estado_lote(
@@ -311,7 +311,7 @@ def marcar_lote_procesando(
         pedidos,
         estado_urgencia="Procesando",
         estado_ejecucion="Procesando",
-        mensaje="Ejecución iniciada.",
+        mensaje="EjecuciÃ³n iniciada.",
     )
 
 

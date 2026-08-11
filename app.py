@@ -3,6 +3,9 @@ import streamlit as st
 from utils.cache_app import (
     limpiar_cache_aplicacion,
 )
+from utils.estado_actualizacion import (
+    preparar_indicador_sidebar,
+)
 
 from utils.autenticacion import (
     crear_autenticador,
@@ -65,6 +68,8 @@ with st.sidebar:
             icon="✅",
         )
         st.rerun()
+
+    preparar_indicador_sidebar()
 
 
 # ==========================================================

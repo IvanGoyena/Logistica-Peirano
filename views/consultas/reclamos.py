@@ -1,4 +1,4 @@
-# components/reclamos.py
+﻿# components/reclamos.py
 
 from __future__ import annotations
 
@@ -11,26 +11,26 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 
-from utils.gestion_reclamos import (
+from utils.consultas.gestion_reclamos import (
     guardar_reclamo_entrega,
 )
 
 
 INCIDENCIAS_RECLAMO = [
-    "Faltante de mercadería",
-    "Sobrante de mercadería",
+    "Faltante de mercaderÃ­a",
+    "Sobrante de mercaderÃ­a",
     "Producto incorrecto",
-    "Producto dañado",
-    "Cruce de mercadería",
+    "Producto daÃ±ado",
+    "Cruce de mercaderÃ­a",
     "Diferencia de cantidad",
-    "Error de documentación",
+    "Error de documentaciÃ³n",
     "Otros",
 ]
 
 ESTADOS_RECLAMO = [
     "Pendiente",
-    "En revisión",
-    "En gestión",
+    "En revisiÃ³n",
+    "En gestiÃ³n",
     "Resuelto",
     "Rechazado",
 ]
@@ -91,7 +91,7 @@ def preparar_clientes(
         [
             "ClienteCodigo",
             "Codigo_Cliente",
-            "Código Cliente",
+            "CÃ³digo Cliente",
             "Codigo Cliente",
             "codigo_logistico",
             "CodigoSucursal",
@@ -104,7 +104,7 @@ def preparar_clientes(
             "ClienteDescripcion",
             "Cliente",
             "RazonSocial",
-            "Razón Social",
+            "RazÃ³n Social",
             "Descripcion",
         ],
     )
@@ -112,7 +112,7 @@ def preparar_clientes(
     if codigo_col is None or descripcion_col is None:
         raise ValueError(
             "No se pudieron identificar las columnas "
-            "de código y descripción del Maestro Clientes."
+            "de cÃ³digo y descripciÃ³n del Maestro Clientes."
         )
 
     clientes = pd.DataFrame(
@@ -161,7 +161,7 @@ def preparar_articulos(
     df_articulos: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Normaliza el Maestro de Artículos para el data editor.
+    Normaliza el Maestro de ArtÃ­culos para el data editor.
     """
 
     if df_articulos is None or df_articulos.empty:
@@ -178,10 +178,10 @@ def preparar_articulos(
         [
             "CodigoArticulo",
             "ArticuloCodigo",
-            "Código",
+            "CÃ³digo",
             "Codigo",
             "cod_art",
-            "Artículo",
+            "ArtÃ­culo",
             "Articulo",
         ],
     )
@@ -191,7 +191,7 @@ def preparar_articulos(
         [
             "ArticuloDescripcion",
             "DescripcionArticulo",
-            "Descripción",
+            "DescripciÃ³n",
             "Descripcion",
             "desc_art",
             "Producto",
@@ -200,8 +200,8 @@ def preparar_articulos(
 
     if codigo_col is None:
         raise ValueError(
-            "No se pudo identificar la columna de código "
-            "del Maestro Artículo."
+            "No se pudo identificar la columna de cÃ³digo "
+            "del Maestro ArtÃ­culo."
         )
 
     articulos = pd.DataFrame(
@@ -256,7 +256,7 @@ def _obtener_usuario() -> str:
 
 
 @st.dialog(
-    "🧾 Cargar reclamo de entrega",
+    "ðŸ§¾ Cargar reclamo de entrega",
     width="large",
 )
 def abrir_carga_reclamo(
@@ -283,7 +283,7 @@ def abrir_carga_reclamo(
 
     if articulos.empty:
         st.error(
-            "El Maestro Artículo no tiene opciones disponibles."
+            "El Maestro ArtÃ­culo no tiene opciones disponibles."
         )
         return
 
@@ -311,7 +311,7 @@ def abrir_carga_reclamo(
 
     st.caption(
         "Carga manual para pedidos ya entregados. "
-        "Puede incluir uno o varios artículos."
+        "Puede incluir uno o varios artÃ­culos."
     )
 
     with st.form(
@@ -322,12 +322,12 @@ def abrir_carga_reclamo(
 
         with datos_1:
             numero_pedido = st.text_input(
-                "Número de pedido *",
+                "NÃºmero de pedido *",
                 placeholder="Ej.: 212240",
             )
 
             numero_remito = st.text_input(
-                "Número de remito *",
+                "NÃºmero de remito *",
                 placeholder="Ej.: 0001-00012345",
             )
 
@@ -343,7 +343,7 @@ def abrir_carga_reclamo(
                 ].tolist(),
                 index=None,
                 placeholder=(
-                    "Buscar por código o cliente..."
+                    "Buscar por cÃ³digo o cliente..."
                 ),
             )
 
@@ -373,7 +373,7 @@ def abrir_carga_reclamo(
         observaciones = st.text_area(
             "Observaciones *",
             placeholder=(
-                "Describí qué informó el cliente y cualquier "
+                "DescribÃ­ quÃ© informÃ³ el cliente y cualquier "
                 "dato relevante para analizar el reclamo..."
             ),
             height=110,
@@ -389,27 +389,27 @@ def abrir_carga_reclamo(
             ],
             accept_multiple_files=True,
             help=(
-                "Campo opcional. Podés adjuntar varias fotos "
-                "del producto, embalaje, remito o mercadería recibida."
+                "Campo opcional. PodÃ©s adjuntar varias fotos "
+                "del producto, embalaje, remito o mercaderÃ­a recibida."
             ),
         )
 
         if fotos_cargadas:
             st.caption(
-                f"Se adjuntarán {len(fotos_cargadas)} foto(s)."
+                f"Se adjuntarÃ¡n {len(fotos_cargadas)} foto(s)."
             )
 
-        st.markdown("#### Artículos reclamados")
+        st.markdown("#### ArtÃ­culos reclamados")
         st.caption(
-            "Podés agregar o eliminar filas. Se permite "
+            "PodÃ©s agregar o eliminar filas. Se permite "
             "cargar 0 remitido y una cantidad recibida mayor "
-            "a cero para registrar cruces de mercadería."
+            "a cero para registrar cruces de mercaderÃ­a."
         )
 
         detalle_inicial = pd.DataFrame(
             [
                 {
-                    "Artículo": None,
+                    "ArtÃ­culo": None,
                     "Cantidad remitida": 0.0,
                     "Cantidad recibida": 0.0,
                 }
@@ -422,8 +422,8 @@ def abrir_carga_reclamo(
             hide_index=True,
             num_rows="dynamic",
             column_config={
-                "Artículo": st.column_config.SelectboxColumn(
-                    "Artículo *",
+                "ArtÃ­culo": st.column_config.SelectboxColumn(
+                    "ArtÃ­culo *",
                     options=articulos[
                         "ArticuloOpcion"
                     ].tolist(),
@@ -453,7 +453,7 @@ def abrir_carga_reclamo(
         )
 
         guardar = st.form_submit_button(
-            "💾 Registrar reclamo",
+            "ðŸ’¾ Registrar reclamo",
             type="primary",
             width="stretch",
         )
@@ -468,22 +468,22 @@ def abrir_carga_reclamo(
             )
 
         filas_validas = detalle_editado[
-            detalle_editado["Artículo"].notna()
+            detalle_editado["ArtÃ­culo"].notna()
         ].copy()
 
-        filas_validas["Artículo"] = (
-            filas_validas["Artículo"]
+        filas_validas["ArtÃ­culo"] = (
+            filas_validas["ArtÃ­culo"]
             .astype(str)
             .str.strip()
         )
 
         filas_validas = filas_validas[
-            filas_validas["Artículo"].ne("")
+            filas_validas["ArtÃ­culo"].ne("")
         ]
 
         if filas_validas.empty:
             raise ValueError(
-                "Debe seleccionar al menos un artículo."
+                "Debe seleccionar al menos un artÃ­culo."
             )
 
         articulos_reclamo: list[
@@ -491,14 +491,14 @@ def abrir_carga_reclamo(
         ] = []
 
         for _, fila in filas_validas.iterrows():
-            opcion_articulo = fila["Artículo"]
+            opcion_articulo = fila["ArtÃ­culo"]
             datos_articulo = mapa_articulos.get(
                 opcion_articulo
             )
 
             if datos_articulo is None:
                 raise ValueError(
-                    f"El artículo {opcion_articulo} "
+                    f"El artÃ­culo {opcion_articulo} "
                     "no se encuentra en el maestro."
                 )
 
@@ -568,7 +568,7 @@ def abrir_carga_reclamo(
 
         st.toast(
             "Reclamo registrado correctamente.",
-            icon="🧾",
+            icon="ðŸ§¾",
         )
 
     except Exception:
@@ -577,7 +577,7 @@ def abrir_carga_reclamo(
         )
         st.error(
             "No se pudo registrar el reclamo. "
-            "Revisá los datos e intentá nuevamente."
+            "RevisÃ¡ los datos e intentÃ¡ nuevamente."
         )
 
 
@@ -599,3 +599,4 @@ def mostrar_boton_carga_reclamo(
             df_clientes=df_clientes,
             df_articulos=df_articulos,
         )
+

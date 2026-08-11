@@ -1,4 +1,4 @@
-# pages/08_Consultas.py
+# views/consultas/principal.py
 
 from __future__ import annotations
 
@@ -10,57 +10,53 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
-from config import CARPETA_DATOS
-from utils.leer_datos import leer_archivo
-from utils.gestion_consultas import (
+from utils.consultas.gestion_consultas import (
     guardar_urgencia,
     guardar_solicitud,
     editar_solicitud,
     eliminar_solicitud,
 )
-from utils.leer_gestion_consultas import (
-    leer_solicitudes,
-    leer_urgencias,
-    leer_reclamos,
-    obtener_urgencias_activas,
+from utils.consultas.leer_gestion_consultas import (
     obtener_solicitudes_abiertas,
-    obtener_solicitudes_pedido,
-    obtener_historial_solicitudes,
-    obtener_historial_urgencias,
-    obtener_historial_reclamos,
 )
 
-from utils.gestion_devoluciones import (
+from utils.consultas.gestion_devoluciones import (
     guardar_cancelacion_entrega,
     confirmar_envio_whatsapp,
 )
-from utils.leer_devoluciones import (
-    obtener_cancelaciones_activas,
-    obtener_historial_cancelaciones,
+from utils.consultas.leer_devoluciones import (
     estado_para_comercial,
 )
 
-from utils.gestion_urgencias_digip import (
-    obtener_urgencias_pendientes_digip,
-    obtener_pedidos_pendientes_digip,
+from utils.consultas.gestion_urgencias_digip import (
     marcar_lote_procesando,
     marcar_lote_exitoso,
     marcar_lote_error,
 )
 
-from utils.cola_agrupaciones import (
+from utils.consultas.cola_agrupaciones import (
     crear_orden_agrupacion,
     obtener_orden,
 )
 
-from models.pedidos import construir_tabla_pedidos
-from models.pendiente import construir_tabla_pendientes
-from models.transmisiones import construir_tabla_transmisiones
-from models.clientes import construir_tabla_clientes
-from models.expresos import construir_tabla_expresos
-from models.consultas_comerciales.consultas import construir_tabla_consultas
-from components.reclamos import (
+from views.consultas.reclamos import (
     mostrar_boton_carga_reclamo,
+)
+
+from utils.consultas.carga import (
+    cargar_datos_consultas,
+    limpiar_cache_datos_consultas,
+)
+from utils.consultas.cache_gestion import (
+    cargar_gestion_comercial_cache,
+    cargar_cancelaciones_cache,
+    cargar_urgencias_digip_cache,
+    invalidar_cache_gestion,
+)
+from models.consultas_comerciales.base_operativa import (
+    construir_tabla_operativa,
+    construir_tabla_consultas_cache,
+    limpiar_cache_modelo_consultas,
 )
 
 
@@ -502,512 +498,8 @@ def render() -> None:
 
 
 
-    # ==========================================================
-    # CARGA DE DATOS
-    # ==========================================================
-
-    @st.cache_data(show_spinner="Cargando información comercial...")
-    def cargar_datos_consultas() -> dict[str, pd.DataFrame]:
-        return {
-            "pedidos": leer_archivo(
-                CARPETA_DATOS,
-                "Pedidos DIGIP",
-                cache=False,
-            ),
-            "detalle": leer_archivo(
-                CARPETA_DATOS,
-                "Detalle Pendientes",
-                cache=False,
-            ),
-            "articulos": leer_archivo(
-                CARPETA_DATOS,
-                "Maestro Articulo",
-                cache=True,
-            ),
-            "clientes": leer_archivo(
-                CARPETA_DATOS,
-                "Maestro Clientes",
-                cache=True,
-            ),
-            "pendientes_erp": leer_archivo(
-                CARPETA_DATOS,
-                "Pedidos Pendientes",
-                cache=False,
-            ),
-            "transmisiones": leer_archivo(
-                CARPETA_DATOS,
-                "Pedidos Transmicion",
-                cache=False,
-            ),
-            "expresos": leer_archivo(
-                CARPETA_DATOS,
-                "Datos Expresos",
-                cache=True,
-            ),
-            "volumetria": leer_archivo(
-                CARPETA_DATOS,
-                "Maestro Volumetria",
-                cache=True,
-            ),
-            "tareas": leer_archivo(
-                CARPETA_DATOS,
-                "Informe Tareas",
-                cache=False,
-            ),
-        }
-
-
-    # ==========================================================
-    # TABLA OPERATIVA
-    # ==========================================================
-
-    @st.cache_data(show_spinner=False)
-    def construir_tabla_operativa(
-        datos: dict[str, pd.DataFrame],
-    ) -> pd.DataFrame:
-
-        tabla = construir_tabla_pedidos(
-            datos["pedidos"].copy(),
-            datos["detalle"].copy(),
-            datos["articulos"].copy(),
-            datos["clientes"].copy(),
-            datos["volumetria"].copy(),
-        )
-
-        # ======================================================
-        # RECUPERAR PEDIDOS DIGIP SIN DETALLE / ERP
-        # ======================================================
-        #
-        # models.pedidos conserva únicamente pedidos que ya tienen
-        # detalle consolidado. Para Consultas Comerciales necesitamos
-        # mostrar también pedidos recién transmitidos que todavía no
-        # fueron enriquecidos por Detalle Pendientes o por el ERP.
-        #
-        # Esta recuperación se hace solamente en este módulo para no
-        # modificar el comportamiento de Pedidos, Despachos u otros
-        # consumidores de models.pedidos.
-        # ======================================================
-
-        pedidos_digip_base = datos["pedidos"].copy()
-
-        if not pedidos_digip_base.empty and "Codigo" in pedidos_digip_base.columns:
-
-            codigo_normalizado = (
-                pedidos_digip_base["Codigo"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-            pedidos_digip_base["Pedido"] = (
-                codigo_normalizado
-                .str.split()
-                .str[1]
-                .str.split("-")
-                .str[0]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-            # Mantener el mismo universo operativo del modelo compartido:
-            # pedidos pendientes o con preparación, pero sin exigir detalle.
-            estado_digip = (
-                pedidos_digip_base.get(
-                    "Estado",
-                    pd.Series("", index=pedidos_digip_base.index),
-                )
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-            pedidos_digip_base = pedidos_digip_base.loc[
-                estado_digip.isin(
-                    [
-                        "Pendiente",
-                        "Preparacion",
-                    ]
-                )
-                & pedidos_digip_base["Pedido"].ne("")
-            ].copy()
-
-            pedidos_presentes = set(
-                tabla["Pedido"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .tolist()
-            )
-
-            pedidos_faltantes = pedidos_digip_base.loc[
-                ~pedidos_digip_base["Pedido"].isin(pedidos_presentes)
-            ].copy()
-
-            if not pedidos_faltantes.empty:
-
-                # Columnas que normalmente aporta el detalle consolidado.
-                valores_defecto = {
-                    "TotalUnidades": 0,
-                    "TotalM3": 0.0,
-                    "TotalSKUs": 0,
-                    "CantidadFamilias": 0,
-                    "DetalleFamilias": "Sin detalle disponible",
-                }
-
-                for columna, valor in valores_defecto.items():
-                    if columna not in pedidos_faltantes.columns:
-                        pedidos_faltantes[columna] = valor
-                    else:
-                        pedidos_faltantes[columna] = (
-                            pedidos_faltantes[columna].fillna(valor)
-                        )
-
-                columnas_descartar = [
-                    "PedidoID",
-                    "Codigo",
-                    "CodigoDeEnvio",
-                    "ServicioDeEnvioTipo",
-                    "OrdenPreparacion",
-                    "DespachoID",
-                    "ClienteID",
-                    "Tags",
-                ]
-
-                pedidos_faltantes = pedidos_faltantes.drop(
-                    columns=columnas_descartar,
-                    errors="ignore",
-                )
-
-                # Alinear estructuras sin perder columnas existentes.
-                columnas_union = list(
-                    dict.fromkeys(
-                        list(tabla.columns)
-                        + list(pedidos_faltantes.columns)
-                    )
-                )
-
-                tabla = tabla.reindex(columns=columnas_union)
-                pedidos_faltantes = pedidos_faltantes.reindex(
-                    columns=columnas_union
-                )
-
-                tabla = pd.concat(
-                    [
-                        tabla,
-                        pedidos_faltantes,
-                    ],
-                    ignore_index=True,
-                    sort=False,
-                )
-
-        tabla_transmisiones = construir_tabla_transmisiones(
-            datos["transmisiones"].copy()
-        )
-
-        tabla_pendientes = construir_tabla_pendientes(
-            datos["pendientes_erp"].copy()
-        )
-
-        tabla_clientes = construir_tabla_clientes(
-            datos["clientes"].copy()
-        )
-
-        tabla_expresos = construir_tabla_expresos(
-            datos["expresos"].copy()
-        )
-
-        for dataframe in [
-            tabla,
-            tabla_transmisiones,
-            tabla_pendientes,
-        ]:
-            dataframe["Pedido"] = (
-                dataframe["Pedido"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.replace(r"\.0$", "", regex=True)
-                .str.split("-")
-                .str[0]
-            )
-
-        tabla = tabla.merge(
-            tabla_transmisiones,
-            on="Pedido",
-            how="left",
-            validate="many_to_one",
-        )
-
-        pendientes_planificacion = (
-            tabla_pendientes[
-                [
-                    "Pedido",
-                    "CodigoSucursal",
-                    "CodigoExpreso",
-                    "ImporteERP",
-                ]
-            ]
-            .drop_duplicates(
-                subset=["Pedido"],
-                keep="first",
-            )
-            .copy()
-        )
-
-        tabla = tabla.merge(
-            pendientes_planificacion,
-            on="Pedido",
-            how="left",
-            validate="many_to_one",
-        )
-
-        tabla["CodigoSucursal"] = (
-            tabla["CodigoSucursal"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        tabla["CodigoExpreso"] = (
-            tabla["CodigoExpreso"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        tabla_clientes["CodigoSucursal"] = (
-            tabla_clientes["CodigoSucursal"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        tabla_expresos["CodigoExpreso"] = (
-            tabla_expresos["CodigoExpreso"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        clientes_planificacion = (
-            tabla_clientes[
-                [
-                    "CodigoSucursal",
-                    "FrecuenciaPreparacion",
-                    "FrecuenciaEntrega",
-                ]
-            ]
-            .drop_duplicates(
-                subset=["CodigoSucursal"],
-                keep="first",
-            )
-            .copy()
-        )
-
-        tabla = tabla.merge(
-            clientes_planificacion,
-            on="CodigoSucursal",
-            how="left",
-            validate="many_to_one",
-        )
-
-        expresos_planificacion = (
-            tabla_expresos[
-                [
-                    "CodigoExpreso",
-                    "LocalidadExpreso",
-                    "ZonaAgrupadorExpreso",
-                ]
-            ]
-            .drop_duplicates(
-                subset=["CodigoExpreso"],
-                keep="first",
-            )
-            .copy()
-        )
-
-        tabla = tabla.merge(
-            expresos_planificacion,
-            on="CodigoExpreso",
-            how="left",
-            validate="many_to_one",
-        )
-
-        for columna in [
-            "FrecuenciaPreparacion",
-            "FrecuenciaEntrega",
-            "LocalidadExpreso",
-            "ZonaAgrupadorExpreso",
-        ]:
-            tabla[columna] = (
-                tabla[columna]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-        frecuencia_entrega = (
-            tabla["FrecuenciaEntrega"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        zona_expreso = (
-            tabla["ZonaAgrupadorExpreso"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-        dias_semanales = {
-            "LUNES",
-            "MARTES",
-            "MIERCOLES",
-            "MIÉRCOLES",
-            "JUEVES",
-            "VIERNES",
-        }
-
-        tabla["Planificacion"] = frecuencia_entrega.where(
-            frecuencia_entrega.isin(dias_semanales),
-            zona_expreso.where(
-                zona_expreso.ne(""),
-                frecuencia_entrega,
-            ),
-        )
-
-        # Los pedidos recién transmitidos pueden no tener todavía
-        # información ERP, transmisión o detalle. Se mantienen visibles
-        # con valores neutros en lugar de eliminarlos.
-        columnas_texto_consultas = [
-            "Pedido",
-            "ClienteCodigo",
-            "ClienteDescripcion",
-            "Estado",
-            "PreparacionEstado",
-            "PreparacionID",
-            "CodigoDespacho",
-            "DespachoDescripcion",
-            "DetalleFamilias",
-            "NroEnvioERP",
-            "EstadoTransmisionERP",
-            "HoraTransmisionERP",
-            "Planificacion",
-        ]
-
-        for columna in columnas_texto_consultas:
-            if columna not in tabla.columns:
-                tabla[columna] = ""
-            tabla[columna] = (
-                tabla[columna]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.replace(r"\.0$", "", regex=True)
-            )
-
-        if "DetalleFamilias" in tabla.columns:
-            tabla["DetalleFamilias"] = tabla[
-                "DetalleFamilias"
-            ].replace("", "Sin detalle disponible")
-
-        for columna in [
-            "TotalUnidades",
-            "TotalSKUs",
-            "CantidadFamilias",
-            "ImporteERP",
-        ]:
-            if columna not in tabla.columns:
-                tabla[columna] = 0
-            tabla[columna] = (
-                pd.to_numeric(
-                    tabla[columna],
-                    errors="coerce",
-                )
-                .fillna(0)
-                .astype(int)
-            )
-
-        if "TotalM3" not in tabla.columns:
-            tabla["TotalM3"] = 0.0
-
-        tabla["TotalM3"] = (
-            pd.to_numeric(
-                tabla["TotalM3"],
-                errors="coerce",
-            )
-            .fillna(0)
-            .round(3)
-        )
-
-        return tabla
-
-
-    @st.cache_data(show_spinner=False)
-    def construir_tabla_consultas_cache(
-        tabla_operativa: pd.DataFrame,
-        df_tareas: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Construye la tabla final una sola vez por versión de los datos.
-        Los reruns provocados por filtros, selecciones y diálogos reutilizan
-        este resultado en memoria.
-        """
-        return construir_tabla_consultas(
-            tabla_operativa.copy(),
-            df_tareas=df_tareas.copy(),
-        )
-
-
-    @st.cache_data(ttl=60, show_spinner=False)
-    def cargar_gestion_comercial_cache() -> dict[str, pd.DataFrame]:
-        """
-        Centraliza las lecturas de Google Sheets relacionadas con solicitudes,
-        urgencias y reclamos. El TTL evita consultar nuevamente en cada clic.
-        """
-        return {
-            "urgencias_activas": obtener_urgencias_activas(),
-            "solicitudes_abiertas": obtener_solicitudes_abiertas(),
-            "solicitudes_totales": obtener_historial_solicitudes(),
-            "urgencias_totales": obtener_historial_urgencias(),
-            "reclamos_totales": obtener_historial_reclamos(),
-        }
-
-
-    @st.cache_data(ttl=60, show_spinner=False)
-    def cargar_cancelaciones_cache() -> dict[str, pd.DataFrame]:
-        return {
-            "totales": obtener_historial_cancelaciones(),
-            "activas": obtener_cancelaciones_activas(),
-        }
-
-
-    @st.cache_data(ttl=30, show_spinner=False)
-    def cargar_urgencias_digip_cache() -> dict[str, object]:
-        return {
-            "urgencias": obtener_urgencias_pendientes_digip(),
-            "pedidos": obtener_pedidos_pendientes_digip(),
-        }
-
-
-    def invalidar_cache_gestion() -> None:
-        """
-        Limpia únicamente la información que puede cambiar después de
-        registrar, editar o cerrar una gestión. No vuelve a descargar los
-        reportes operativos del WMS/ERP.
-        """
-        cargar_gestion_comercial_cache.clear()
-        cargar_cancelaciones_cache.clear()
-        cargar_urgencias_digip_cache.clear()
-
+    # La carga, el modelo operativo y las cachés de gestión se
+    # encuentran desacoplados en utils/consultas y models/consultas_comerciales.
 
     # ==========================================================
     # ESTADO INICIAL
@@ -1373,9 +865,8 @@ def render() -> None:
         )
 
     if actualizar:
-        cargar_datos_consultas.clear()
-        construir_tabla_operativa.clear()
-        construir_tabla_consultas_cache.clear()
+        limpiar_cache_datos_consultas()
+        limpiar_cache_modelo_consultas()
         invalidar_cache_gestion()
         st.rerun()
 
@@ -3432,3 +2923,4 @@ def render() -> None:
         abrir_detalle_pedido(
             pedido_seleccionado_guardado
         )
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from Automatizacion.ejecutar_agrupaciones import ejecutar_agrupacion
-from utils.cola_agrupaciones import (
+from utils.consultas.cola_agrupaciones import (
     actualizar_orden,
     marcar_en_proceso,
     obtener_siguiente_pendiente,
@@ -29,7 +29,7 @@ def texto_a_bool(valor: object) -> bool:
         "TRUE",
         "1",
         "SI",
-        "SÍ",
+        "SÃ",
         "YES",
     }
 
@@ -153,8 +153,8 @@ def procesar_orden(orden: dict) -> None:
 def main() -> None:
     print("=" * 70)
     print("WORKER DE AGRUPACIONES DIGIP")
-    print(f"Revisión cada {INTERVALO_SEGUNDOS} segundos")
-    print("Presioná Ctrl+C para detenerlo.")
+    print(f"RevisiÃ³n cada {INTERVALO_SEGUNDOS} segundos")
+    print("PresionÃ¡ Ctrl+C para detenerlo.")
     print("=" * 70, flush=True)
 
     while True:
@@ -178,3 +178,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

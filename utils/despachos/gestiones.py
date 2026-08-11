@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pandas as pd
 
-from utils.leer_gestion_consultas import (
+from utils.consultas.leer_gestion_consultas import (
     obtener_solicitudes_abiertas,
     obtener_urgencias_activas,
     obtener_anulaciones_pendientes,
     obtener_reclamos_abiertos,
 )
-from utils.gestion_consultas import (
+from utils.consultas.gestion_consultas import (
     finalizar_solicitud_automaticamente,
 )
 
@@ -25,7 +25,7 @@ def normalizar_pedido_gestion(valor: object) -> str:
 def normalizar_pedido_wms_desde_codigo(valor: object) -> str:
     """
     Obtiene la clave de pedido utilizada por las gestiones desde
-    el código completo informado por Pedidos DIGIP.
+    el cÃ³digo completo informado por Pedidos DIGIP.
 
     Ejemplo:
         9999 70-1 -> 70
@@ -50,7 +50,7 @@ def obtener_bloqueos_gestiones() -> tuple[
 ]:
     """
     Devuelve los pedidos que no pueden entrar al planificador porque
-    poseen una gestión comercial abierta.
+    poseen una gestiÃ³n comercial abierta.
     """
 
     reclamos_abiertos = obtener_reclamos_abiertos()
@@ -61,7 +61,7 @@ def obtener_bloqueos_gestiones() -> tuple[
     gestiones = {
         "Solicitud": obtener_solicitudes_abiertas(),
         "Urgencia": obtener_urgencias_activas(),
-        "Anulación": obtener_anulaciones_pendientes(),
+        "AnulaciÃ³n": obtener_anulaciones_pendientes(),
         "Reclamo": reclamos_abiertos,
     }
 
@@ -96,8 +96,8 @@ def cerrar_solicitudes_resueltas(
 ) -> int:
     """
     Finaliza solicitudes abiertas cuando el pedido:
-    - pasó a COMPLETO en DIGIP; o
-    - dejó de existir en el reporte actual de Pedidos DIGIP.
+    - pasÃ³ a COMPLETO en DIGIP; o
+    - dejÃ³ de existir en el reporte actual de Pedidos DIGIP.
 
     Devuelve la cantidad de solicitudes cerradas.
     """
@@ -160,8 +160,8 @@ def cerrar_solicitudes_resueltas(
 
         if pedido_solicitud in pedidos_completos:
             motivo_cierre = (
-                "Gestión cerrada automáticamente porque "
-                "el pedido pasó al estado Completo en DIGIP."
+                "GestiÃ³n cerrada automÃ¡ticamente porque "
+                "el pedido pasÃ³ al estado Completo en DIGIP."
             )
 
         elif (
@@ -169,7 +169,7 @@ def cerrar_solicitudes_resueltas(
             and pedido_solicitud not in pedidos_presentes
         ):
             motivo_cierre = (
-                "Gestión cerrada automáticamente porque "
+                "GestiÃ³n cerrada automÃ¡ticamente porque "
                 "el pedido ya no figura en el reporte actual "
                 "de Pedidos DIGIP."
             )
@@ -182,3 +182,4 @@ def cerrar_solicitudes_resueltas(
             cantidad_cerradas += 1
 
     return cantidad_cerradas
+

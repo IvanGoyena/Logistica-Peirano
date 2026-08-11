@@ -3,11 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from utils.leer_gestion_consultas import (
+from utils.consultas.leer_gestion_consultas import (
     obtener_reclamos_abiertos, leer_reclamos, leer_reclamos_detalle, leer_reclamos_fotos,
 )
-from utils.gestion_consultas import actualizar_solicitud
-from utils.gestion_reclamos import actualizar_reclamo
+from utils.consultas.gestion_consultas import actualizar_solicitud
+from utils.consultas.gestion_reclamos import actualizar_reclamo
 
 def render_tabla_gestiones(
     tabla: pd.DataFrame,
@@ -1794,3 +1794,4 @@ def render_tabla_gestiones(
                 ),
             }
         )
+

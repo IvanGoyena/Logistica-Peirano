@@ -3,7 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from config import CARPETA_DATOS
+from config import CARPETA_WMS
+from models.metricas.metricas import (
+    leer_historico_controles,
+    leer_historico_preparaciones,
+    limpiar_cache_mes_actual_metricas,
+)
 
 
 @st.cache_data(
@@ -12,55 +17,54 @@ from config import CARPETA_DATOS
 )
 def cargar_historicos_maestros() -> dict[str, pd.DataFrame]:
     """
-    Mantiene compatibilidad con la nueva carpeta de Métricas
-    y con el wrapper temporal de versiones anteriores.
+    Carga los históricos crudos de Control y Preparación desde Data_WMS.
+
+    Reutiliza exactamente los mismos lectores que usa el módulo Métricas,
+    evitando duplicar lógica y eliminando la dependencia antigua de
+    CARPETA_DATOS / Google Drive.
     """
 
-    errores = []
+    try:
+        control = leer_historico_controles(
+            CARPETA_WMS
+        )
 
-    for modulo in (
-        "models.metricas.base_historica_metricas",
-        "models.base_historica_metricas",
-    ):
-        try:
-            componente = __import__(
-                modulo,
-                fromlist=[
-                    "leer_historico_controles",
-                    "leer_historico_preparaciones",
-                ],
-            )
+        preparacion = leer_historico_preparaciones(
+            CARPETA_WMS
+        )
 
-            leer_control = getattr(
-                componente,
-                "leer_historico_controles",
-            )
-            leer_preparacion = getattr(
-                componente,
-                "leer_historico_preparaciones",
-            )
+        return {
+            "control": (
+                control
+                if control is not None
+                else pd.DataFrame()
+            ),
+            "preparacion": (
+                preparacion
+                if preparacion is not None
+                else pd.DataFrame()
+            ),
+            "error": "",
+        }
 
-            return {
-                "control": leer_control(
-                    CARPETA_DATOS
-                ),
-                "preparacion": leer_preparacion(
-                    CARPETA_DATOS
-                ),
-                "error": "",
-            }
-
-        except Exception as error:
-            errores.append(
-                f"{modulo}: {type(error).__name__}"
-            )
-
-    return {
-        "control": pd.DataFrame(),
-        "preparacion": pd.DataFrame(),
-        "error": " · ".join(errores),
-    }
+    except Exception as error:
+        return {
+            "control": pd.DataFrame(),
+            "preparacion": pd.DataFrame(),
+            "error": (
+                f"{type(error).__name__}: {error}"
+            ),
+        }
 
 
 def limpiar_cache_historicos() -> None:
+    """
+    Actualiza la vista Históricos de Maestros.
+
+    - limpia la caché propia de esta pantalla;
+    - invalida la lectura del mes actual de Métricas;
+    - conserva la caché persistente de meses cerrados.
+    """
+
     cargar_historicos_maestros.clear()
+    limpiar_cache_mes_actual_metricas()

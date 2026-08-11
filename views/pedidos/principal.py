@@ -3,11 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from utils.leer_gestion_consultas import (
+from utils.consultas.leer_gestion_consultas import (
     obtener_solicitudes_abiertas, obtener_urgencias_activas,
     obtener_anulaciones_pendientes, obtener_reclamos_abiertos,
 )
-from utils.gestion_consultas import finalizar_solicitud_automaticamente
+from utils.consultas.gestion_consultas import finalizar_solicitud_automaticamente
 from models.dashboard_pedidos import preparar_datos_dashboard
 from utils.pedidos.carga import (
     cargar_datos_base, cargar_datos_cobertura, construir_tablas_base_cacheadas,
@@ -937,3 +937,4 @@ def render_modulo_pedidos() -> None:
             solicitudes_abiertas=solicitudes_abiertas,
             reclamos_abiertos=reclamos_abiertos,
         )
+
