@@ -8,12 +8,12 @@ import streamlit as st
 
 
 def render_dashboard_despachos(
-    tabla_disponible_planificacion: pd.DataFrame,
+    tabla_pedidos: pd.DataFrame,
 ) -> None:
 
     st.subheader("📊 Dashboard operativo")
     st.caption(
-        "Estimación de vehículos sobre pedidos todavía sin preparación. "
+        "Estimación de vehículos sobre pedidos con Estado Pendiente. "
         "Los pedidos RETIRA no consumen capacidad de reparto."
     )
 
@@ -117,7 +117,29 @@ def render_dashboard_despachos(
         unsafe_allow_html=True,
     )
 
-    base_dashboard = tabla_disponible_planificacion.copy()
+    base_dashboard = tabla_pedidos.copy()
+
+    # =====================================================
+    # FILTRO OPERATIVO DEL DASHBOARD
+    # =====================================================
+    # El Dashboard utiliza exactamente el mismo criterio que el
+    # Planificador: sólo pedidos cuyo Estado sea "Pendiente".
+    #
+    # PreparacionID NO participa del criterio de disponibilidad.
+    if "Estado" in base_dashboard.columns:
+        mascara_estado_pendiente = (
+            base_dashboard["Estado"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .eq("PENDIENTE")
+        )
+        base_dashboard = base_dashboard.loc[
+            mascara_estado_pendiente
+        ].copy()
+    else:
+        base_dashboard = base_dashboard.iloc[0:0].copy()
 
     cliente_dashboard = (
         base_dashboard["ClienteDescripcion"]
@@ -936,7 +958,7 @@ def render_dashboard_despachos(
 
         if base_retira_dashboard.empty:
             st.info(
-                "No hay pedidos RETIRA pendientes de preparación."
+                "No hay pedidos RETIRA con Estado Pendiente."
             )
         else:
             columnas_retira_dashboard = [

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 
@@ -39,7 +39,7 @@ def render_planificador_despachos(
         "MIERCOLES": [
             "CAMIONETA MIE 1",
             "CAMIONETA MIE 2",
-            "CAMIONETA MIE 3"
+            "CAMIONETA MIE 3",
             "CAMIONETA MIE 4",
         ],
         "JUEVES": [
@@ -95,7 +95,7 @@ def render_planificador_despachos(
     ) -> str:
         """
         Las planificaciones semanales usan su propio pool.
-        Todas las demÃ¡s planificaciones operativas se consideran
+        Todas las demás planificaciones operativas se consideran
         expresos: CABA SUR, CABA SUR II, CABA NORTE, etc.
         """
 
@@ -119,7 +119,7 @@ def render_planificador_despachos(
     ) -> set[str]:
         """
         Considera ocupado un agrupador cuando existe al menos
-        un pedido con PreparacionID no vacÃ­o y su descripciÃ³n
+        un pedido con PreparacionID no vacío y su descripción
         coincide con alguno de los agrupadores configurados.
         """
 
@@ -177,7 +177,7 @@ def render_planificador_despachos(
         - LUNES usa CAMIONETA LUN N.
         - MARTES usa CAMIONETA MAR N.
         - etc.
-        - CABA SUR, CABA NORTE y demÃ¡s zonas comparten
+        - CABA SUR, CABA NORTE y demás zonas comparten
           CAMIONETA EXP N.
         """
 
@@ -345,12 +345,12 @@ def render_planificador_despachos(
             "NumeroCamionetaLogica"
         ] = resultado["NumeroCamioneta"]
 
-        # El nÃºmero visible normalmente se extrae del nombre real
+        # El número visible normalmente se extrae del nombre real
         # del agrupador, por ejemplo "CAMIONETA LUN 2" -> 2.
         #
-        # RETIRA es una excepciÃ³n porque el agrupador se llama
-        # simplemente "RETIRA" y no termina en un nÃºmero. En ese caso
-        # conservamos el nÃºmero lÃ³gico generado por el planificador.
+        # RETIRA es una excepción porque el agrupador se llama
+        # simplemente "RETIRA" y no termina en un número. En ese caso
+        # conservamos el número lógico generado por el planificador.
         numero_desde_despacho = pd.to_numeric(
             resultado["DespachoDIGIP"]
             .fillna("")
@@ -387,35 +387,61 @@ def render_planificador_despachos(
 
 
     # =====================================================
-    # PLANIFICACIÃ“N DE CAMIONETAS
+    # PLANIFICACIÓN DE CAMIONETAS
     # =====================================================
 
     st.markdown("---")
 
-    st.subheader("ðŸšš PlanificaciÃ³n de Camionetas")
+    st.subheader("🚚 Planificación de Camionetas")
 
     st.caption(
-        "AsignaciÃ³n propuesta respetando planificaciÃ³n, "
-        "antigÃ¼edad y cliente completo."
+        "Asignación propuesta respetando planificación, "
+        "antigüedad y cliente completo."
     )
 
-    pedidos_excluidos_preparacion = int(
+    # El planificador trabaja exclusivamente con pedidos
+    # cuyo Estado operativo sea "Pendiente".
+    #
+    # PreparacionID ya NO decide si un pedido entra al planificador.
+    # mascara_sin_preparacion se conserva sólo por compatibilidad
+    # con la llamada actual desde pages/03_Despachos.py.
+    if "Estado" in tabla_filtrada.columns:
+        mascara_estado_pendiente = (
+            tabla_filtrada["Estado"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .eq("PENDIENTE")
+        )
+    else:
+        mascara_estado_pendiente = pd.Series(
+            False,
+            index=tabla_filtrada.index,
+            dtype=bool,
+        )
+
+    tabla_pendiente_planificador = tabla_filtrada.loc[
+        mascara_estado_pendiente
+    ].copy()
+
+    pedidos_excluidos_estado = int(
         tabla_filtrada.loc[
-            ~mascara_sin_preparacion,
+            ~mascara_estado_pendiente,
             "Pedido",
         ].nunique()
     )
 
-    if pedidos_excluidos_preparacion:
+    if pedidos_excluidos_estado:
         st.info(
-            f"{pedidos_excluidos_preparacion} pedido(s) con preparaciÃ³n "
-            "asignada se excluyen automÃ¡ticamente del planificador.",
-            icon="ðŸš«",
+            f"{pedidos_excluidos_estado} pedido(s) se excluyen "
+            "porque su estado no es Pendiente.",
+            icon="ℹ️",
         )
 
     if pedidos_bloqueados_gestion:
 
-        detalle_bloqueos = " Â· ".join(
+        detalle_bloqueos = " · ".join(
             f"{tipo}: {len(pedidos)}"
             for tipo, pedidos in pedidos_por_tipo_gestion.items()
             if pedidos
@@ -424,16 +450,16 @@ def render_planificador_despachos(
         st.warning(
             (
                 f"Hay {len(pedidos_bloqueados_gestion)} pedidos "
-                "bloqueados para planificaciÃ³n porque tienen una "
-                "gestiÃ³n comercial abierta. "
+                "bloqueados para planificación porque tienen una "
+                "gestión comercial abierta. "
                 f"{detalle_bloqueos}"
             ),
-            icon="ðŸ”’",
+            icon="🔒",
         )
 
 
     # =====================================================
-    # FORMULARIO DE CONFIGURACIÃ“N
+    # FORMULARIO DE CONFIGURACIÓN
     # =====================================================
 
     with st.form(
@@ -448,7 +474,7 @@ def render_planificador_despachos(
         with col_plan1:
 
             capacidad_camioneta = st.number_input(
-                "Capacidad por camioneta (mÂ³)",
+                "Capacidad por camioneta (m³)",
                 min_value=0.1,
                 value=8.0,
                 step=0.5,
@@ -458,7 +484,7 @@ def render_planificador_despachos(
         with col_plan2:
 
             opciones_planificacion_camionetas = sorted(
-                tabla_disponible_planificacion["Planificacion"]
+                tabla_pendiente_planificador["Planificacion"]
                 .dropna()
                 .astype(str)
                 .loc[
@@ -477,29 +503,29 @@ def render_planificador_despachos(
             )
 
         generar_planificacion = st.form_submit_button(
-            "ðŸšš Generar propuesta de camionetas",
+            "🚚 Generar propuesta de camionetas",
             type="primary",
             width="stretch"
         )
 
 
     # =====================================================
-    # GENERAR PLANIFICACIÃ“N
+    # GENERAR PLANIFICACIÓN
     # =====================================================
 
     if generar_planificacion:
 
         if not planificaciones_camionetas:
             st.warning(
-                "SeleccionÃ¡ al menos una planificaciÃ³n para generar "
+                "Seleccioná al menos una planificación para generar "
                 "la propuesta de camionetas."
             )
             st.stop()
 
-        base_planificacion = tabla_disponible_planificacion.copy()
+        base_planificacion = tabla_pendiente_planificador.copy()
 
-        # Los pedidos con cualquier gestiÃ³n comercial abierta
-        # requieren revisiÃ³n y no pueden asignarse a camionetas.
+        # Los pedidos con cualquier gestión comercial abierta
+        # requieren revisión y no pueden asignarse a camionetas.
         if pedidos_bloqueados_gestion:
 
             base_planificacion["Pedido"] = (
@@ -528,8 +554,8 @@ def render_planificador_despachos(
 
             st.warning(
                 "No quedaron pedidos disponibles para planificar. "
-                "Los pedidos seleccionados ya tienen una preparaciÃ³n, "
-                "poseen una gestiÃ³n comercial abierta o fueron excluidos."
+                "Sólo se consideran pedidos con Estado Pendiente y sin "
+                "una gestión comercial abierta que los bloquee."
             )
 
             st.stop()
@@ -571,7 +597,7 @@ def render_planificador_despachos(
                 "El motor no pudo incorporar "
                 f"{len(pedidos_no_incorporados)} pedido(s). "
                 "Se muestran abajo para corregir sus datos maestros.",
-                icon="âš ï¸",
+                icon="⚠️",
             )
 
             columnas_control = [
@@ -606,17 +632,17 @@ def render_planificador_despachos(
                 )
 
             st.warning(
-                "La propuesta continuarÃ¡ con los pedidos que sÃ­ pudieron "
-                "incorporarse. Los pedidos del control no se asignarÃ¡n "
+                "La propuesta continuará con los pedidos que sí pudieron "
+                "incorporarse. Los pedidos del control no se asignarán "
                 "hasta corregir su dato faltante.",
-                icon="â„¹ï¸",
+                icon="ℹ️",
             )
 
         if resumen_clientes.empty:
             st.error(
                 "No se pudo construir ninguna carga con los pedidos "
-                "seleccionados. RevisÃ¡ el control de datos mostrado arriba.",
-                icon="âš ï¸",
+                "seleccionados. Revisá el control de datos mostrado arriba.",
+                icon="⚠️",
             )
             st.stop()
 
@@ -697,7 +723,7 @@ def render_planificador_despachos(
 
 
     # =====================================================
-    # VALIDAR VERSIÃ“N DE LA PLANIFICACIÃ“N GUARDADA
+    # VALIDAR VERSIÓN DE LA PLANIFICACIÓN GUARDADA
     # =====================================================
 
     COLUMNAS_PLANIFICACION_ACTUAL = {
@@ -720,8 +746,8 @@ def render_planificador_despachos(
         )
     ):
 
-        # La propuesta fue creada con una versiÃ³n anterior
-        # del mÃ³dulo y no contiene los agrupadores reales.
+        # La propuesta fue creada con una versión anterior
+        # del módulo y no contiene los agrupadores reales.
         claves_planificacion_anterior = [
             "asignacion_camionetas",
             "pedidos_planificados",
@@ -752,9 +778,9 @@ def render_planificador_despachos(
             )
 
         st.warning(
-            "La planificaciÃ³n guardada pertenecÃ­a a una versiÃ³n "
+            "La planificación guardada pertenecía a una versión "
             "anterior. Fue eliminada para incorporar los nombres "
-            "reales de los agrupadores DIGIP. GenerÃ¡ nuevamente "
+            "reales de los agrupadores DIGIP. Generá nuevamente "
             "la propuesta."
         )
 
@@ -776,7 +802,7 @@ def render_planificador_despachos(
 
             st.warning(
                 "No existen pedidos disponibles para generar "
-                "la planificaciÃ³n."
+                "la planificación."
             )
 
         else:
@@ -791,10 +817,10 @@ def render_planificador_despachos(
             if agrupadores_a_crear:
 
                 st.warning(
-                    "La propuesta utiliza agrupadores que todavÃ­a "
+                    "La propuesta utiliza agrupadores que todavía "
                     "no existen en DIGIP: "
                     + ", ".join(agrupadores_a_crear)
-                    + ". PodÃ©s continuar con la planificaciÃ³n y "
+                    + ". Podés continuar con la planificación y "
                     "crearlos antes de ejecutar."
                 )
 
@@ -904,7 +930,7 @@ def render_planificador_despachos(
             ]
 
             with st.expander(
-                "ðŸš¦ Disponibilidad de agrupadores DIGIP",
+                "🚦 Disponibilidad de agrupadores DIGIP",
                 expanded=False
             ):
 
@@ -958,7 +984,7 @@ def render_planificador_despachos(
                     )
 
             # -------------------------------------------------
-            # KPIs DE PLANIFICACIÃ“N
+            # KPIs DE PLANIFICACIÓN
             # -------------------------------------------------
 
             plan_kpi1, plan_kpi2, plan_kpi3, plan_kpi4, plan_kpi5 = (
@@ -968,29 +994,29 @@ def render_planificador_despachos(
             with plan_kpi1:
 
                 st.metric(
-                    "ðŸšš Camionetas",
+                    "🚚 Camionetas",
                     total_camionetas
                 )
 
             with plan_kpi2:
 
                 st.metric(
-                    "ðŸ‘¥ Clientes",
+                    "👥 Clientes",
                     total_clientes_planificados
                 )
 
             with plan_kpi3:
 
                 st.metric(
-                    "ðŸ“¦ Pedidos",
+                    "📦 Pedidos",
                     total_pedidos_planificados
                 )
 
             with plan_kpi4:
 
                 st.metric(
-                    "ðŸ“ Volumen",
-                    f"{volumen_planificado:,.3f} mÂ³"
+                    "📐 Volumen",
+                    f"{volumen_planificado:,.3f} m³"
                     .replace(",", "X")
                     .replace(".", ",")
                     .replace("X", ".")
@@ -999,7 +1025,7 @@ def render_planificador_despachos(
             with plan_kpi5:
 
                 st.metric(
-                    "ðŸ“Š OcupaciÃ³n promedio",
+                    "📊 Ocupación promedio",
                     f"{ocupacion_promedio:.1f}%"
                 )
 
@@ -1017,7 +1043,7 @@ def render_planificador_despachos(
 
                     "CapacidadM3": (
                         st.column_config.NumberColumn(
-                            "Capacidad mÂ³",
+                            "Capacidad m³",
                             format="%.2f"
                         )
                     ),
@@ -1031,7 +1057,7 @@ def render_planificador_despachos(
 
                     "OcupacionCamionetaPct": (
                         st.column_config.ProgressColumn(
-                            "OcupaciÃ³n",
+                            "Ocupación",
                             min_value=0,
                             max_value=100,
                             format="%.1f%%"
@@ -1040,7 +1066,7 @@ def render_planificador_despachos(
 
                     "DisponibleM3": (
                         st.column_config.NumberColumn(
-                            "Disponible mÂ³",
+                            "Disponible m³",
                             format="%.3f"
                         )
                     ),
@@ -1048,13 +1074,13 @@ def render_planificador_despachos(
             )
 
             # -------------------------------------------------
-            # EJECUCIÃ“N DIGIP
+            # EJECUCIÓN DIGIP
             # -------------------------------------------------
 
-            st.markdown("#### ðŸš€ EjecuciÃ³n DIGIP")
+            st.markdown("#### 🚀 Ejecución DIGIP")
 
             st.caption(
-                "RevisÃ¡ el resumen y ejecutÃ¡ Ãºnicamente la "
+                "Revisá el resumen y ejecutá únicamente la "
                 "camioneta que quieras crear en DIGIP."
             )
 
@@ -1129,7 +1155,7 @@ def render_planificador_despachos(
                 st.caption("**Estado DIGIP**")
 
             with encabezado_5:
-                st.caption("**AcciÃ³n**")
+                st.caption("**Acción**")
 
             st.divider()
 
@@ -1335,7 +1361,7 @@ def render_planificador_despachos(
                     st.markdown(
                         (
                             '<div class="digip-fila digip-nombre">'
-                            f'ðŸšš {nombre_camioneta}'
+                            f'🚚 {nombre_camioneta}'
                             '</div>'
                         ),
                         unsafe_allow_html=True
@@ -1353,7 +1379,7 @@ def render_planificador_despachos(
 
                 with fila_3:
                     volumen_formateado = (
-                        f"{volumen_camioneta:,.3f} mÂ³"
+                        f"{volumen_camioneta:,.3f} m³"
                         .replace(",", "X")
                         .replace(".", ",")
                         .replace("X", ".")
@@ -1373,19 +1399,19 @@ def render_planificador_despachos(
                     if len(codigos_despacho) > 1:
 
                         st.info(
-                            f"{len(codigos_despacho)} cÃ³digos",
-                            icon="â„¹ï¸"
+                            f"{len(codigos_despacho)} códigos",
+                            icon="ℹ️"
                         )
 
                         st.caption(
-                            "CÃ³digos encontrados: "
+                            "Códigos encontrados: "
                             + ", ".join(codigos_despacho)
                         )
 
                     elif not codigo_despacho:
                         st.warning(
-                            "Sin cÃ³digo",
-                            icon="âš ï¸"
+                            "Sin código",
+                            icon="⚠️"
                         )
 
                     elif estado_guardado:
@@ -1398,7 +1424,7 @@ def render_planificador_despachos(
                         ):
                             st.success(
                                 "Ejecutada",
-                                icon="âœ…"
+                                icon="✅"
                             )
 
                         elif bool(
@@ -1409,25 +1435,25 @@ def render_planificador_despachos(
                         ):
                             st.info(
                                 "En proceso",
-                                icon="âš™ï¸"
+                                icon="⚙️"
                             )
 
                         else:
                             st.error(
                                 "Error",
-                                icon="âŒ"
+                                icon="❌"
                             )
 
                     else:
                         st.info(
                             "Pendiente",
-                            icon="â³"
+                            icon="⏳"
                         )
 
                 with fila_5:
 
                     texto_boton = (
-                        "ðŸ”„ Reintentar"
+                        "🔄 Reintentar"
                         if (
                             estado_guardado
                             and not bool(
@@ -1444,7 +1470,7 @@ def render_planificador_despachos(
                             )
                         )
                         else (
-                            "âœ… Ejecutada"
+                            "✅ Ejecutada"
                             if (
                                 estado_guardado
                                 and bool(
@@ -1454,7 +1480,7 @@ def render_planificador_despachos(
                                     )
                                 )
                             )
-                            else "ðŸš€ Ejecutar"
+                            else "🚀 Ejecutar"
                         )
                     )
 
@@ -1485,7 +1511,7 @@ def render_planificador_despachos(
                 # -------------------------------------------------
 
                 with st.expander(
-                    f"ðŸ”Ž Abrir detalle Â· {nombre_camioneta}",
+                    f"🔎 Abrir detalle · {nombre_camioneta}",
                     expanded=False,
                 ):
 
@@ -1543,23 +1569,23 @@ def render_planificador_despachos(
                         detalle_kpi_3, detalle_kpi_4 = st.columns(4)
 
                     detalle_kpi_1.metric(
-                        "ðŸ‘¥ Clientes",
+                        "👥 Clientes",
                         cantidad_clientes_detalle,
                     )
 
                     detalle_kpi_2.metric(
-                        "ðŸ“¦ Pedidos",
+                        "📦 Pedidos",
                         cantidad_pedidos_detalle,
                     )
 
                     detalle_kpi_3.metric(
-                        "ðŸ”¢ Unidades",
+                        "🔢 Unidades",
                         f"{total_unidades_detalle:,}".replace(",", "."),
                     )
 
                     detalle_kpi_4.metric(
-                        "ðŸ“ Volumen",
-                        f"{total_m3_detalle:,.3f} mÂ³"
+                        "📐 Volumen",
+                        f"{total_m3_detalle:,.3f} m³"
                         .replace(",", "X")
                         .replace(".", ",")
                         .replace("X", "."),
@@ -1592,15 +1618,15 @@ def render_planificador_despachos(
                     tabla_detalle_camioneta = (
                         tabla_detalle_camioneta.rename(
                             columns={
-                                "ClienteCodigo": "CÃ³digo cliente",
+                                "ClienteCodigo": "Código cliente",
                                 "ClienteDescripcion": "Cliente",
                                 "TotalUnidades": "Unidades",
-                                "TotalM3": "Volumen mÂ³",
+                                "TotalM3": "Volumen m³",
                                 "TotalSKUs": "SKUs",
                                 "DetalleFamilias": "Familias",
-                                "CodigoDespacho": "CÃ³digo despacho",
+                                "CodigoDespacho": "Código despacho",
                                 "DespachoDescripcion": "Despacho actual",
-                                "Planificacion": "PlanificaciÃ³n",
+                                "Planificacion": "Planificación",
                             }
                         )
                     )
@@ -1610,8 +1636,8 @@ def render_planificador_despachos(
                         width="stretch",
                         hide_index=True,
                         column_config={
-                            "Volumen mÂ³": st.column_config.NumberColumn(
-                                "Volumen mÂ³",
+                            "Volumen m³": st.column_config.NumberColumn(
+                                "Volumen m³",
                                 format="%.3f",
                             ),
                             "Unidades": st.column_config.NumberColumn(
@@ -1642,7 +1668,7 @@ def render_planificador_despachos(
                 ):
 
                     with st.expander(
-                        f"âŒ Ver error de {nombre_camioneta}",
+                        f"❌ Ver error de {nombre_camioneta}",
                         expanded=True,
                     ):
 
@@ -1758,28 +1784,28 @@ def render_planificador_despachos(
                             }
 
                             st.success(
-                                f"âœ… {nombre_camioneta}: "
+                                f"✅ {nombre_camioneta}: "
                                 f"{mensaje_orden}"
                             )
 
                         elif estado_orden == "ERROR":
 
                             st.error(
-                                f"âŒ {nombre_camioneta}: "
+                                f"❌ {nombre_camioneta}: "
                                 f"{mensaje_orden}"
                             )
 
                         elif estado_orden == "EN_PROCESO":
 
                             st.info(
-                                f"âš™ï¸ {nombre_camioneta} en proceso â€” "
+                                f"⚙️ {nombre_camioneta} en proceso — "
                                 f"{etapa_orden}: {mensaje_orden}"
                             )
 
                         else:
 
                             st.warning(
-                                f"ðŸ•’ {nombre_camioneta} pendiente "
+                                f"🕒 {nombre_camioneta} pendiente "
                                 "de ser tomada por el worker."
                             )
 
@@ -1790,7 +1816,7 @@ def render_planificador_despachos(
                         }:
 
                             if st.button(
-                                "ðŸ”„ Consultar estado",
+                                "🔄 Consultar estado",
                                 key=(
                                     "consultar_worker_"
                                     f"{clave_ejecucion}"
