@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "publicado_en": "2026-08-10T21:54:35",
+  "firma_historicos_hash": "ad918395b134cb074cfdc2f9ce8c52b50839866bcb0f4a6202fd410b081198e4",
+  "filas_tareas": 24669,
+  "filas_detalle": 200978,
+  "fecha_minima": "2026-02-05T00:00:00",
+  "fecha_maxima": "2026-08-10T00:00:00",
+  "archivo_tareas": "metricas_tareas_enriquecidas.parquet",
+  "archivo_detalle": "metricas_detalle_enriquecido.parquet",
+  "origen": "Data_WMS",
+  "publicacion_github": true
+}
