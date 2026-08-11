@@ -85,10 +85,9 @@ with st.sidebar:
             "y vuelve a leer las fuentes disponibles en el repositorio."
         ),
     ):
-        with st.spinner(
-            "Actualizando fuentes..."
-        ):
+        with st.spinner("Actualizando fuentes..."):
             limpiar_cache_aplicacion()
+            st.cache_data.clear()
 
         registrar_actualizacion_manual()
 
@@ -299,18 +298,6 @@ elif tiene_rol("logistica"):
 
     paginas["Operación"] = [
         pagina_tareas,
-        pagina_despachos,
-        pagina_stock,
-        pagina_inventario,
-        pagina_devoluciones,
-    ]
-
-    paginas["Comercial"] = [
-        pagina_consultas,
-    ]
-
-    paginas["Configuración"] = [
-        pagina_maestros,
     ]
 
 
@@ -321,13 +308,8 @@ elif tiene_rol("supervisor"):
         pagina_tareas,
         pagina_despachos,
         pagina_stock,
-        pagina_inventario,
-        pagina_devoluciones,
     ]
 
-    paginas["Comercial"] = [
-        pagina_consultas,
-    ]
 
 
 # COMERCIAL
