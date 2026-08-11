@@ -1,5 +1,15 @@
-from pathlib import Path
+
 import os
+from pathlib import Path
+
+
+# =====================================================
+# ENTORNO
+# =====================================================
+
+ES_STREAMLIT_CLOUD = (
+    not Path(r"C:\Sistema_Logistico_Peirano").exists()
+)
 
 try:
     import streamlit as st
