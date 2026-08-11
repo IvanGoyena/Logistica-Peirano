@@ -2,7 +2,7 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from utils.stock.helpers import dataframe_para_streamlit
+from utils.stock.helpers import dataframe_a_csv, dataframe_para_streamlit
 from models.stock.ocupacion import resumir_ocupacion, mostrar_tarjeta_donut
 from models.stock.mapa import mostrar_mapa_visual_deposito
 
@@ -301,6 +301,222 @@ def render(contexto: dict) -> None:
             )
 
 
+
+    # ---------------- UBICACIONES VACÍAS DE ALMACÉN ----------------
+    st.markdown("---")
+    st.markdown("### 📍 Ubicaciones vacías de Almacén")
+    st.caption(
+        "Listado operativo de ubicaciones disponibles para guardado. "
+        "Incluye ubicaciones de Almacén y Pasillo; "
+        "Picking queda excluido de esta tabla y de la descarga."
+    )
+
+    ubicaciones_vacias = tabla_ocupacion.loc[
+        tabla_ocupacion["GrupoOcupacion"].isin(
+            ["Almacén", "Pasillo"]
+        )
+        & tabla_ocupacion["Disponible"].fillna(False)
+        & ~tabla_ocupacion["Ocupada"].fillna(False)
+    ].copy()
+
+    if ubicaciones_vacias.empty:
+        st.info(
+            "No hay ubicaciones vacías disponibles en Almacén."
+        )
+    else:
+        ubicaciones_vacias["Area"] = (
+            ubicaciones_vacias["Area"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        ubicaciones_vacias["Tercio"] = (
+            ubicaciones_vacias["Tercio"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        areas_disponibles = sorted(
+            valor
+            for valor in ubicaciones_vacias[
+                "Area"
+            ].unique().tolist()
+            if valor
+        )
+        pasillos_disponibles = sorted(
+            valor
+            for valor in ubicaciones_vacias[
+                "Pasillo"
+            ].fillna("")
+            .astype(str)
+            .str.strip()
+            .unique()
+            .tolist()
+            if valor
+        )
+        tercios_disponibles = sorted(
+            valor
+            for valor in ubicaciones_vacias[
+                "Tercio"
+            ].unique().tolist()
+            if valor
+        )
+
+        filtro_area, filtro_pasillo, filtro_tercio = (
+            st.columns(3)
+        )
+
+        with filtro_area:
+            areas_seleccionadas = st.multiselect(
+                "Área",
+                options=areas_disponibles,
+                key="ocupacion_vacias_area",
+                placeholder="Todas las áreas",
+            )
+
+        with filtro_pasillo:
+            pasillos_seleccionados = st.multiselect(
+                "Pasillo",
+                options=pasillos_disponibles,
+                key="ocupacion_vacias_pasillo",
+                placeholder="Todos los pasillos",
+            )
+
+        with filtro_tercio:
+            tercios_seleccionados = st.multiselect(
+                "Tercio",
+                options=tercios_disponibles,
+                key="ocupacion_vacias_tercio",
+                placeholder="Todos los tercios",
+            )
+
+        vista_vacias = ubicaciones_vacias.copy()
+
+        if areas_seleccionadas:
+            vista_vacias = vista_vacias.loc[
+                vista_vacias["Area"].isin(
+                    areas_seleccionadas
+                )
+            ].copy()
+
+        if pasillos_seleccionados:
+            vista_vacias = vista_vacias.loc[
+                vista_vacias["Pasillo"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .isin(pasillos_seleccionados)
+            ].copy()
+
+        if tercios_seleccionados:
+            vista_vacias = vista_vacias.loc[
+                vista_vacias["Tercio"].isin(
+                    tercios_seleccionados
+                )
+            ].copy()
+
+        columnas_vacias = [
+            columna
+            for columna in [
+                "Area",
+                "Tercio",
+                "Pasillo",
+                "Posicion",
+                "Nivel",
+                "CodigoVerificador",
+                "Tipo",
+                "ClaveUbicacion",
+            ]
+            if columna in vista_vacias.columns
+        ]
+
+        vista_vacias = (
+            vista_vacias[
+                columnas_vacias
+            ]
+            .drop_duplicates()
+            .sort_values(
+                [
+                    columna
+                    for columna in [
+                        "Area",
+                        "Tercio",
+                        "Pasillo",
+                        "Posicion",
+                        "Nivel",
+                    ]
+                    if columna in columnas_vacias
+                ],
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+        total_vacias = len(vista_vacias)
+
+        kpi_vacias, descarga_vacias = st.columns(
+            [1, 3],
+            vertical_alignment="bottom",
+        )
+
+        with kpi_vacias:
+            st.metric(
+                "Ubicaciones vacías",
+                f"{total_vacias:,}".replace(",", "."),
+            )
+
+        with descarga_vacias:
+            st.download_button(
+                "⬇️ Descargar ubicaciones vacías",
+                data=dataframe_a_csv(
+                    vista_vacias
+                ),
+                file_name="Ubicaciones_Vacias_Almacen_y_Pasillo.csv",
+                mime="text/csv",
+                key="descargar_ubicaciones_vacias_almacen",
+                width="stretch",
+            )
+
+        st.dataframe(
+            dataframe_para_streamlit(
+                vista_vacias
+            ),
+            hide_index=True,
+            width="stretch",
+            height=min(
+                520,
+                90 + max(
+                    len(vista_vacias),
+                    1,
+                ) * 34,
+            ),
+            column_config={
+                "Area": st.column_config.TextColumn(
+                    "Área"
+                ),
+                "Tercio": st.column_config.TextColumn(
+                    "Tercio"
+                ),
+                "Pasillo": st.column_config.TextColumn(
+                    "Pasillo"
+                ),
+                "Posicion": st.column_config.TextColumn(
+                    "Posición"
+                ),
+                "Nivel": st.column_config.TextColumn(
+                    "Nivel"
+                ),
+                "CodigoVerificador":
+                    st.column_config.TextColumn(
+                        "Código verificador"
+                    ),
+                "ClaveUbicacion":
+                    st.column_config.TextColumn(
+                        "Ubicación"
+                    ),
+            },
+        )
 
     # ---------------- MAPA VISUAL ----------------
     mostrar_mapa_visual_deposito(

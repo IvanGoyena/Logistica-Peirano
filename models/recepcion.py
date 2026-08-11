@@ -174,8 +174,29 @@ def _enriquecer(
     df_max_min: pd.DataFrame,
 ) -> pd.DataFrame:
     resultado = tabla.copy()
+
+    maestro_articulos = _maestro_articulos(df_articulos)
+    codigos_maestro = set(
+        maestro_articulos["ArticuloCodigo"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .loc[lambda serie: serie.ne("")]
+        .tolist()
+    )
+
+    resultado["ExisteEnMaestroArticulo"] = (
+        resultado["ArticuloCodigo"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .isin(codigos_maestro)
+    )
+
     resultado = resultado.merge(
-        _maestro_articulos(df_articulos),
+        maestro_articulos,
         on="ArticuloCodigo", how="left", validate="many_to_one",
     )
     resultado = resultado.merge(
@@ -214,6 +235,15 @@ def _enriquecer(
         )
     else:
         resultado["ArticuloDescripcion"] = resultado["DescripcionMaestro"]
+
+    resultado["ExisteEnMaestroArticulo"] = (
+        resultado["ExisteEnMaestroArticulo"]
+        .fillna(False)
+        .astype(bool)
+    )
+    resultado["EsProductoNuevo"] = (
+        ~resultado["ExisteEnMaestroArticulo"]
+    )
 
     return resultado
 
@@ -279,6 +309,8 @@ def construir_pendientes_oc(
         "StockMinimoPicking", "StockMaximoPicking", "MaximoPreparar",
         "StockDisponibleActual", "PorcentajeSobreStockActual",
         "PorcentajeSobreTotal", "SemaforoIngreso", "AccionRecomendada",
+        "ExisteEnMaestroArticulo", "EsProductoNuevo",
+        "ResuelveSinStock", "AlertaIngreso", "PrioridadIngreso",
     ]
     if df_oc is None or df_oc.empty:
         return pd.DataFrame(columns=columnas_salida)
@@ -364,6 +396,45 @@ def construir_pendientes_oc(
     tabla["SemaforoIngreso"] = [valor[0] for valor in clasificaciones]
     tabla["AccionRecomendada"] = [valor[1] for valor in clasificaciones]
 
+    tabla["EsProductoNuevo"] = (
+        tabla.get(
+            "EsProductoNuevo",
+            pd.Series(False, index=tabla.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    tabla["ExisteEnMaestroArticulo"] = (
+        ~tabla["EsProductoNuevo"]
+    )
+    tabla["ResuelveSinStock"] = (
+        tabla["StockDisponibleActual"].le(0)
+        & tabla["CantidadPendiente"].gt(0)
+        & ~tabla["EsProductoNuevo"]
+    )
+
+    def clasificar_alerta_ingreso(fila: pd.Series) -> tuple[str, str]:
+        if bool(fila["ResuelveSinStock"]):
+            return "🔴 Resuelve sin stock", "P1 - Urgente"
+        if bool(fila["EsProductoNuevo"]):
+            return "🆕 Producto nuevo", "P2 - Alta"
+        if str(fila["SemaforoIngreso"]) == "Crítico":
+            return "🟠 Impacto crítico", "P3 - Media alta"
+        if str(fila["SemaforoIngreso"]) == "Alto":
+            return "🟡 Impacto alto", "P4 - Media"
+        return "⚪ Normal", "P5 - Normal"
+
+    alertas = tabla.apply(
+        clasificar_alerta_ingreso,
+        axis=1,
+    )
+    tabla["AlertaIngreso"] = [
+        valor[0] for valor in alertas
+    ]
+    tabla["PrioridadIngreso"] = [
+        valor[1] for valor in alertas
+    ]
+
     hoy = pd.Timestamp(date.today())
     tabla["DiasHastaIngreso"] = (
         tabla["FechaIngresoEstimada"].dt.normalize() - hoy
@@ -402,9 +473,17 @@ def construir_pendientes_oc(
             tabla[c] = pd.NA
 
     orden_prioridad = {
-        "Sin stock": 0, "Crítico": 1, "Alto": 2, "Medio": 3, "Bajo": 4
+        "P1 - Urgente": 0,
+        "P2 - Alta": 1,
+        "P3 - Media alta": 2,
+        "P4 - Media": 3,
+        "P5 - Normal": 4,
     }
-    tabla["_OrdenPrioridad"] = tabla["SemaforoIngreso"].map(orden_prioridad).fillna(5)
+    tabla["_OrdenPrioridad"] = (
+        tabla["PrioridadIngreso"]
+        .map(orden_prioridad)
+        .fillna(5)
+    )
     tabla = tabla.sort_values(
         ["_OrdenPrioridad", "FechaIngresoEstimada", "OrdenCompra", "ArticuloCodigo"],
         na_position="last",
@@ -422,6 +501,7 @@ def construir_recepcion_agrupada(
     df_articulos: pd.DataFrame,
     df_volumetria: pd.DataFrame,
     df_max_min: pd.DataFrame,
+    df_disponible: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     columnas_salida = [
         "ArticuloCodigo", "ArticuloDescripcion", "Familia", "Sectorizacion",
@@ -430,6 +510,9 @@ def construir_recepcion_agrupada(
         "PesoTotalKg", "VolumenUnitarioM3", "VolumenTotalM3",
         "StockMinimoPicking", "StockMaximoPicking", "MaximoPreparar",
         "CoberturaMaximoPickingPorcentaje", "EstadoAbastecimientoPicking",
+        "ExisteEnMaestroArticulo", "EsProductoNuevo",
+        "StockDisponibleActual", "ResuelveSinStock",
+        "PrioridadGuardado", "MotivoPrioridadGuardado",
     ]
     if df_recepcion is None or df_recepcion.empty:
         return pd.DataFrame(columns=columnas_salida)
@@ -466,7 +549,83 @@ def construir_recepcion_agrupada(
         )
         .merge(descripcion, on="ArticuloCodigo", how="left", validate="one_to_one")
     )
-    resumen = _enriquecer(resumen, df_articulos, df_volumetria, df_max_min)
+    resumen = _enriquecer(
+        resumen,
+        df_articulos,
+        df_volumetria,
+        df_max_min,
+    )
+
+    disponible_articulo = construir_disponible_por_articulo(
+        df_disponible
+    )
+    resumen = resumen.merge(
+        disponible_articulo,
+        on="ArticuloCodigo",
+        how="left",
+        validate="many_to_one",
+    )
+    resumen["StockDisponibleActual"] = pd.to_numeric(
+        resumen.get("StockDisponibleActual", 0),
+        errors="coerce",
+    ).fillna(0).clip(lower=0)
+
+    resumen["EsProductoNuevo"] = (
+        resumen.get(
+            "EsProductoNuevo",
+            pd.Series(False, index=resumen.index),
+        )
+        .fillna(False)
+        .astype(bool)
+    )
+    resumen["ExisteEnMaestroArticulo"] = (
+        ~resumen["EsProductoNuevo"]
+    )
+    resumen["ResuelveSinStock"] = (
+        resumen["StockDisponibleActual"].le(0)
+        & resumen["UnidadesRecepcion"].gt(0)
+        & ~resumen["EsProductoNuevo"]
+    )
+
+    def prioridad_guardado(fila: pd.Series) -> tuple[str, str]:
+        if bool(fila["ResuelveSinStock"]):
+            return (
+                "🔴 P1 - Urgente",
+                "El ingreso resuelve un artículo actualmente sin stock disponible.",
+            )
+        if bool(fila["EsProductoNuevo"]):
+            return (
+                "🟣 P2 - Producto nuevo",
+                "El artículo no existe todavía en Maestro Artículo.",
+            )
+        minimo = float(fila.get("StockMinimoPicking", 0) or 0)
+        disponible = float(fila.get("StockDisponibleActual", 0) or 0)
+        if minimo > 0 and disponible < minimo:
+            return (
+                "🟠 P3 - Bajo mínimo",
+                "El stock disponible está por debajo del mínimo configurado.",
+            )
+        if str(fila.get("EstadoAbastecimientoPicking", "")) == "Cubre mínimo":
+            return (
+                "🟡 P4 - Reposición",
+                "La recepción permite cubrir el mínimo de Picking.",
+            )
+        return (
+            "⚪ P5 - Normal",
+            "Guardado sin alerta operativa prioritaria.",
+        )
+
+    prioridades = resumen.apply(
+        prioridad_guardado,
+        axis=1,
+    )
+    resumen["PrioridadGuardado"] = [
+        valor[0] for valor in prioridades
+    ]
+    resumen["MotivoPrioridadGuardado"] = [
+        valor[1] for valor in prioridades
+    ]
+
     resumen["DiasAlVencimiento"] = (
         resumen["VencimientoMasProximo"].dt.normalize() - pd.Timestamp(date.today())
     ).dt.days
@@ -497,6 +656,29 @@ def construir_recepcion_agrupada(
         if c not in resumen:
             resumen[c] = pd.NA
 
-    return resumen[columnas_salida].sort_values(
-        ["UnidadesRecepcion", "ArticuloCodigo"], ascending=[False, True]
-    ).reset_index(drop=True)
+    orden_guardado = {
+        "🔴 P1 - Urgente": 0,
+        "🟣 P2 - Producto nuevo": 1,
+        "🟠 P3 - Bajo mínimo": 2,
+        "🟡 P4 - Reposición": 3,
+        "⚪ P5 - Normal": 4,
+    }
+    resumen["_OrdenGuardado"] = (
+        resumen["PrioridadGuardado"]
+        .map(orden_guardado)
+        .fillna(5)
+    )
+
+    return (
+        resumen.sort_values(
+            [
+                "_OrdenGuardado",
+                "UnidadesRecepcion",
+                "ArticuloCodigo",
+            ],
+            ascending=[True, False, True],
+        )
+        .drop(columns="_OrdenGuardado")
+        [columnas_salida]
+        .reset_index(drop=True)
+    )

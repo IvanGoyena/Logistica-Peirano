@@ -412,6 +412,11 @@ def construir_recepcion_operativa(
         "DiasEnRecepcion",
         "EstadoAntiguedad",
         "RangoAntiguedad",
+        "StockDisponibleActual",
+        "EsProductoNuevo",
+        "ResuelveSinStock",
+        "PrioridadGuardado",
+        "MotivoPrioridadGuardado",
     ]
 
     if (
@@ -546,6 +551,11 @@ def construir_recepcion_operativa(
                 "Familia",
                 "Sectorizacion",
                 "VolumenUnitarioM3",
+                "StockDisponibleActual",
+                "EsProductoNuevo",
+                "ResuelveSinStock",
+                "PrioridadGuardado",
+                "MotivoPrioridadGuardado",
             ]
             if columna in tabla_recepcion_agrupada.columns
         ]
@@ -584,6 +594,8 @@ def construir_recepcion_operativa(
     for columna in [
         "Familia",
         "Sectorizacion",
+        "PrioridadGuardado",
+        "MotivoPrioridadGuardado",
     ]:
         if columna not in detalle.columns:
             detalle[columna] = ""
@@ -592,6 +604,25 @@ def construir_recepcion_operativa(
             detalle[columna]
             .fillna("")
             .astype(str)
+        )
+
+    if "StockDisponibleActual" not in detalle.columns:
+        detalle["StockDisponibleActual"] = 0.0
+    detalle["StockDisponibleActual"] = pd.to_numeric(
+        detalle["StockDisponibleActual"],
+        errors="coerce",
+    ).fillna(0)
+
+    for columna in [
+        "EsProductoNuevo",
+        "ResuelveSinStock",
+    ]:
+        if columna not in detalle.columns:
+            detalle[columna] = False
+        detalle[columna] = (
+            detalle[columna]
+            .fillna(False)
+            .astype(bool)
         )
 
     if "VolumenUnitarioM3" not in detalle.columns:
@@ -664,6 +695,26 @@ def construir_recepcion_operativa(
                 "FechaAltaEstimada",
                 "min",
             ),
+            StockDisponibleActual=(
+                "StockDisponibleActual",
+                "first",
+            ),
+            EsProductoNuevo=(
+                "EsProductoNuevo",
+                "max",
+            ),
+            ResuelveSinStock=(
+                "ResuelveSinStock",
+                "max",
+            ),
+            PrioridadGuardado=(
+                "PrioridadGuardado",
+                "first",
+            ),
+            MotivoPrioridadGuardado=(
+                "MotivoPrioridadGuardado",
+                "first",
+            ),
         )
     )
 
@@ -692,30 +743,65 @@ def construir_recepcion_operativa(
         "VolumenTotalM3"
     ].round(3)
 
-    return resumen[columnas_salida].sort_values(
-        [
-            "DiasEnRecepcion",
-            "VolumenTotalM3",
-            "Unidades",
-        ],
-        ascending=[
-            False,
-            False,
-            False,
-        ],
-        na_position="last",
-    ).reset_index(drop=True)
+    orden_prioridad_guardado = {
+        "🔴 P1 - Urgente": 0,
+        "🟣 P2 - Producto nuevo": 1,
+        "🟠 P3 - Bajo mínimo": 2,
+        "🟡 P4 - Reposición": 3,
+        "⚪ P5 - Normal": 4,
+    }
+    resumen["_OrdenGuardado"] = (
+        resumen["PrioridadGuardado"]
+        .map(orden_prioridad_guardado)
+        .fillna(5)
+    )
+
+    return (
+        resumen.sort_values(
+            [
+                "_OrdenGuardado",
+                "DiasEnRecepcion",
+                "VolumenTotalM3",
+                "Unidades",
+            ],
+            ascending=[
+                True,
+                False,
+                False,
+                False,
+            ],
+            na_position="last",
+        )
+        .drop(columns="_OrdenGuardado")
+        [columnas_salida]
+        .reset_index(drop=True)
+    )
 
 
 def asociar_oc_probable_recepcion(
     recepciones: pd.DataFrame,
     tabla_oc: pd.DataFrame,
 ) -> pd.DataFrame:
+    """
+    Asocia el stock actualmente ubicado en Recepción con las OC pendientes.
+
+    DIGIP no informa la OC dentro de Stock Recepción, por lo que la relación
+    se reconstruye usando ArticuloCodigo contra el detalle de Pendientes OC.
+
+    Reglas:
+    - Si un SKU aparece en una sola OC pendiente, la asociación es directa.
+    - Si aparece en varias OC, se usa primero cercanía de fecha cuando existe.
+    - Si no hay fecha suficiente, se usa la cantidad pendiente como apoyo.
+    - Si sigue existiendo ambigüedad, se muestran todas las OC candidatas
+      en vez de perder el dato.
+    """
     salida = recepciones.copy()
 
     salida["OCProbable"] = ""
+    salida["OCsCandidatas"] = ""
     salida["FechaReferenciaOC"] = pd.NaT
     salida["DiferenciaDiasOC"] = pd.NA
+    salida["CantidadPendienteOC"] = 0.0
     salida["ConfianzaOC"] = "Sin coincidencia"
 
     if (
@@ -728,30 +814,15 @@ def asociar_oc_probable_recepcion(
 
     oc = tabla_oc.copy()
 
-    fecha_columna = next(
-        (
-            columna
-            for columna in [
-                "FechaConfirmadaIngreso",
-                "FechaOperativaIngreso",
-                "FechaIngresoEstimada",
-                "FechaPuertoBuenosAires",
-            ]
-            if columna in oc.columns
-        ),
-        None,
-    )
-
-    if fecha_columna is None:
-        return salida
-
     oc["ArticuloCodigo"] = (
         oc["ArticuloCodigo"]
         .fillna("")
         .astype(str)
         .str.strip()
         .str.upper()
+        .str.replace(r"\.0$", "", regex=True)
     )
+
     oc["OrdenCompra"] = (
         oc.get(
             "OrdenCompra",
@@ -760,28 +831,76 @@ def asociar_oc_probable_recepcion(
         .fillna("")
         .astype(str)
         .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
     )
-    oc["FechaReferenciaOC"] = pd.to_datetime(
-        oc[fecha_columna],
+
+    oc["CantidadPendiente"] = pd.to_numeric(
+        oc.get(
+            "CantidadPendiente",
+            pd.Series(0, index=oc.index),
+        ),
         errors="coerce",
-    )
+    ).fillna(0)
+
+    # Fecha de mayor valor operativo disponible.
+    fecha_columnas = [
+        columna
+        for columna in [
+            "FechaConfirmadaIngreso",
+            "FechaOperativaIngreso",
+            "FechaIngresoEstimada",
+            "FechaPuertoBuenosAires",
+        ]
+        if columna in oc.columns
+    ]
+
+    if fecha_columnas:
+        oc["FechaReferenciaOC"] = pd.NaT
+        for columna in fecha_columnas:
+            fecha = pd.to_datetime(
+                oc[columna],
+                errors="coerce",
+            )
+            oc["FechaReferenciaOC"] = (
+                oc["FechaReferenciaOC"]
+                .combine_first(fecha)
+            )
+    else:
+        oc["FechaReferenciaOC"] = pd.NaT
 
     oc = oc.loc[
         oc["ArticuloCodigo"].ne("")
         & oc["OrdenCompra"].ne("")
-        & oc["FechaReferenciaOC"].notna()
+        & oc["CantidadPendiente"].gt(0)
     ].copy()
 
     if oc.empty:
         return salida
 
-    candidatos_por_codigo = {
-        codigo: grupo[
+    # Una fila por OC + SKU.
+    oc = (
+        oc.groupby(
             [
+                "ArticuloCodigo",
                 "OrdenCompra",
+            ],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            CantidadPendienteOC=(
+                "CantidadPendiente",
+                "sum",
+            ),
+            FechaReferenciaOC=(
                 "FechaReferenciaOC",
-            ]
-        ].drop_duplicates()
+                "min",
+            ),
+        )
+    )
+
+    candidatos_por_codigo = {
+        codigo: grupo.copy()
         for codigo, grupo in oc.groupby(
             "ArticuloCodigo"
         )
@@ -789,12 +908,11 @@ def asociar_oc_probable_recepcion(
 
     for indice, fila in salida.iterrows():
         codigo = str(
-            fila["ArticuloCodigo"]
+            fila.get("ArticuloCodigo", "")
         ).strip().upper()
-        fecha_alta = pd.to_datetime(
-            fila["FechaAltaEstimada"],
-            errors="coerce",
-        )
+
+        if codigo.endswith(".0"):
+            codigo = codigo[:-2]
 
         candidatos = candidatos_por_codigo.get(
             codigo
@@ -803,62 +921,213 @@ def asociar_oc_probable_recepcion(
         if (
             candidatos is None
             or candidatos.empty
-            or pd.isna(fecha_alta)
         ):
             continue
 
         candidatos = candidatos.copy()
-        candidatos["DiferenciaDias"] = (
-            candidatos["FechaReferenciaOC"]
-            - fecha_alta
-        ).abs().dt.days
 
-        candidato = candidatos.sort_values(
-            [
-                "DiferenciaDias",
-                "FechaReferenciaOC",
-            ]
-        ).iloc[0]
-
-        diferencia = int(
-            candidato["DiferenciaDias"]
+        lista_oc = sorted(
+            candidatos["OrdenCompra"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
         )
+        salida.at[
+            indice,
+            "OCsCandidatas",
+        ] = " | ".join(lista_oc)
 
-        if diferencia > 30:
+        # Caso ideal: el SKU pertenece a una sola OC pendiente.
+        if len(candidatos) == 1:
+            candidato = candidatos.iloc[0]
+
+            salida.at[
+                indice,
+                "OCProbable",
+            ] = candidato["OrdenCompra"]
+            salida.at[
+                indice,
+                "FechaReferenciaOC",
+            ] = candidato["FechaReferenciaOC"]
+            salida.at[
+                indice,
+                "CantidadPendienteOC",
+            ] = float(
+                candidato["CantidadPendienteOC"]
+            )
+            salida.at[
+                indice,
+                "ConfianzaOC",
+            ] = "Alta - SKU único en OC"
+
+            fecha_alta = pd.to_datetime(
+                fila.get("FechaAltaEstimada"),
+                errors="coerce",
+            )
+            fecha_oc = pd.to_datetime(
+                candidato["FechaReferenciaOC"],
+                errors="coerce",
+            )
+
+            if (
+                pd.notna(fecha_alta)
+                and pd.notna(fecha_oc)
+            ):
+                salida.at[
+                    indice,
+                    "DiferenciaDiasOC",
+                ] = int(
+                    abs(
+                        (
+                            fecha_oc.normalize()
+                            - fecha_alta.normalize()
+                        ).days
+                    )
+                )
+
             continue
 
-        misma_distancia = int(
-            candidatos[
-                "DiferenciaDias"
-            ].eq(diferencia).sum()
+        # Más de una OC para el mismo SKU:
+        # intentamos desambiguar por fecha y cantidad.
+        fecha_alta = pd.to_datetime(
+            fila.get("FechaAltaEstimada"),
+            errors="coerce",
+        )
+        unidades_recepcion = float(
+            pd.to_numeric(
+                fila.get("Unidades", 0),
+                errors="coerce",
+            )
+            or 0
         )
 
-        if diferencia <= 2 and misma_distancia == 1:
-            confianza = "Alta"
-        elif diferencia <= 7:
-            confianza = "Media"
-        else:
-            confianza = "Baja"
+        candidatos["DiferenciaCantidad"] = (
+            candidatos["CantidadPendienteOC"]
+            - unidades_recepcion
+        ).abs()
 
-        salida.at[
-            indice,
-            "OCProbable",
-        ] = candidato["OrdenCompra"]
-        salida.at[
-            indice,
-            "FechaReferenciaOC",
-        ] = candidato["FechaReferenciaOC"]
-        salida.at[
-            indice,
-            "DiferenciaDiasOC",
-        ] = diferencia
-        salida.at[
-            indice,
-            "ConfianzaOC",
-        ] = confianza
+        if pd.notna(fecha_alta):
+            candidatos["DiferenciaDias"] = (
+                pd.to_datetime(
+                    candidatos["FechaReferenciaOC"],
+                    errors="coerce",
+                )
+                - fecha_alta
+            ).abs().dt.days
+        else:
+            candidatos["DiferenciaDias"] = pd.NA
+
+        con_fecha = candidatos.loc[
+            candidatos["DiferenciaDias"].notna()
+        ].copy()
+
+        if not con_fecha.empty:
+            mejor_fecha = con_fecha.sort_values(
+                [
+                    "DiferenciaDias",
+                    "DiferenciaCantidad",
+                    "OrdenCompra",
+                ]
+            ).iloc[0]
+
+            misma_distancia = int(
+                con_fecha[
+                    "DiferenciaDias"
+                ].eq(
+                    mejor_fecha[
+                        "DiferenciaDias"
+                    ]
+                ).sum()
+            )
+
+            if (
+                int(mejor_fecha["DiferenciaDias"]) <= 7
+                and misma_distancia == 1
+            ):
+                candidato = mejor_fecha
+                confianza = (
+                    "Alta - código y fecha"
+                    if int(
+                        mejor_fecha[
+                            "DiferenciaDias"
+                        ]
+                    ) <= 2
+                    else "Media - código y fecha"
+                )
+            else:
+                candidato = None
+                confianza = ""
+        else:
+            candidato = None
+            confianza = ""
+
+        # Sin una fecha concluyente, usamos cantidad pendiente.
+        if candidato is None:
+            ordenados_cantidad = candidatos.sort_values(
+                [
+                    "DiferenciaCantidad",
+                    "OrdenCompra",
+                ]
+            )
+
+            mejor_cantidad = ordenados_cantidad.iloc[0]
+            misma_diferencia = int(
+                candidatos[
+                    "DiferenciaCantidad"
+                ].eq(
+                    mejor_cantidad[
+                        "DiferenciaCantidad"
+                    ]
+                ).sum()
+            )
+
+            if misma_diferencia == 1:
+                candidato = mejor_cantidad
+                confianza = "Media - código y cantidad"
+
+        if candidato is not None:
+            salida.at[
+                indice,
+                "OCProbable",
+            ] = candidato["OrdenCompra"]
+            salida.at[
+                indice,
+                "FechaReferenciaOC",
+            ] = candidato["FechaReferenciaOC"]
+            salida.at[
+                indice,
+                "CantidadPendienteOC",
+            ] = float(
+                candidato["CantidadPendienteOC"]
+            )
+
+            diferencia_dias = candidato.get(
+                "DiferenciaDias",
+                pd.NA,
+            )
+            if pd.notna(diferencia_dias):
+                salida.at[
+                    indice,
+                    "DiferenciaDiasOC",
+                ] = int(diferencia_dias)
+
+            salida.at[
+                indice,
+                "ConfianzaOC",
+            ] = confianza
+        else:
+            # No inventamos una OC si el mismo SKU está pendiente en varias.
+            salida.at[
+                indice,
+                "OCProbable",
+            ] = "MÚLTIPLES"
+            salida.at[
+                indice,
+                "ConfianzaOC",
+            ] = "Revisar - varias OC"
 
     return salida
-
 
 
 
@@ -949,6 +1218,8 @@ def render(contexto: dict) -> None:
             "recepcion_aplicado_ordenes": [],
             "recepcion_aplicado_familias": [],
             "recepcion_aplicado_prioridades": [],
+            "recepcion_aplicado_estado_confirmacion": "Todas",
+            "recepcion_aplicado_alertas": [],
             "recepcion_aplicado_sin_puerto": False,
             "recepcion_aplicado_piezas": False,
             "recepcion_aplicado_operarios": 3,
@@ -963,6 +1234,8 @@ def render(contexto: dict) -> None:
             "ordenes": "recepcion_borrador_ordenes",
             "familias": "recepcion_borrador_familias",
             "prioridades": "recepcion_borrador_prioridades",
+            "estado_confirmacion": "recepcion_borrador_estado_confirmacion",
+            "alertas": "recepcion_borrador_alertas",
             "sin_puerto": "recepcion_borrador_sin_puerto",
             "piezas": "recepcion_borrador_piezas",
             "operarios": "recepcion_borrador_operarios",
@@ -984,6 +1257,19 @@ def render(contexto: dict) -> None:
             st.session_state[
                 claves_borrador_recepcion["prioridades"]
             ] = st.session_state["recepcion_aplicado_prioridades"]
+        if claves_borrador_recepcion["estado_confirmacion"] not in st.session_state:
+            st.session_state[
+                claves_borrador_recepcion["estado_confirmacion"]
+            ] = st.session_state[
+                "recepcion_aplicado_estado_confirmacion"
+            ]
+        if claves_borrador_recepcion["alertas"] not in st.session_state:
+            st.session_state[
+                claves_borrador_recepcion["alertas"]
+            ] = st.session_state[
+                "recepcion_aplicado_alertas"
+            ]
+
         if claves_borrador_recepcion["sin_puerto"] not in st.session_state:
             st.session_state[
                 claves_borrador_recepcion["sin_puerto"]
@@ -1016,6 +1302,16 @@ def render(contexto: dict) -> None:
             st.session_state["recepcion_aplicado_prioridades"] = list(
                 st.session_state[
                     claves_borrador_recepcion["prioridades"]
+                ]
+            )
+            st.session_state["recepcion_aplicado_estado_confirmacion"] = str(
+                st.session_state[
+                    claves_borrador_recepcion["estado_confirmacion"]
+                ]
+            )
+            st.session_state["recepcion_aplicado_alertas"] = list(
+                st.session_state[
+                    claves_borrador_recepcion["alertas"]
                 ]
             )
             st.session_state["recepcion_aplicado_sin_puerto"] = bool(
@@ -1051,6 +1347,12 @@ def render(contexto: dict) -> None:
             ] = []
             st.session_state[
                 claves_borrador_recepcion["prioridades"]
+            ] = []
+            st.session_state[
+                claves_borrador_recepcion["estado_confirmacion"]
+            ] = "Todas"
+            st.session_state[
+                claves_borrador_recepcion["alertas"]
             ] = []
             st.session_state[
                 claves_borrador_recepcion["sin_puerto"]
@@ -1107,8 +1409,23 @@ def render(contexto: dict) -> None:
                         placeholder="Todas las familias",
                     )
 
-                f4, f5, f6, f7 = st.columns(
-                    [1.1, 1.1, 1.1, 1],
+                alertas_disponibles = [
+                    alerta
+                    for alerta in [
+                        "🔴 Resuelve sin stock",
+                        "🆕 Producto nuevo",
+                        "🟠 Impacto crítico",
+                        "🟡 Impacto alto",
+                        "⚪ Normal",
+                    ]
+                    if alerta in tabla_pendientes_oc.get(
+                        "AlertaIngreso",
+                        pd.Series(dtype=str),
+                    ).astype(str).unique()
+                ]
+
+                f4, f5, f6 = st.columns(
+                    [1.1, 1.1, 1.35],
                     vertical_alignment="bottom",
                 )
 
@@ -1121,12 +1438,36 @@ def render(contexto: dict) -> None:
                     )
 
                 with f5:
+                    st.selectbox(
+                        "Confirmación",
+                        options=[
+                            "Todas",
+                            "Confirmadas",
+                            "Sin confirmar",
+                        ],
+                        key=claves_borrador_recepcion["estado_confirmacion"],
+                    )
+
+                with f6:
+                    st.multiselect(
+                        "Alertas de ingreso",
+                        options=alertas_disponibles,
+                        key=claves_borrador_recepcion["alertas"],
+                        placeholder="Todas las alertas",
+                    )
+
+                f7, f8, f9 = st.columns(
+                    [1.15, 1.15, 1],
+                    vertical_alignment="bottom",
+                )
+
+                with f7:
                     st.toggle(
                         "Mostrar líneas sin fecha de puerto",
                         key=claves_borrador_recepcion["sin_puerto"],
                     )
 
-                with f6:
+                with f8:
                     st.toggle(
                         "Ver piezas y repuestos",
                         key=claves_borrador_recepcion["piezas"],
@@ -1136,7 +1477,7 @@ def render(contexto: dict) -> None:
                         ),
                     )
 
-                with f7:
+                with f9:
                     st.selectbox(
                         "Operarios por jornada",
                         options=[3, 4],
@@ -1175,6 +1516,12 @@ def render(contexto: dict) -> None:
         ]
         filtro_prioridades_general = st.session_state[
             "recepcion_aplicado_prioridades"
+        ]
+        filtro_estado_confirmacion = st.session_state[
+            "recepcion_aplicado_estado_confirmacion"
+        ]
+        filtro_alertas_ingreso = st.session_state[
+            "recepcion_aplicado_alertas"
         ]
         mostrar_sin_puerto = st.session_state[
             "recepcion_aplicado_sin_puerto"
@@ -1223,6 +1570,32 @@ def render(contexto: dict) -> None:
             ].copy()
 
         if (
+            filtro_estado_confirmacion == "Confirmadas"
+            and not vista_base_oc.empty
+        ):
+            vista_base_oc = vista_base_oc.loc[
+                vista_base_oc[
+                    "FechaConfirmadaIngreso"
+                ].notna()
+            ].copy()
+        elif (
+            filtro_estado_confirmacion == "Sin confirmar"
+            and not vista_base_oc.empty
+        ):
+            vista_base_oc = vista_base_oc.loc[
+                vista_base_oc[
+                    "FechaConfirmadaIngreso"
+                ].isna()
+            ].copy()
+
+        if filtro_alertas_ingreso and not vista_base_oc.empty:
+            vista_base_oc = vista_base_oc.loc[
+                vista_base_oc[
+                    "AlertaIngreso"
+                ].isin(filtro_alertas_ingreso)
+            ].copy()
+
+        if (
             isinstance(rango_fechas_oc, (list, tuple))
             and len(rango_fechas_oc) == 2
             and not vista_base_oc.empty
@@ -1260,6 +1633,32 @@ def render(contexto: dict) -> None:
         sin_fecha_puerto = int(tabla_pendientes_oc["FechaPuertoBuenosAires"].isna().sum()) if not tabla_pendientes_oc.empty else 0
         atrasadas = int(vista_base_oc["EstadoIngreso"].eq("Atrasado").sum()) if not vista_base_oc.empty else 0
         prioritarias = int(vista_base_oc["SemaforoIngreso"].isin(["Sin stock", "Crítico"]).sum()) if not vista_base_oc.empty else 0
+        oc_confirmadas_por_recibir = int(
+            tabla_pendientes_oc.loc[
+                tabla_pendientes_oc[
+                    "FechaConfirmadaIngreso"
+                ].notna(),
+                "OrdenCompra",
+            ].nunique()
+        ) if not tabla_pendientes_oc.empty else 0
+        productos_nuevos_oc = int(
+            vista_base_oc.loc[
+                vista_base_oc.get(
+                    "EsProductoNuevo",
+                    pd.Series(False, index=vista_base_oc.index),
+                ).fillna(False),
+                "ArticuloCodigo",
+            ].nunique()
+        ) if not vista_base_oc.empty else 0
+        resuelve_sin_stock_oc = int(
+            vista_base_oc.loc[
+                vista_base_oc.get(
+                    "ResuelveSinStock",
+                    pd.Series(False, index=vista_base_oc.index),
+                ).fillna(False),
+                "ArticuloCodigo",
+            ].nunique()
+        ) if not vista_base_oc.empty else 0
         stock_disponible_total = float(vista_base_oc["StockDisponibleActual"].sum()) if not vista_base_oc.empty else 0
         impacto_global = unidades_oc / stock_disponible_total * 100 if stock_disponible_total > 0 else 0
 
@@ -1486,6 +1885,12 @@ def render(contexto: dict) -> None:
             )
 
         tarjetas_recepcion = [
+            ("✅ OC confirmadas por recibir", formato_entero(oc_confirmadas_por_recibir),
+             "Confirmaciones guardadas y todavía pendientes"),
+            ("🆕 Productos nuevos", formato_entero(productos_nuevos_oc),
+             "SKU sin registro en Maestro Artículo"),
+            ("🔴 Resuelven sin stock", formato_entero(resuelve_sin_stock_oc),
+             "SKU cuyo ingreso recupera disponibilidad"),
             ("📥 OC pendientes", formato_entero(oc_pendientes),
              f"{formato_entero(sku_oc)} SKU · {formato_entero(atrasadas)} líneas atrasadas"),
             ("📦 Unidades pendientes", formato_entero(unidades_oc),
@@ -1527,6 +1932,86 @@ def render(contexto: dict) -> None:
             )
         html_kpis += '</div>'
         st.markdown(html_kpis, unsafe_allow_html=True)
+
+        confirmadas_por_recibir = tabla_pendientes_oc.loc[
+            tabla_pendientes_oc[
+                "FechaConfirmadaIngreso"
+            ].notna()
+        ].copy()
+
+        st.markdown("#### ✅ OC confirmadas por recibir")
+        if confirmadas_por_recibir.empty:
+            st.info(
+                "No hay OC confirmadas pendientes de ingreso."
+            )
+        else:
+            resumen_confirmadas = (
+                confirmadas_por_recibir.groupby(
+                    [
+                        "OrdenCompra",
+                        "FechaConfirmadaIngreso",
+                    ],
+                    as_index=False,
+                    dropna=False,
+                )
+                .agg(
+                    SKU=("ArticuloCodigo", "nunique"),
+                    Unidades=("CantidadPendiente", "sum"),
+                    VolumenM3=("VolumenTotalM3", "sum"),
+                    ProductosNuevos=(
+                        "EsProductoNuevo",
+                        lambda serie: int(
+                            serie.fillna(False).sum()
+                        ),
+                    ),
+                    ResuelvenSinStock=(
+                        "ResuelveSinStock",
+                        lambda serie: int(
+                            serie.fillna(False).sum()
+                        ),
+                    ),
+                )
+                .sort_values(
+                    [
+                        "FechaConfirmadaIngreso",
+                        "OrdenCompra",
+                    ]
+                )
+            )
+
+            st.dataframe(
+                dataframe_para_streamlit(
+                    resumen_confirmadas
+                ),
+                hide_index=True,
+                width="stretch",
+                height=min(
+                    280,
+                    80 + len(resumen_confirmadas) * 34,
+                ),
+                column_config={
+                    "FechaConfirmadaIngreso":
+                        st.column_config.DateColumn(
+                            "Fecha confirmada",
+                            format="DD/MM/YYYY",
+                        ),
+                    "VolumenM3":
+                        st.column_config.NumberColumn(
+                            "Volumen m³",
+                            format="%.3f",
+                        ),
+                },
+            )
+
+            st.download_button(
+                "⬇️ Descargar OC confirmadas",
+                data=dataframe_a_csv(
+                    resumen_confirmadas
+                ),
+                file_name="OC_Confirmadas_Por_Recibir.csv",
+                mime="text/csv",
+                key="descargar_oc_confirmadas_recibir",
+            )
 
         with st.expander("📅 Confirmar fecha exacta de ingreso", expanded=False):
             st.caption(
@@ -2171,8 +2656,39 @@ def render(contexto: dict) -> None:
             if not recepcion_operativa.empty
             else 0
         )
+        guardados_prioridad_1 = int(
+            recepcion_operativa.loc[
+                recepcion_operativa[
+                    "PrioridadGuardado"
+                ].eq("🔴 P1 - Urgente"),
+                "ArticuloCodigo",
+            ].nunique()
+        ) if not recepcion_operativa.empty else 0
+
+        guardados_productos_nuevos = int(
+            recepcion_operativa.loc[
+                recepcion_operativa[
+                    "EsProductoNuevo"
+                ].fillna(False),
+                "ArticuloCodigo",
+            ].nunique()
+        ) if not recepcion_operativa.empty else 0
 
         kpis_recepcion_abierta = [
+            (
+                "🔴 Guardado urgente",
+                formato_entero(
+                    guardados_prioridad_1
+                ),
+                "SKU que resuelven falta de stock",
+            ),
+            (
+                "🆕 Nuevos a guardar",
+                formato_entero(
+                    guardados_productos_nuevos
+                ),
+                "SKU sin Maestro Artículo",
+            ),
             (
                 "📦 Unidades en Recepción",
                 formato_entero(
@@ -2535,9 +3051,9 @@ def render(contexto: dict) -> None:
                 "una referencia directa del WMS."
             )
 
-            filtro_1, filtro_2, filtro_3 = (
+            filtro_1, filtro_2, filtro_3, filtro_4 = (
                 st.columns(
-                    [2, 1, 1],
+                    [2, 1, 1, 1.25],
                     vertical_alignment="bottom",
                 )
             )
@@ -2578,9 +3094,11 @@ def render(contexto: dict) -> None:
                 confianza_rec = [
                     confianza
                     for confianza in [
-                        "Alta",
-                        "Media",
-                        "Baja",
+                        "Alta - SKU único en OC",
+                        "Alta - código y fecha",
+                        "Media - código y fecha",
+                        "Media - código y cantidad",
+                        "Revisar - varias OC",
                         "Sin coincidencia",
                     ]
                     if confianza
@@ -2597,6 +3115,27 @@ def render(contexto: dict) -> None:
                             "confianza_oc_recepcion"
                         ),
                     )
+                )
+
+            with filtro_4:
+                prioridades_guardado_rec = [
+                    prioridad
+                    for prioridad in [
+                        "🔴 P1 - Urgente",
+                        "🟣 P2 - Producto nuevo",
+                        "🟠 P3 - Bajo mínimo",
+                        "🟡 P4 - Reposición",
+                        "⚪ P5 - Normal",
+                    ]
+                    if prioridad in recepcion_operativa.get(
+                        "PrioridadGuardado",
+                        pd.Series(dtype=str),
+                    ).astype(str).unique()
+                ]
+                filtro_prioridad_guardado = st.multiselect(
+                    "Prioridad de guardado",
+                    prioridades_guardado_rec,
+                    key="prioridad_guardado_recepcion",
                 )
 
             vista_rec = aplicar_busqueda(
@@ -2619,6 +3158,15 @@ def render(contexto: dict) -> None:
                         "ConfianzaOC"
                     ].isin(
                         filtro_confianza_rec
+                    )
+                ].copy()
+
+            if filtro_prioridad_guardado:
+                vista_rec = vista_rec.loc[
+                    vista_rec[
+                        "PrioridadGuardado"
+                    ].isin(
+                        filtro_prioridad_guardado
                     )
                 ].copy()
 
@@ -2648,6 +3196,11 @@ def render(contexto: dict) -> None:
             )
 
             columnas_vista_rec = [
+                "PrioridadGuardado",
+                "MotivoPrioridadGuardado",
+                "EsProductoNuevo",
+                "ResuelveSinStock",
+                "StockDisponibleActual",
                 "EstadoAntiguedad",
                 "DiasEnRecepcion",
                 "Ubicacion",
@@ -2662,6 +3215,8 @@ def render(contexto: dict) -> None:
                 "FechaVencimiento",
                 "Lote",
                 "OCProbable",
+                "OCsCandidatas",
+                "CantidadPendienteOC",
                 "FechaReferenciaOC",
                 "DiferenciaDiasOC",
                 "ConfianzaOC",
@@ -2732,7 +3287,17 @@ def render(contexto: dict) -> None:
                         ),
                     "OCProbable":
                         st.column_config.TextColumn(
-                            "OC probable",
+                            "OC asociada",
+                        ),
+                    "OCsCandidatas":
+                        st.column_config.TextColumn(
+                            "OC candidatas",
+                            width="medium",
+                        ),
+                    "CantidadPendienteOC":
+                        st.column_config.NumberColumn(
+                            "Pendiente OC",
+                            format="%.0f",
                         ),
                     "FechaReferenciaOC":
                         st.column_config.DateColumn(

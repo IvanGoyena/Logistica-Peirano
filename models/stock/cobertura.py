@@ -670,10 +670,23 @@ def preparar_disponible_articulo(tabla_disponible: pd.DataFrame) -> pd.DataFrame
 def preparar_pendiente_erp_articulo(
     tabla_detalle_pendientes: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Resume el saldo pendiente real ERP por artículo."""
-    columnas = ["ArticuloCodigo", "PendienteERP"]
+    """
+    Resume el saldo pendiente real ERP por artículo.
 
-    if tabla_detalle_pendientes is None or tabla_detalle_pendientes.empty:
+    Es importante que esta fuente pueda aportar artículos que NO existen
+    en Stock Disponible DIGIP. Por eso devuelve una tabla independiente
+    que luego se incorpora al universo mediante outer merge.
+    """
+    columnas = [
+        "ArticuloCodigo",
+        "PendienteERP",
+        "DescripcionPendienteERP",
+    ]
+
+    if (
+        tabla_detalle_pendientes is None
+        or tabla_detalle_pendientes.empty
+    ):
         return pd.DataFrame(columns=columnas)
 
     origen = tabla_detalle_pendientes.copy()
@@ -681,43 +694,103 @@ def preparar_pendiente_erp_articulo(
     codigo_col = _buscar_columna(
         origen,
         [
-            "ArticuloCodigo", "CodigoArticulo", "Codigo Articulo",
-            "Código Artículo", "cod_art", "Codigo", "Artículo",
+            "ArticuloCodigo",
+            "CodigoArticulo",
+            "Codigo Articulo",
+            "Código Artículo",
+            "cod_art",
+            "Codigo",
+            "Artículo",
         ],
     )
     if codigo_col is None:
         return pd.DataFrame(columns=columnas)
 
+    # En distintos reportes ERP el faltante puede venir como Pendiente,
+    # CantidadPendiente o FaltaLinea.
     pendiente_col = _buscar_columna(
         origen,
-        ["CantidadPendiente", "Pendiente", "can_pen"],
+        [
+            "CantidadPendiente",
+            "Pendiente",
+            "can_pen",
+            "FaltaLinea",
+            "Falta Linea",
+            "CantidadFaltante",
+            "Faltante",
+            "Falta",
+        ],
     )
     original_col = _buscar_columna(
         origen,
-        ["can_art", "CantidadArticulo", "CantidadOriginal", "Cantidad", "Unidades"],
+        [
+            "can_art",
+            "CantidadArticulo",
+            "CantidadOriginal",
+            "Cantidad",
+            "Unidades",
+        ],
     )
     remitida_col = _buscar_columna(
         origen,
-        ["can_rem", "CantidadRemitida", "Remitido", "UnidadesRemitidas"],
+        [
+            "can_rem",
+            "CantidadRemitida",
+            "Remitido",
+            "UnidadesRemitidas",
+        ],
+    )
+    descripcion_col = _buscar_columna(
+        origen,
+        [
+            "ArticuloDescripcion",
+            "DescripcionArticulo",
+            "Descripcion",
+            "Descripción",
+            "descrip",
+        ],
     )
 
     salida = pd.DataFrame(index=origen.index)
-    salida["ArticuloCodigo"] = _codigo(origen[codigo_col])
+    salida["ArticuloCodigo"] = _codigo(
+        origen[codigo_col]
+    )
 
     if pendiente_col is not None:
-        pendiente = _numero(origen[pendiente_col])
+        pendiente = _numero(
+            origen[pendiente_col]
+        )
     elif original_col is not None:
-        original = _numero(origen[original_col])
+        original = _numero(
+            origen[original_col]
+        )
         remitida = (
             _numero(origen[remitida_col])
             if remitida_col is not None
-            else pd.Series(0, index=origen.index, dtype=float)
+            else pd.Series(
+                0,
+                index=origen.index,
+                dtype=float,
+            )
         )
-        pendiente = (original - remitida).clip(lower=0)
+        pendiente = (
+            original - remitida
+        ).clip(lower=0)
     else:
         return pd.DataFrame(columns=columnas)
 
-    salida["PendienteERP"] = pendiente
+    salida["PendienteERP"] = pendiente.clip(
+        lower=0
+    )
+    salida["DescripcionPendienteERP"] = (
+        origen[descripcion_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        if descripcion_col is not None
+        else ""
+    )
+
     salida = salida.loc[
         salida["ArticuloCodigo"].ne("")
         & salida["PendienteERP"].gt(0)
@@ -726,12 +799,39 @@ def preparar_pendiente_erp_articulo(
     if salida.empty:
         return pd.DataFrame(columns=columnas)
 
-    return (
-        salida.groupby("ArticuloCodigo", as_index=False)["PendienteERP"]
+    descripcion = (
+        salida.loc[
+            salida["DescripcionPendienteERP"].ne("")
+        ]
+        .drop_duplicates(
+            "ArticuloCodigo",
+            keep="first",
+        )[
+            [
+                "ArticuloCodigo",
+                "DescripcionPendienteERP",
+            ]
+        ]
+    )
+
+    resumen = (
+        salida.groupby(
+            "ArticuloCodigo",
+            as_index=False,
+        )["PendienteERP"]
         .sum()
+    )
+
+    return (
+        resumen.merge(
+            descripcion,
+            on="ArticuloCodigo",
+            how="left",
+        )
         .sort_values("ArticuloCodigo")
         .reset_index(drop=True)
     )
+
 
 
 def _asignar_categoria_venta(
@@ -821,6 +921,7 @@ def construir_tabla_cobertura(
     tabla_max_min: pd.DataFrame | None = None,
     tabla_stock_detallado: pd.DataFrame | None = None,
     tabla_detalle_pendientes: pd.DataFrame | None = None,
+    tabla_oc_cobertura: pd.DataFrame | None = None,
     meses_analisis: int = 3,
     dias_producto_nuevo: int = 90,
     dias_ingreso_reciente: int = 30,
@@ -1062,10 +1163,30 @@ def construir_tabla_cobertura(
     tabla["DescripcionHistorica"] = (
         tabla.get("DescripcionHistorica", pd.Series("", index=tabla.index)).fillna("").astype(str).str.strip()
     )
-    tabla["ArticuloDescripcion"] = tabla["ArticuloDescripcion"].where(
-        tabla["ArticuloDescripcion"].ne(""), tabla["DescripcionMaestro"]
-    ).where(
-        lambda s: s.ne(""), tabla["DescripcionHistorica"]
+    tabla["DescripcionPendienteERP"] = (
+        tabla.get(
+            "DescripcionPendienteERP",
+            pd.Series("", index=tabla.index),
+        )
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    tabla["ArticuloDescripcion"] = (
+        tabla["ArticuloDescripcion"]
+        .where(
+            tabla["ArticuloDescripcion"].ne(""),
+            tabla["DescripcionMaestro"],
+        )
+        .where(
+            lambda serie: serie.ne(""),
+            tabla["DescripcionHistorica"],
+        )
+        .where(
+            lambda serie: serie.ne(""),
+            tabla["DescripcionPendienteERP"],
+        )
     )
     tabla["Familia"] = tabla["Familia"].where(
         tabla["Familia"].ne(""), tabla.get("FamiliaHistorica", "")
@@ -1087,6 +1208,112 @@ def construir_tabla_cobertura(
     tabla["Sectorizacion"] = tabla["Sectorizacion"].where(
         tabla["Sectorizacion"].ne(""), tabla.get("SectorizacionHistorica", "")
     )
+
+    # ------------------------------------------------------
+    # PRÓXIMO INGRESO POR OC - SOLO PRODUCTOS IMPORTADOS
+    # ------------------------------------------------------
+    for columna in [
+        "OrdenCompraProxima",
+        "FechaPrevistaIngresoOC",
+        "TipoFechaIngresoOC",
+    ]:
+        if columna not in tabla.columns:
+            tabla[columna] = (
+                pd.NaT
+                if columna == "FechaPrevistaIngresoOC"
+                else ""
+            )
+
+    if (
+        tabla_oc_cobertura is not None
+        and not tabla_oc_cobertura.empty
+    ):
+        oc = tabla_oc_cobertura.copy()
+
+        if "ArticuloCodigo" in oc.columns:
+            oc["ArticuloCodigo"] = _codigo(
+                oc["ArticuloCodigo"]
+            )
+
+            columnas_oc = [
+                columna
+                for columna in [
+                    "ArticuloCodigo",
+                    "OrdenCompraProxima",
+                    "FechaPrevistaIngresoOC",
+                    "TipoFechaIngresoOC",
+                ]
+                if columna in oc.columns
+            ]
+
+            oc = (
+                oc[columnas_oc]
+                .loc[
+                    oc["ArticuloCodigo"].ne("")
+                ]
+                .drop_duplicates(
+                    "ArticuloCodigo",
+                    keep="first",
+                )
+            )
+
+            # Evita duplicar columnas si la función se reutiliza.
+            tabla = tabla.drop(
+                columns=[
+                    "OrdenCompraProxima",
+                    "FechaPrevistaIngresoOC",
+                    "TipoFechaIngresoOC",
+                ],
+                errors="ignore",
+            ).merge(
+                oc,
+                on="ArticuloCodigo",
+                how="left",
+                validate="one_to_one",
+            )
+
+    for columna in [
+        "OrdenCompraProxima",
+        "TipoFechaIngresoOC",
+    ]:
+        if columna not in tabla.columns:
+            tabla[columna] = ""
+        tabla[columna] = (
+            tabla[columna]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    if "FechaPrevistaIngresoOC" not in tabla.columns:
+        tabla["FechaPrevistaIngresoOC"] = pd.NaT
+    tabla["FechaPrevistaIngresoOC"] = pd.to_datetime(
+        tabla["FechaPrevistaIngresoOC"],
+        errors="coerce",
+    )
+
+    # La fecha de OC se muestra únicamente para artículos importados.
+    mascara_importado = (
+        tabla["Origen"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.contains("IMPORT", na=False)
+    )
+
+    tabla.loc[
+        ~mascara_importado,
+        "OrdenCompraProxima",
+    ] = ""
+    tabla.loc[
+        ~mascara_importado,
+        "TipoFechaIngresoOC",
+    ] = ""
+    tabla.loc[
+        ~mascara_importado,
+        "FechaPrevistaIngresoOC",
+    ] = pd.NaT
 
     if tabla_max_min is not None and not tabla_max_min.empty:
         mm = tabla_max_min.copy()
@@ -1128,6 +1355,18 @@ def construir_tabla_cobertura(
         tabla["Disponible"] / tabla["VentaPromedioDiaria"],
         np.nan,
     )
+
+    # Demanda vigente del ERP que puede existir aunque DIGIP no tenga
+    # ninguna fila para ese SKU.
+    tabla["VendidoSinStock"] = (
+        tabla["PendienteERP"].gt(0)
+        & tabla["Disponible"].le(0)
+    )
+    tabla["FaltanteStockActual"] = np.where(
+        tabla["VendidoSinStock"],
+        tabla["PendienteERP"],
+        0,
+    )
     for columna_decimal in [
         "VentaPromedioMensual",
         "VentaPromedioDiaria",
@@ -1147,8 +1386,17 @@ def construir_tabla_cobertura(
         axis=1,
     )
 
+    # Un artículo con demanda ERP vigente y Disponible = 0 debe figurar
+    # como Quiebre aunque todavía no tenga histórico de preparación.
     tabla.loc[
-        tabla["EsProductoNuevo"],
+        tabla["VendidoSinStock"],
+        "EstadoCobertura",
+    ] = "Quiebre"
+
+    # Producto nuevo sólo pisa el estado cuando no existe demanda urgente.
+    tabla.loc[
+        tabla["EsProductoNuevo"]
+        & ~tabla["VendidoSinStock"],
         "EstadoCobertura",
     ] = "Nuevo ingreso"
 
@@ -1161,6 +1409,11 @@ def construir_tabla_cobertura(
         "Sin movimiento": "Revisar rotación",
         "Nuevo ingreso": "Monitorear lanzamiento",
     }).fillna("")
+
+    tabla.loc[
+        tabla["VendidoSinStock"],
+        "AccionRecomendada",
+    ] = "URGENTE: vendido ERP sin stock disponible"
 
     tabla = tabla.sort_values(
         ["EstadoCobertura", "CoberturaDias", "ArticuloCodigo"],

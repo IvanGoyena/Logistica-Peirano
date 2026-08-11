@@ -61,6 +61,8 @@ def _preparar_tabla_operativa(
         "UnidadesPeriodo",
         "StockMinimo",
         "StockMaximo",
+        "PendienteERP",
+        "FaltanteStockActual",
     ]
 
     columnas_decimales = [
@@ -161,6 +163,10 @@ def render(contexto: dict) -> None:
         "tabla_detalle_pendientes",
         pd.DataFrame(),
     )
+    tabla_oc_cobertura = contexto.get(
+        "tabla_oc_cobertura",
+        pd.DataFrame(),
+    )
     tabla_stock_detallado = contexto.get(
         "tabla_stock_detallado",
         pd.DataFrame(),
@@ -209,6 +215,7 @@ def render(contexto: dict) -> None:
             tabla_max_min=tabla_max_min,
             tabla_stock_detallado=tabla_stock_detallado,
             tabla_detalle_pendientes=tabla_detalle_pendientes,
+            tabla_oc_cobertura=tabla_oc_cobertura,
             meses_analisis=int(meses_analisis),
             dias_producto_nuevo=90,
             dias_ingreso_reciente=30,
@@ -465,6 +472,15 @@ def render(contexto: dict) -> None:
     quiebres = int(vista["EstadoCobertura"].eq("Quiebre").sum())
     criticos = int(vista["EstadoCobertura"].isin(["Quiebre", "Crítico"]).sum())
     comprometido = float(vista["StockComprometido"].sum())
+    vendidos_sin_stock = int(
+        vista.loc[
+            vista.get(
+                "VendidoSinStock",
+                pd.Series(False, index=vista.index),
+            ).fillna(False),
+            "ArticuloCodigo",
+        ].nunique()
+    )
     con_consumo = vista.loc[vista["VentaPromedioDiaria"].gt(0)].copy()
     cobertura_promedio = float(
         np.average(
@@ -473,13 +489,14 @@ def render(contexto: dict) -> None:
         )
     ) if not con_consumo.empty and con_consumo["VentaPromedioDiaria"].sum() > 0 else np.nan
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
     k1.metric("Artículos analizados", formato_entero(articulos))
     k2.metric("Unidades disponibles", formato_entero(unidades_disponibles))
     k3.metric("En quiebre", formato_entero(quiebres))
-    k4.metric("Quiebre + críticos", formato_entero(criticos))
-    k5.metric("Stock comprometido", formato_entero(comprometido))
-    k6.metric("Cobertura promedio", f"{_formato_decimal(cobertura_promedio, 0)} días")
+    k4.metric("Vendidos sin stock", formato_entero(vendidos_sin_stock))
+    k5.metric("Quiebre + críticos", formato_entero(criticos))
+    k6.metric("Stock comprometido", formato_entero(comprometido))
+    k7.metric("Cobertura promedio", f"{_formato_decimal(cobertura_promedio, 0)} días")
 
     if pd.notna(metadata.get("fecha_hasta")):
         st.caption(
@@ -490,6 +507,84 @@ def render(contexto: dict) -> None:
         )
     else:
         st.warning("El histórico de Métricas no devolvió fechas válidas. Se muestra el disponible, pero no podrá calcularse cobertura.")
+
+    # ------------------------------------------------------
+    # ALERTA URGENTE / DESCARGABLE
+    # ------------------------------------------------------
+    alertas_urgentes = vista.loc[
+        vista["EstadoCobertura"].isin(
+            ["Quiebre", "Crítico"]
+        )
+        | vista.get(
+            "VendidoSinStock",
+            pd.Series(False, index=vista.index),
+        ).fillna(False)
+    ].copy()
+
+    if not alertas_urgentes.empty:
+        columnas_alerta = [
+            columna
+            for columna in [
+                "ArticuloCodigo",
+                "ArticuloDescripcion",
+                "Familia",
+                "Familia2",
+                "Origen",
+                "Disponible",
+                "PendienteERP",
+                "FaltanteStockActual",
+                "EstadoCobertura",
+                "VentaPromedioMensual",
+                "CoberturaDias",
+                "OrdenCompraProxima",
+                "FechaPrevistaIngresoOC",
+                "TipoFechaIngresoOC",
+                "AccionRecomendada",
+            ]
+            if columna in alertas_urgentes.columns
+        ]
+
+        alertas_urgentes = (
+            alertas_urgentes[
+                columnas_alerta
+            ]
+            .sort_values(
+                [
+                    "EstadoCobertura",
+                    "FaltanteStockActual",
+                    "ArticuloCodigo",
+                ],
+                ascending=[
+                    True,
+                    False,
+                    True,
+                ],
+                na_position="last",
+            )
+        )
+
+        alerta_texto, alerta_descarga = st.columns(
+            [4, 1],
+            vertical_alignment="bottom",
+        )
+
+        with alerta_texto:
+            st.warning(
+                f"⚠️ {formato_entero(alertas_urgentes['ArticuloCodigo'].nunique())} "
+                "SKU requieren revisión urgente por quiebre o cobertura crítica."
+            )
+
+        with alerta_descarga:
+            st.download_button(
+                "⬇️ Descargar alertas",
+                data=_csv_analisis_cobertura(
+                    alertas_urgentes
+                ),
+                file_name="alertas_stock_quiebre_critico.csv",
+                mime="text/csv",
+                width="stretch",
+                key="descargar_alertas_stock_urgentes",
+            )
 
     st.divider()
 
@@ -968,6 +1063,12 @@ def render(contexto: dict) -> None:
         "Bloqueados",
         "Transito",
         "PendienteERP",
+        "FaltanteStockActual",
+        "VendidoSinStock",
+        "Origen",
+        "OrdenCompraProxima",
+        "FechaPrevistaIngresoOC",
+        "TipoFechaIngresoOC",
         "StockComprometido",
         "PorcentajeDisponible",
         "UnidadesPeriodo",
@@ -1013,7 +1114,13 @@ def render(contexto: dict) -> None:
             "Bloqueados",
             "Transito",
             "PendienteERP",
-            "StockComprometido",
+            "FaltanteStockActual",
+        "VendidoSinStock",
+        "Origen",
+        "OrdenCompraProxima",
+        "FechaPrevistaIngresoOC",
+        "TipoFechaIngresoOC",
+        "StockComprometido",
             "StockOperativoTotal",
             "PorcentajeDisponible",
             "UnidadesPeriodo",
@@ -1163,6 +1270,34 @@ def render(contexto: dict) -> None:
                 st.column_config.NumberColumn(
                     "Pendiente ERP",
                     format="%.0f",
+                ),
+            "FaltanteStockActual":
+                st.column_config.NumberColumn(
+                    "Faltante actual",
+                    format="%.0f",
+                    help="Unidades vendidas/pendientes ERP sin stock disponible.",
+                ),
+            "VendidoSinStock":
+                st.column_config.CheckboxColumn(
+                    "Vendido sin stock",
+                    disabled=True,
+                ),
+            "Origen":
+                st.column_config.TextColumn(
+                    "Origen",
+                ),
+            "OrdenCompraProxima":
+                st.column_config.TextColumn(
+                    "Próxima OC",
+                ),
+            "FechaPrevistaIngresoOC":
+                st.column_config.DateColumn(
+                    "Fecha ingreso OC",
+                    format="DD/MM/YYYY",
+                ),
+            "TipoFechaIngresoOC":
+                st.column_config.TextColumn(
+                    "Tipo fecha OC",
                 ),
             "StockComprometido":
                 st.column_config.NumberColumn(

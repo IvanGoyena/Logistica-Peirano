@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import csv
 
 import pandas as pd
 import streamlit as st
@@ -37,6 +38,78 @@ from utils.confirmaciones_oc import (
 from models.base_historica_metricas import (
     firma_base_historica_metricas,
 )
+
+
+def _normalizar_reporte_delimitado_en_una_columna(
+    dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Corrige reportes que tienen extensión Excel pero cuyo contenido quedó
+    importado como una sola columna separada por ';'.
+
+    Ejemplo recibido desde Stock Recepción:
+    AreaDescripcion;Ubicacion;...;Cantidad;ContenedorNumero;...
+    """
+    if (
+        dataframe is None
+        or dataframe.empty
+        or len(dataframe.columns) != 1
+    ):
+        return (
+            pd.DataFrame()
+            if dataframe is None
+            else dataframe.copy()
+        )
+
+    encabezado_crudo = str(dataframe.columns[0])
+
+    if ";" not in encabezado_crudo:
+        return dataframe.copy()
+
+    try:
+        encabezados = next(
+            csv.reader(
+                [encabezado_crudo],
+                delimiter=";",
+                quotechar='"',
+            )
+        )
+
+        filas = []
+        for valor in dataframe.iloc[:, 0].fillna("").astype(str):
+            fila = next(
+                csv.reader(
+                    [valor],
+                    delimiter=";",
+                    quotechar='"',
+                )
+            )
+
+            # Si alguna fila viniera incompleta o con columnas extra,
+            # la ajustamos sin romper la carga completa.
+            if len(fila) < len(encabezados):
+                fila = fila + [""] * (
+                    len(encabezados) - len(fila)
+                )
+            elif len(fila) > len(encabezados):
+                fila = fila[:len(encabezados)]
+
+            filas.append(fila)
+
+        resultado = pd.DataFrame(
+            filas,
+            columns=[
+                str(columna).strip()
+                for columna in encabezados
+            ],
+        )
+
+        return resultado
+
+    except Exception:
+        # Si no tiene realmente estructura delimitada, conservamos
+        # el DataFrame original en vez de vaciar la fuente.
+        return dataframe.copy()
 
 
 # ==========================================================
@@ -543,9 +616,11 @@ def construir_contexto_existencia() -> dict:
     )
 
     stock_recepcion_crudo = (
-        stock_recepcion[
-            "df"
-        ].copy()
+        _normalizar_reporte_delimitado_en_una_columna(
+            stock_recepcion[
+                "df"
+            ].copy()
+        )
     )
 
     stock_detallado_crudo = (
@@ -612,6 +687,7 @@ def construir_contexto_existencia() -> dict:
             tabla_articulos,
             tabla_volumetria,
             tabla_max_min,
+            disponible["df"],
         )
     )
 
@@ -1143,6 +1219,10 @@ def construir_contexto_cobertura(
             f"Detalle: {error}"
         )
 
+    tabla_oc_cobertura = (
+        construir_fechas_oc_cobertura()
+    )
+
     return {
         "tabla_disponible":
             preparar_tabla_stock(
@@ -1155,6 +1235,8 @@ def construir_contexto_cobertura(
             detalle_pendientes[
                 "df"
             ].copy(),
+        "tabla_oc_cobertura":
+            tabla_oc_cobertura.copy(),
         "historico_ventas_stock":
             historico,
         "tabla_articulos":
