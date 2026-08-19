@@ -879,6 +879,37 @@ def obtener_carros_criticos(
 ]
     
 
+    # ------------------------------------------------------
+    # UNA FILA POR CARRO / DESPACHO
+    # ------------------------------------------------------
+    # Una preparación puede generar varias tareas y repetir el mismo
+    # carro. En este tablero cada carro debe mostrarse una sola vez.
+    tabla["_CarroKey"] = (
+        tabla["Carro"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"^[^A-Za-z0-9]*", "", regex=True)
+        .str.strip()
+        .str.upper()
+    )
+    tabla["_DespachoKey"] = (
+        tabla["Despacho"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    tabla = (
+        tabla
+        .drop_duplicates(
+            subset=["_DespachoKey", "_CarroKey"],
+            keep="first",
+        )
+        .drop(columns=["_DespachoKey", "_CarroKey"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
     return tabla
 
 
