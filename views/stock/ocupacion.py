@@ -31,9 +31,9 @@ def render(contexto: dict) -> None:
         <div style="display:flex;justify-content:flex-end;margin:0 0 .7rem 0;">
           <div style="border:1px solid #334155;border-radius:10px;padding:.55rem .8rem;">
             <div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:.82rem">
-              <span><b style="color:#3B82F6">●</b> Almacenamiento</span>
+              <span><b style="color:#3B82F6">●</b> Almacenamiento principal</span>
+              <span><b style="color:#65A30D">●</b> Almacenamientos especiales</span>
               <span><b style="color:#8B5CF6">●</b> Picking</span>
-              <span><b style="color:#65A30D">●</b> Estanterías</span>
               <span><b style="color:#F59E0B">●</b> Pisos</span>
               <span><b style="color:#DC2626">●</b> Calidad / No apto</span>
             </div>
@@ -43,56 +43,145 @@ def render(contexto: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # ---------------- ALMACENAMIENTO ----------------
-    st.markdown("### 🏭 ALMACENAMIENTO")
-    st.markdown("<hr style='border-color:#2563EB;margin-top:-.55rem'>", unsafe_allow_html=True)
-    fila_almacen = st.columns(4)
+    # ---------------- ALMACENAMIENTO PRINCIPAL ----------------
+    st.markdown("### 🏭 ALMACENAMIENTO PRINCIPAL")
+    st.markdown(
+        "<hr style='border-color:#2563EB;margin-top:-.55rem'>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Capacidad principal del depósito. "
+        "GENERAL consolida Rack + Piso: ALMACÉN, PASILLO, LOZA y ENTREPISO. "
+        "No incluye Picking, Cajones, Estanterías ni Calidad."
+    )
+
+    fila_almacen = st.columns(3)
     tarjetas_almacen = [
-        ("General", "Global", "#3B82F6", "#DBEAFE", "🏭"),
+        ("General · Rack + Piso", "Global", "#3B82F6", "#DBEAFE", "🏭"),
         ("Almacén Rack", "Almacén", "#3B82F6", "#DBEAFE", "🏗️"),
         ("Pasillo", "Pasillo", "#3B82F6", "#DBEAFE", "🚶"),
-        ("Estanterías", "Estanterías", "#65A30D", "#DCFCE7", "🪜"),
     ]
-    for indice, (titulo, grupo, color, libre, icono) in enumerate(tarjetas_almacen):
+
+    for indice, (
+        titulo,
+        grupo,
+        color,
+        libre,
+        icono,
+    ) in enumerate(tarjetas_almacen):
         with fila_almacen[indice]:
             mostrar_tarjeta_donut(
                 titulo,
-                resumir_ocupacion(tabla_ocupacion, grupo),
+                resumir_ocupacion(
+                    tabla_ocupacion,
+                    grupo,
+                ),
                 key=f"donut_almacen_{indice}",
                 color_ocupado=color,
                 color_libre=libre,
                 icono=icono,
             )
 
+    # ---------------- ALMACENAMIENTOS ESPECIALES ----------------
+    st.markdown("### 🗃️ ALMACENAMIENTOS ESPECIALES")
+    st.markdown(
+        "<hr style='border-color:#65A30D;margin-top:-.55rem'>",
+        unsafe_allow_html=True,
+    )
+
+    fila_especiales = st.columns([1, 1, 1.25])
+
+    with fila_especiales[0]:
+        mostrar_tarjeta_donut(
+            "Cajones",
+            resumir_ocupacion(
+                tabla_ocupacion,
+                "Cajones",
+            ),
+            key="donut_cajones",
+            color_ocupado="#65A30D",
+            color_libre="#DCFCE7",
+            icono="🗃️",
+        )
+
+    with fila_especiales[1]:
+        mostrar_tarjeta_donut(
+            "Estanterías",
+            resumir_ocupacion(
+                tabla_ocupacion,
+                "Estanterías",
+            ),
+            key="donut_estanterias",
+            color_ocupado="#65A30D",
+            color_libre="#DCFCE7",
+            icono="🪜",
+        )
+
+    with fila_especiales[2]:
+        with st.container(border=True):
+            st.markdown(
+                "#### ℹ️ Metodología de almacenamiento especial"
+            )
+            st.markdown(
+                """
+                **Cajones:** área independiente para almacenamiento en módulos de cajones.  
+                **Estanterías:** almacenamiento convencional en estanterías.
+
+                **Metodología:** una ubicación habilitada con stock cuenta como ocupada.  
+                Estos sectores se muestran por separado y **no forman parte del indicador General**.
+                """
+            )
+
     # ---------------- PICKING ----------------
     st.markdown("### 🛒 PICKING")
-    st.markdown("<hr style='border-color:#7C3AED;margin-top:-.55rem'>", unsafe_allow_html=True)
+    st.markdown(
+        "<hr style='border-color:#7C3AED;margin-top:-.55rem'>",
+        unsafe_allow_html=True,
+    )
+
     fila_picking = st.columns([1, 1, 1.25])
+
     with fila_picking[0]:
         mostrar_tarjeta_donut(
             "Picking Rack",
-            resumir_ocupacion(tabla_ocupacion, "Picking Rack"),
+            resumir_ocupacion(
+                tabla_ocupacion,
+                "Picking Rack",
+            ),
             key="donut_picking_rack",
             color_ocupado="#8B5CF6",
             color_libre="#EDE9FE",
             icono="🛒",
         )
+
     with fila_picking[1]:
         mostrar_tarjeta_donut(
-            "Cajones (Pasillo 20)",
-            resumir_ocupacion(tabla_ocupacion, "Cajones"),
-            key="donut_cajones",
+            "Picking Cajones",
+            resumir_ocupacion(
+                tabla_ocupacion,
+                "Picking Cajones",
+            ),
+            key="donut_picking_cajones",
             color_ocupado="#A855F7",
             color_libre="#F3E8FF",
-            icono="🗃️",
+            icono="🗄️",
         )
+
     with fila_picking[2]:
         with st.container(border=True):
-            st.markdown("#### ℹ️ Sobre Picking")
+            st.markdown("#### ℹ️ Metodología de Picking")
             st.markdown(
                 """
-                **Picking Rack:** ubicaciones en racks tradicionales, divididas por áreas operativas.  
-                **Cajones (Pasillo 20):** sistema independiente de almacenamiento en cajones.
+                **Picking Rack:** ubicaciones tradicionales destinadas al consumo operativo diario.  
+
+                **Picking Cajones:** ubicaciones del área PICKING, Pasillo 20 / Tercio Cajones,
+                utilizadas para consumo operativo.
+
+                Ambos se miden por ubicación física: una ubicación habilitada con stock
+                cuenta como ocupada.
+
+                **Importante:** este Picking Cajones es distinto del área **CAJONES**
+                de almacenamiento especial.
                 """
             )
 
@@ -210,12 +299,29 @@ def render(contexto: dict) -> None:
         & tabla_ocupacion["Disponible"]
     ].copy()
     if not picking.empty:
-        mascara_cajones = (
-            picking["Pasillo"].astype("string").str.strip().str.lstrip("0").eq("20")
-            | picking["Tercio"].astype("string").str.upper().str.strip().eq("CAJONES")
+        mascara_picking_cajones = (
+            picking["Pasillo"]
+            .astype("string")
+            .str.strip()
+            .str.lstrip("0")
+            .eq("20")
+            | picking["Tercio"]
+            .astype("string")
+            .str.upper()
+            .str.strip()
+            .eq("CAJONES")
         )
-        picking_rack = picking.loc[~mascara_cajones].copy()
-        picking_rack["AreaAnalisis"] = picking_rack["Area"].astype("string").fillna("").replace("", "SIN ÁREA")
+
+        picking_rack = picking.loc[
+            ~mascara_picking_cajones
+        ].copy()
+
+        picking_rack["AreaAnalisis"] = (
+            picking_rack["Area"]
+            .astype("string")
+            .fillna("")
+            .replace("", "SIN ÁREA")
+        )
         detalle_area = (
             picking_rack.groupby("AreaAnalisis", dropna=False)
             .agg(Capacidad=("ClaveUbicacion", "nunique"), Ocupado=("Ocupada", "sum"))
@@ -229,7 +335,7 @@ def render(contexto: dict) -> None:
 
         col_detalle_1, col_detalle_2 = st.columns([1, 1.35])
         with col_detalle_1:
-            st.markdown("#### 🛒 Picking por área (sin Cajones)")
+            st.markdown("#### 🛒 Picking Rack por área")
             grafico_area = (
                 alt.Chart(detalle_area)
                 .mark_bar(cornerRadiusEnd=5, color="#8B5CF6")
@@ -263,7 +369,8 @@ def render(contexto: dict) -> None:
                 ("Almacén Rack", "Almacén", "Ubicaciones"),
                 ("Pasillo", "Pasillo", "Ubicaciones"),
                 ("Picking Rack", "Picking Rack", "Ubicaciones"),
-                ("Cajones (Pasillo 20)", "Cajones", "Ubicaciones"),
+                ("Picking Cajones", "Picking Cajones", "Ubicaciones"),
+                ("Cajones Almacenamiento", "Cajones", "Ubicaciones"),
                 ("Estanterías", "Estanterías", "Ubicaciones"),
                 ("Aceituna (Loza)", "Aceituna", "Pallets"),
                 ("Entrepiso", "Entrepiso", "Pallets"),
@@ -307,13 +414,13 @@ def render(contexto: dict) -> None:
     st.markdown("### 📍 Ubicaciones vacías de Almacén")
     st.caption(
         "Listado operativo de ubicaciones disponibles para guardado. "
-        "Incluye ubicaciones de Almacén y Pasillo; "
+        "Incluye Almacén, Pasillo, Cajones y Estanterías. "
         "Picking queda excluido de esta tabla y de la descarga."
     )
 
     ubicaciones_vacias = tabla_ocupacion.loc[
         tabla_ocupacion["GrupoOcupacion"].isin(
-            ["Almacén", "Pasillo"]
+            ["Almacén", "Pasillo", "Cajones", "Estanterías"]
         )
         & tabla_ocupacion["Disponible"].fillna(False)
         & ~tabla_ocupacion["Ocupada"].fillna(False)
@@ -472,7 +579,7 @@ def render(contexto: dict) -> None:
                 data=dataframe_a_csv(
                     vista_vacias
                 ),
-                file_name="Ubicaciones_Vacias_Almacen_y_Pasillo.csv",
+                file_name="Ubicaciones_Vacias_Almacenamiento.csv",
                 mime="text/csv",
                 key="descargar_ubicaciones_vacias_almacen",
                 width="stretch",

@@ -163,7 +163,32 @@ def construir_contexto_tareas(
     )
 
     tabla_operativa = obtener_tabla_operativa(tabla_tareas)
-    resumen = obtener_resumen_operativo(tabla_tareas, df_pedidos)
+
+    # ------------------------------------------------------
+    # COMPATIBILIDAD DEL RESUMEN OPERATIVO
+    # ------------------------------------------------------
+    # models.tareas.obtener_resumen_operativo todavía utiliza
+    # la clave histórica "PedidoId". El reporte nuevo de DIGIP
+    # cambió ese encabezado.
+    #
+    # En vez de volver a depender del archivo crudo, usamos la
+    # tabla de pedidos ya normalizada y agregamos la clave de
+    # compatibilidad que espera el KPI.
+    pedidos_resumen = tabla_pedidos.copy()
+
+    if "Pedido" in pedidos_resumen.columns:
+        pedidos_resumen["PedidoId"] = (
+            pedidos_resumen["Pedido"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    resumen = obtener_resumen_operativo(
+        tabla_tareas,
+        pedidos_resumen,
+    )
+
     avance_despachos, despachos_sin_iniciar = obtener_avance_despachos(tabla_tareas)
     carros_criticos = obtener_carros_criticos(tabla_operativa, avance_despachos)
     pendiente_pick = obtener_pendiente_pick(tabla_tareas, tabla_pedidos)
@@ -182,6 +207,41 @@ def construir_contexto_tareas(
         mascara_estado_activo
         & tabla_pedidos["PreparacionID"].isna()
     ].copy()
+
+    # ------------------------------------------------------
+    # NORMALIZAR CLAVE DE PREPARACIÓN ANTES DEL MERGE
+    # ------------------------------------------------------
+    # Informe Tareas puede traer Preparacion como float (ej. 12345.0)
+    # y Pedidos DIGIP la trae como string. Pandas no permite merge
+    # entre float64 y string, por eso normalizamos ambos lados.
+    tabla_tareas = tabla_tareas.copy()
+    tabla_pedidos = tabla_pedidos.copy()
+
+    tabla_tareas["Preparacion"] = (
+        tabla_tareas["Preparacion"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    tabla_pedidos["PreparacionID"] = (
+        tabla_pedidos["PreparacionID"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    tabla_tareas["Preparacion"] = tabla_tareas["Preparacion"].where(
+        tabla_tareas["Preparacion"].notna()
+        & tabla_tareas["Preparacion"].ne(""),
+        pd.NA,
+    )
+
+    tabla_pedidos["PreparacionID"] = tabla_pedidos["PreparacionID"].where(
+        tabla_pedidos["PreparacionID"].notna()
+        & tabla_pedidos["PreparacionID"].ne(""),
+        pd.NA,
+    )
 
     tareas_unidades = tabla_tareas.merge(
         tabla_pedidos[["PreparacionID", "TotalUnidades"]],
@@ -211,7 +271,7 @@ def construir_contexto_tareas(
     preparaciones_activas = tabla_tareas.loc[
         tabla_tareas["Categoria"].isin(["Pendiente", "En Curso"]),
         "Preparacion",
-    ].dropna().unique()
+    ].dropna().astype(str).unique()
 
     columnas_sector = [
         columna

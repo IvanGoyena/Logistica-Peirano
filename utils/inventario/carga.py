@@ -96,6 +96,19 @@ FUENTES = {
         ),
         obligatoria=False,
     ),
+    "wms_preparacion": FuenteInventario(
+        clave="wms_preparacion",
+        titulo="Stock Preparación WMS",
+        carpeta=CARPETA_WMS,
+        candidatos=(
+            "Stock Preparacion",
+            "Stock Preparación",
+            "stock_preparacion",
+            "stock preparacion",
+            "Stock_Preparacion",
+        ),
+        obligatoria=False,
+    ),
     "wms_disponible": FuenteInventario(
         clave="wms_disponible",
         titulo="Disponible DIGIP",

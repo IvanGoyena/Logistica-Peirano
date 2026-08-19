@@ -1,5 +1,7 @@
 import pandas as pd
 
+from models.pedidos import normalizar_pedidos_digip
+
 from models.tareas_modulo.detalle_tareas import (
     construir_tabla_detalle_tareas,
     construir_resumen_pedidos_tareas,
@@ -22,21 +24,90 @@ def construir_tabla_pedidos_tareas(
     # COPIA
     # ==========================================================
 
-    tabla = df_pedidos.copy()
-
-    # ==========================================================
-    # NORMALIZAR PEDIDO
-    # ==========================================================
-
-    tabla["Pedido"] = (
-        tabla["Codigo"]
-        .fillna("")
-        .astype(str)
-        .str.split()
-        .str[1]
-        .str.split("-")
-        .str[0]
+    tabla = normalizar_pedidos_digip(
+        df_pedidos
     )
+
+    # ==========================================================
+    # NOMBRE DE CLIENTE DESDE MAESTRO
+    # ==========================================================
+    # "ClienteUbicacion Descripcion" de DIGIP describe la
+    # ubicación logística, no el nombre comercial.
+    # Tareas usa el mismo criterio que Pedidos:
+    # Codigo_Cliente -> Cliente.
+    maestro_clientes = (
+        df_clientes.copy()
+        if df_clientes is not None
+        else pd.DataFrame()
+    )
+
+    if not maestro_clientes.empty:
+        maestro_clientes.columns = (
+            maestro_clientes.columns
+            .astype(str)
+            .str.strip()
+        )
+
+        if (
+            "Codigo_Cliente" in maestro_clientes.columns
+            and "Cliente" in maestro_clientes.columns
+        ):
+            nombres = maestro_clientes[
+                ["Codigo_Cliente", "Cliente"]
+            ].copy()
+
+            nombres["ClienteCodigo"] = (
+                nombres["Codigo_Cliente"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .str.replace(r"\.0$", "", regex=True)
+            )
+
+            nombres["ClienteDescripcionMaestro"] = (
+                nombres["Cliente"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            nombres = (
+                nombres.loc[nombres["ClienteCodigo"].ne("")]
+                .drop_duplicates(
+                    subset=["ClienteCodigo"],
+                    keep="first",
+                )
+                [["ClienteCodigo", "ClienteDescripcionMaestro"]]
+            )
+
+            tabla["ClienteCodigo"] = (
+                tabla["ClienteCodigo"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .str.replace(r"\.0$", "", regex=True)
+            )
+
+            tabla = tabla.merge(
+                nombres,
+                on="ClienteCodigo",
+                how="left",
+                validate="many_to_one",
+            )
+
+            tabla["ClienteDescripcion"] = (
+                tabla["ClienteDescripcionMaestro"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            tabla = tabla.drop(
+                columns=["ClienteDescripcionMaestro"],
+                errors="ignore",
+            )
 
     # ==========================================================
     # TABLA DETALLE
@@ -52,6 +123,22 @@ def construir_tabla_pedidos_tareas(
         )
     )
 
+    if "Pedido" in tabla_detalle.columns:
+        tabla_detalle = tabla_detalle.copy()
+        tabla_detalle["Pedido"] = (
+            tabla_detalle["Pedido"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(
+                r"\.0$",
+                "",
+                regex=True,
+            )
+            .str.split("-")
+            .str[0]
+        )
+
     # ==========================================================
     # RESUMEN
     # ==========================================================
@@ -59,6 +146,22 @@ def construir_tabla_pedidos_tareas(
     resumen = construir_resumen_pedidos_tareas(
         tabla_detalle
     )
+
+    if not resumen.empty:
+        resumen = resumen.copy()
+        resumen["Pedido"] = (
+            resumen["Pedido"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(
+                r"\.0$",
+                "",
+                regex=True,
+            )
+            .str.split("-")
+            .str[0]
+        )
 
     # ==========================================================
     # MERGE

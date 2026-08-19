@@ -507,13 +507,15 @@ def render_dashboard_despachos(
     else:
         distribucion_transporte["Porcentaje"] = 0.0
 
-    distribucion_transporte["Etiqueta"] = (
-        distribucion_transporte["Pedidos"].astype(str)
-        + " ("
-        + distribucion_transporte["Porcentaje"]
-        .map(lambda valor: f"{valor:.1f}%")
-        + ")"
-    )
+    # Construcción segura de etiqueta: evita operaciones aritméticas
+    # entre StringDtype/Arrow y float en versiones nuevas de pandas.
+    distribucion_transporte["Etiqueta"] = [
+        f"{int(pedidos)} ({float(porcentaje):.1f}%)"
+        for pedidos, porcentaje in zip(
+            distribucion_transporte["Pedidos"].tolist(),
+            distribucion_transporte["Porcentaje"].tolist(),
+        )
+    ]
 
     with grafico_tipo:
         st.markdown("#### Pedidos por tipo de gestión")
@@ -710,28 +712,82 @@ def render_dashboard_despachos(
             "Ocupación estimada %": round(ocupacion, 1),
         })
 
-    resumen_capacidad_dashboard = (
-        base_reparto_dashboard
-        .groupby(
-            "PlanificacionDashboard",
-            dropna=False,
-            sort=False,
+    columnas_resumen_capacidad = [
+        "Planificación",
+        "Pedidos",
+        "Clientes",
+        "Unidades",
+        "Volumen m³",
+        "Camionetas (8 m³)",
+        "Pedidos camión (> 8 m³)",
+        "Camiones (15 m³)",
+        "Nivel",
+        "Ocupación estimada %",
+    ]
+
+    if base_reparto_dashboard.empty:
+        resumen_capacidad_dashboard = pd.DataFrame(
+            columns=columnas_resumen_capacidad
         )
-        .apply(
-            resumir_capacidad_planificacion,
-            include_groups=False,
+    else:
+        filas_capacidad = []
+
+        for planificacion, bloque in (
+            base_reparto_dashboard
+            .groupby(
+                "PlanificacionDashboard",
+                dropna=False,
+                sort=False,
+            )
+        ):
+            resumen = resumir_capacidad_planificacion(
+                bloque
+            ).to_dict()
+
+            resumen["Planificación"] = (
+                str(planificacion).strip()
+                if pd.notna(planificacion)
+                else "SIN PLANIFICACIÓN"
+            )
+
+            filas_capacidad.append(resumen)
+
+        resumen_capacidad_dashboard = pd.DataFrame(
+            filas_capacidad
         )
-        .reset_index()
-        .rename(
-            columns={
-                "Planificaciones": "Planificación",
-            }
+
+        for columna in columnas_resumen_capacidad:
+            if columna not in resumen_capacidad_dashboard.columns:
+                resumen_capacidad_dashboard[columna] = (
+                    0
+                    if columna
+                    in {
+                        "Pedidos",
+                        "Clientes",
+                        "Unidades",
+                        "Volumen m³",
+                        "Camionetas (8 m³)",
+                        "Pedidos camión (> 8 m³)",
+                        "Camiones (15 m³)",
+                        "Ocupación estimada %",
+                    }
+                    else ""
+                )
+
+        resumen_capacidad_dashboard = (
+            resumen_capacidad_dashboard[
+                columnas_resumen_capacidad
+            ]
+            .sort_values(
+                [
+                    "Camiones (15 m³)",
+                    "Camionetas (8 m³)",
+                    "Volumen m³",
+                ],
+                ascending=[False, False, False],
+            )
+            .reset_index(drop=True)
         )
-        .sort_values(
-            ["Camiones (15 m³)", "Camionetas (8 m³)", "Volumen m³"],
-            ascending=[False, False, False],
-        )
-    )
 
     st.dataframe(
         resumen_capacidad_dashboard,

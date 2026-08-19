@@ -122,6 +122,38 @@ def render_modulo_pedidos() -> None:
         df_pendientes_erp,
     )
 
+    # -----------------------------------------------------
+    # AUTORECUPERACIÓN DE CACHE DE PEDIDOS
+    # -----------------------------------------------------
+    # Si cambió el contrato de Pedidos DIGIP / models.pedidos.py,
+    # Streamlit puede conservar una tabla base construida con la
+    # versión anterior. Despachos reconstruye su contexto aparte,
+    # pero Pedidos usa esta cache propia.
+    #
+    # Si la fuente WMS tiene registros pero la tabla transformada
+    # quedó vacía, invalidamos SOLO la cache de tablas base y
+    # reconstruimos con el modelo vigente.
+    if (
+        df_pedidos is not None
+        and not df_pedidos.empty
+        and (
+            tablas_base.get("pedidos") is None
+            or tablas_base["pedidos"].empty
+        )
+    ):
+        construir_tablas_base_cacheadas.clear()
+
+        tablas_base = construir_tablas_base_cacheadas(
+            df_pedidos,
+            df_detalle,
+            df_articulos,
+            df_clientes,
+            df_volumetria,
+            df_transmisiones,
+            df_expresos,
+            df_pendientes_erp,
+        )
+
     tabla = tablas_base["pedidos"].copy()
     tabla_detalle_dashboard = tablas_base["detalle"]
     tabla_transmisiones = tablas_base["transmisiones"]
@@ -250,10 +282,23 @@ def render_modulo_pedidos() -> None:
 
         pedidos_crudo = df_pedidos.copy()
 
-        if "Codigo" in pedidos_crudo.columns:
+        columna_codigo_gestion = next(
+            (
+                columna
+                for columna in [
+                    "Codigo",
+                    "Código pedido",
+                    "Codigo pedido",
+                ]
+                if columna in pedidos_crudo.columns
+            ),
+            None,
+        )
+
+        if columna_codigo_gestion is not None:
 
             pedidos_crudo["PedidoGestion"] = (
-                pedidos_crudo["Codigo"]
+                pedidos_crudo[columna_codigo_gestion]
                 .apply(normalizar_pedido_wms_desde_codigo)
             )
 

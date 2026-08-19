@@ -171,6 +171,10 @@ def render(contexto: dict) -> None:
         "tabla_stock_detallado",
         pd.DataFrame(),
     )
+    tabla_stock_recepcion = contexto.get(
+        "tabla_stock_recepcion",
+        pd.DataFrame(),
+    )
 
     st.subheader("📦 Disponible y Cobertura")
     st.caption(
@@ -214,10 +218,11 @@ def render(contexto: dict) -> None:
             tabla_articulos=tabla_articulos,
             tabla_max_min=tabla_max_min,
             tabla_stock_detallado=tabla_stock_detallado,
+            tabla_stock_recepcion=tabla_stock_recepcion,
             tabla_detalle_pendientes=tabla_detalle_pendientes,
             tabla_oc_cobertura=tabla_oc_cobertura,
             meses_analisis=int(meses_analisis),
-            dias_producto_nuevo=90,
+            dias_producto_nuevo=30,
             dias_ingreso_reciente=30,
         )
 

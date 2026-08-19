@@ -18,6 +18,7 @@ CLAVE_DATOS = "inventario_snapshot_datos"
 CLAVE_NOMBRES = "inventario_snapshot_nombres"
 CLAVE_ERRORES = "inventario_snapshot_errores"
 CLAVE_FECHA = "inventario_snapshot_fecha"
+CLAVE_CORTE_ACTIVO = "inventario_corte_activo"
 
 
 @st.cache_data(
@@ -29,6 +30,7 @@ def procesar_inventario_cacheado(
     df_erp_sanitarios: pd.DataFrame,
     df_wms_stock_digip: pd.DataFrame,
     df_wms_recepcion: pd.DataFrame,
+    df_wms_preparacion: pd.DataFrame,
     df_wms_detalle_auxiliar: pd.DataFrame,
     df_wms_disponible: pd.DataFrame,
     df_articulos: pd.DataFrame,
@@ -61,6 +63,7 @@ def procesar_inventario_cacheado(
         df_wms_detalle_auxiliar,
         df_wms_disponible,
         df_articulos,
+        df_wms_preparacion=df_wms_preparacion,
         configuracion=ConfiguracionComparacion(
             columnas_stock_erp=(
                 columnas_stock_erp
@@ -112,6 +115,19 @@ def guardar_snapshot_fuentes(
             "%d/%m/%Y %H:%M:%S"
         )
     )
+    st.session_state[CLAVE_CORTE_ACTIVO] = True
+
+
+def corte_inventario_activo() -> bool:
+    return bool(
+        st.session_state.get(
+            CLAVE_CORTE_ACTIVO,
+            False,
+        )
+        and st.session_state.get(
+            CLAVE_DATOS
+        ) is not None
+    )
 
 
 def obtener_snapshot_fuentes() -> tuple[
@@ -143,6 +159,7 @@ def limpiar_snapshot_inventario() -> None:
         CLAVE_NOMBRES,
         CLAVE_ERRORES,
         CLAVE_FECHA,
+        CLAVE_CORTE_ACTIVO,
     ):
         st.session_state.pop(clave, None)
 

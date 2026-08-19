@@ -104,11 +104,13 @@ def resolver_configuracion_ciclicos(
             "Disponible",
             "Bloqueados",
             "Recepcion",
+            "Preparacion",
         ),
         alternativas=(
             "Disponible",
             "Bloqueados",
             "Recepcion",
+            "Preparacion",
         ),
     )
 
@@ -127,7 +129,7 @@ def resolver_configuracion_ciclicos(
     if not estados_wms:
         raise ValueError(
             "No se encontraron los estados comparables "
-            "del WMS: Disponible, Bloqueados o Recepcion."
+            "del WMS: Disponible, Bloqueados, Recepcion o Preparacion."
         )
 
     return ConfiguracionComparacion(
@@ -152,6 +154,7 @@ def construir_base_ciclicos(
     df_wms_detalle_auxiliar: pd.DataFrame,
     df_wms_disponible: pd.DataFrame,
     df_articulos: pd.DataFrame,
+    df_wms_preparacion: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     configuracion = resolver_configuracion_ciclicos(
         df_erp=df_erp,
@@ -167,6 +170,7 @@ def construir_base_ciclicos(
         df_wms_detalle_auxiliar,
         df_wms_disponible,
         df_articulos,
+        df_wms_preparacion=df_wms_preparacion,
         configuracion=configuracion,
     )
 

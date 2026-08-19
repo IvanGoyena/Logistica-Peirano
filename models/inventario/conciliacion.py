@@ -34,6 +34,7 @@ ESTADOS_FISICOS_WMS = [
     "Disponible",
     "Bloqueados",
     "Recepcion",
+    "Preparacion",
 ]
 
 
@@ -425,18 +426,20 @@ def _resumir_detalle(
 def preparar_detalle_comparable_wms(
     df_stock_digip: pd.DataFrame,
     df_recepcion: pd.DataFrame,
+    df_preparacion: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Construye el detalle comparable contra Disponible DIGIP.
+    Construye el detalle físico comparable contra el resumen WMS.
 
     Fuentes:
-    - Stock DIGIP: detalle del stock disponible/bloqueado.
-    - Stock Recepción: detalle físico todavía ubicado en recepción.
+    - Stock DIGIP: stock disponible/bloqueado.
+    - Stock Recepción: mercadería físicamente en recepción.
+    - Stock Preparación: mercadería tomada por pedidos en preparación
+      que todavía continúa formando parte del stock ERP.
 
-    No utiliza `stock_detallado` porque ese reporte puede pertenecer
-    a otra captura, filtro o momento y generaría falsas diferencias.
+    Los reportes específicos prevalecen sobre Stock DIGIP para evitar
+    doble conteo si DIGIP ya incluyera líneas de esas áreas.
     """
-
     stock = _preparar_lineas_detalle(
         df_stock_digip,
         nombre_fuente="Stock DIGIP",
@@ -445,25 +448,64 @@ def preparar_detalle_comparable_wms(
         df_recepcion,
         nombre_fuente="Stock Recepción",
     )
+    preparacion = _preparar_lineas_detalle(
+        df_preparacion,
+        nombre_fuente="Stock Preparación",
+    )
 
-    # Evitar doble conteo: si Stock DIGIP ya contiene líneas de
-    # Recepción, se eliminan de esa fuente y prevalece el reporte
-    # específico de recepción.
-    if not stock.empty and not recepcion.empty:
-        es_recepcion = (
-            stock["Area"].str.upper().str.contains(
-                "RECEPC",
-                na=False,
-            )
-            | stock["Ubicacion"].str.upper().str.startswith(
-                "REC-",
-                na=False,
-            )
+    if not stock.empty:
+        area = (
+            stock["Area"]
+            .fillna("")
+            .astype(str)
+            .str.upper()
         )
-        stock = stock.loc[~es_recepcion].copy()
+        ubicacion = (
+            stock["Ubicacion"]
+            .fillna("")
+            .astype(str)
+            .str.upper()
+        )
+
+        mascara_especifica = pd.Series(
+            False,
+            index=stock.index,
+        )
+
+        if not recepcion.empty:
+            mascara_especifica |= (
+                area.str.contains(
+                    "RECEPC",
+                    na=False,
+                )
+                | ubicacion.str.startswith(
+                    "REC-",
+                    na=False,
+                )
+            )
+
+        if not preparacion.empty:
+            mascara_especifica |= (
+                area.str.contains(
+                    "PREPAR",
+                    na=False,
+                )
+                | ubicacion.str.contains(
+                    "PREP",
+                    na=False,
+                )
+            )
+
+        stock = stock.loc[
+            ~mascara_especifica
+        ].copy()
 
     detalle = pd.concat(
-        [stock, recepcion],
+        [
+            stock,
+            recepcion,
+            preparacion,
+        ],
         ignore_index=True,
     )
 
@@ -477,6 +519,9 @@ def preparar_detalle_comparable_wms(
             + "|"
             + detalle["Cantidad"].astype(str)
         )
+
+        # keep="last": los reportes específicos (Recepción/Preparación)
+        # fueron concatenados después de Stock DIGIP y prevalecen.
         detalle = (
             detalle
             .drop_duplicates(
@@ -493,6 +538,7 @@ def preparar_detalle_comparable_wms(
     )
 
     return detalle, resumen
+
 
 
 def preparar_detalle_auxiliar_wms(
@@ -717,6 +763,7 @@ def construir_conciliacion(
     df_wms_disponible: pd.DataFrame,
     df_articulos: pd.DataFrame | None = None,
     *,
+    df_wms_preparacion: pd.DataFrame | None = None,
     configuracion: ConfiguracionComparacion | None = None,
     tolerancia_unidades: float = 0.0,
     tolerancia_porcentaje: float = 0.0,
@@ -838,6 +885,7 @@ def construir_conciliacion(
         preparar_detalle_comparable_wms(
             df_wms_stock_digip,
             df_wms_recepcion,
+            df_wms_preparacion,
         )
     )
 

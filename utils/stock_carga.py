@@ -1184,6 +1184,12 @@ def construir_contexto_cobertura(
         )
     )
 
+    stock_recepcion = (
+        cargar_fuente_dinamica_stock(
+            "stock_recepcion"
+        )
+    )
+
     articulos = (
         cargar_fuente_maestra_stock(
             "articulos"
@@ -1253,6 +1259,12 @@ def construir_contexto_cobertura(
             stock_detallado[
                 "df"
             ].copy(),
+        "tabla_stock_recepcion":
+            _normalizar_reporte_delimitado_en_una_columna(
+                stock_recepcion[
+                    "df"
+                ].copy()
+            ),
     }
 
 

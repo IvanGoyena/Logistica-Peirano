@@ -148,6 +148,10 @@ def render_conciliacion(
         "wms_recepcion",
         pd.DataFrame(),
     )
+    df_wms_preparacion = datos.get(
+        "wms_preparacion",
+        pd.DataFrame(),
+    )
     df_wms_detalle_auxiliar = datos.get(
         "wms_detalle_auxiliar",
         pd.DataFrame(),
@@ -180,7 +184,7 @@ def render_conciliacion(
         st.caption(
             "ERP configurable por suma de estados. "
             "Valor recomendado: est_1 + est_8. "
-            "WMS comparable: Disponible + Bloqueados + Recepción."
+            "WMS comparable: Disponible + Bloqueados + Recepción + Preparación."
         )
 
         columnas_erp = [
@@ -288,7 +292,7 @@ def render_conciliacion(
             ],
             help=(
                 "La comparación operativa utiliza únicamente "
-                "Disponible, Bloqueados y Recepción. "
+                "Disponible, Bloqueados, Recepción y Preparación. "
                 "El resto de los estados no participa por defecto."
             ),
         )
@@ -315,7 +319,8 @@ def render_conciliacion(
             f"ERP base: {nombres.get('erp', '')} · "
             f"ERP Sanitarios: {nombres.get('erp_sanitarios', 'No detectado') or 'No detectado'} · "
             f"Detalle comparable: {nombres.get('wms_stock_digip', '')} · "
-            f"Recepción: {nombres.get('wms_recepcion', '')} · "
+            f"Recepción: {nombres.get('wms_recepcion', '') or 'Sin stock'} · "
+            f"Preparación: {nombres.get('wms_preparacion', '') or 'No detectado'} · "
             f"Resumen: {nombres.get('wms_disponible', '')}"
         )
 
@@ -368,6 +373,7 @@ def render_conciliacion(
                 df_erp_sanitarios,
                 df_wms_stock_digip,
                 df_wms_recepcion,
+                df_wms_preparacion,
                 df_wms_detalle_auxiliar,
                 df_wms_disponible,
                 df_articulos,
@@ -573,7 +579,7 @@ def render_conciliacion(
         )
 
         st.caption(
-            "Detalle comparable construido con Stock DIGIP + Stock Recepción."
+            "Detalle comparable construido con Stock DIGIP + Stock Recepción + Stock Preparación."
         )
 
         f1, f2, f3, f4 = st.columns(4)
@@ -710,7 +716,7 @@ def render_conciliacion(
 
         `StockWMSResumen` se compara contra
         `StockWMSDetalleComparable`, construido con
-        **Stock DIGIP + Stock Recepción**.
+        **Stock DIGIP + Stock Recepción + Stock Preparación**.
 
         `StockWMSDetalleAuxiliar` proviene de `stock_detallado`
         y queda solamente para auditoría. No modifica KPIs,
@@ -1820,6 +1826,10 @@ def render_conciliacion(
     columnas_redondeo = [
         "StockERP",
         "StockWMSResumen",
+        "Disponible",
+        "Bloqueados",
+        "Recepcion",
+        "Preparacion",
         "StockWMSDetalleComparable",
         "StockWMSDetalleAuxiliar",
         "DiferenciaERPvsWMS",

@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from utils.inventario.exclusiones import filtrar_articulos_fuera_inventario
+
 
 
 # ==========================================================
@@ -590,9 +592,16 @@ def _preparar_ingresos_por_articulo(
 
 def _clasificar_estado_ingreso(
     fila: pd.Series,
-    dias_producto_nuevo: int = 90,
+    dias_producto_nuevo: int = 30,
     dias_ingreso_reciente: int = 30,
 ) -> str:
+    """
+    Clasifica el artículo por antigüedad real de su evidencia.
+
+    Producto nuevo NO depende de seguir estando en Recepción.
+    Se considera nuevo únicamente durante los primeros N días
+    desde su primera evidencia conocida.
+    """
     dias_primera = fila.get(
         "DiasDesdePrimeraEvidencia",
         np.nan,
@@ -602,16 +611,28 @@ def _clasificar_estado_ingreso(
         np.nan,
     )
 
-    if pd.notna(dias_primera) and float(dias_primera) <= dias_producto_nuevo:
+    if (
+        pd.notna(dias_primera)
+        and 0 <= float(dias_primera)
+        <= dias_producto_nuevo
+    ):
         return "🆕 Producto nuevo"
 
-    if pd.notna(dias_ultimo) and float(dias_ultimo) <= dias_ingreso_reciente:
+    if (
+        pd.notna(dias_ultimo)
+        and 0 <= float(dias_ultimo)
+        <= dias_ingreso_reciente
+    ):
         return "📥 Reposición reciente"
 
-    if pd.notna(dias_primera) or pd.notna(dias_ultimo):
+    if (
+        pd.notna(dias_primera)
+        or pd.notna(dias_ultimo)
+    ):
         return "📦 Producto existente"
 
     return "❓ Sin fecha de ingreso"
+
 
 
 # ==========================================================
@@ -920,10 +941,11 @@ def construir_tabla_cobertura(
     tabla_articulos: pd.DataFrame | None = None,
     tabla_max_min: pd.DataFrame | None = None,
     tabla_stock_detallado: pd.DataFrame | None = None,
+    tabla_stock_recepcion: pd.DataFrame | None = None,
     tabla_detalle_pendientes: pd.DataFrame | None = None,
     tabla_oc_cobertura: pd.DataFrame | None = None,
     meses_analisis: int = 3,
-    dias_producto_nuevo: int = 90,
+    dias_producto_nuevo: int = 30,
     dias_ingreso_reciente: int = 30,
 ) -> tuple[pd.DataFrame, dict]:
     """Cruza stock actual contra consumo histórico y calcula cobertura."""
@@ -1055,6 +1077,29 @@ def construir_tabla_cobertura(
         validate="one_to_one",
     )
 
+    # Recepción también es evidencia física del artículo.
+    # Esto permite detectar como nuevo un SKU que todavía no fue
+    # guardado en stock general, sin dejarlo como nuevo para siempre.
+    ingresos_recepcion = _preparar_ingresos_por_articulo(
+        tabla_stock_recepcion
+    ).rename(
+        columns={
+            "PrimerIngresoStockActual":
+                "PrimerIngresoRecepcion",
+            "UltimoIngresoStockActual":
+                "UltimoIngresoRecepcion",
+            "ContenedoresStockActual":
+                "ContenedoresRecepcionActual",
+        }
+    )
+
+    tabla = tabla.merge(
+        ingresos_recepcion,
+        on="ArticuloCodigo",
+        how="left",
+        validate="one_to_one",
+    )
+
     tabla = tabla.merge(
         primera_venta_historica,
         on="ArticuloCodigo",
@@ -1066,6 +1111,7 @@ def construir_tabla_cobertura(
         tabla[
             [
                 "PrimerIngresoStockActual",
+                "PrimerIngresoRecepcion",
                 "PrimeraVentaHistorica",
             ]
         ]
@@ -1084,10 +1130,22 @@ def construir_tabla_cobertura(
         ).dt.normalize()
     ).dt.days
 
+    tabla["UltimoIngresoArticulo"] = (
+        tabla[
+            [
+                "UltimoIngresoStockActual",
+                "UltimoIngresoRecepcion",
+            ]
+        ]
+        .max(
+            axis=1,
+        )
+    )
+
     tabla["DiasDesdeUltimoIngreso"] = (
         hoy_analisis
         - pd.to_datetime(
-            tabla["UltimoIngresoStockActual"],
+            tabla["UltimoIngresoArticulo"],
             errors="coerce",
         ).dt.normalize()
     ).dt.days
@@ -1414,6 +1472,17 @@ def construir_tabla_cobertura(
         tabla["VendidoSinStock"],
         "AccionRecomendada",
     ] = "URGENTE: vendido ERP sin stock disponible"
+
+    # ------------------------------------------------------
+    # EXCLUSIONES OPERATIVAS
+    # ------------------------------------------------------
+    # Usa exactamente el mismo listado centralizado que Inventario.
+    # Los artículos excluidos dejan de impactar en KPIs, alertas,
+    # gráficos, filtros, tabla y descargable.
+    tabla = filtrar_articulos_fuera_inventario(
+        tabla,
+        ocultar=True,
+    )
 
     tabla = tabla.sort_values(
         ["EstadoCobertura", "CoberturaDias", "ArticuloCodigo"],

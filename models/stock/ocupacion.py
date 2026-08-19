@@ -115,6 +115,8 @@ def preparar_maestro_ubicaciones(dataframe: pd.DataFrame) -> pd.DataFrame:
         # pertenece al tipo Almacén, pero operativamente se mide separado.
         if area == "PASILLO":
             return "Pasillo"
+        if tipo == "CAJONES" or area == "CAJONES":
+            return "Cajones"
         if tipo == "ACEITUNA" or area == "LOZA":
             return "Aceituna"
         if tipo == "ENTRE PISO" or area == "ENTRE PISO":
@@ -586,45 +588,148 @@ def resumir_ocupacion(
     grupo: str | None = None,
 ) -> dict:
     """
-    Resume la ocupación según la lógica operativa del sector.
+    Resume la ocupación según la metodología física del sector.
 
-    - Almacén, Pasillo, Picking y Estanterías: una ubicación con stock
-      cuenta como ocupada, independientemente de cuántos pallets contenga.
-    - Aceituna, Entrepiso, Calidad Laboratorio y Calidad Piso:
-      son superficies de piso y se dimensionan por capacidad de pallets
-      versus contenedores distintos alojados.
-    - Calidad Racks: una ubicación física equivale a un pallet.
-    - Global: incluye exclusivamente Almacén + Pasillo.
+    Metodologías:
+    - Almacén, Pasillo, Picking, Cajones y Estanterías:
+      1 ubicación habilitada = 1 posición de capacidad.
+    - Aceituna/Loza y Entrepiso:
+      capacidad en pallets vs contenedores distintos almacenados.
+    - Calidad mantiene su metodología específica.
+    - Global representa únicamente el almacenamiento principal:
+      Almacén + Pasillo + Aceituna/Loza + Entrepiso.
+
+    El Global consolida capacidad ocupada/capacidad disponible de Rack + Piso.
+    No incluye Picking, Cajones, Estanterías ni Calidad.
     """
     vacio = {
-        "capacidad": 0.0, "ocupado": 0.0, "libre": 0.0,
-        "porcentaje": 0.0, "ubicaciones": 0, "unidad": "ubicaciones",
+        "capacidad": 0.0,
+        "ocupado": 0.0,
+        "libre": 0.0,
+        "porcentaje": 0.0,
+        "ubicaciones": 0,
+        "unidad": "posiciones",
     }
+
     if tabla is None or tabla.empty:
         return vacio
 
-    base = tabla.loc[tabla["Disponible"]].copy()
+    base = tabla.loc[
+        tabla["Disponible"].fillna(False)
+    ].copy()
 
+    # ------------------------------------------------------
+    # GENERAL = RACK + PISO
+    # ------------------------------------------------------
     if grupo == "Global":
+        grupos_rack = ["Almacén", "Pasillo"]
+        grupos_piso = ["Aceituna", "Entrepiso"]
+
+        rack = base.loc[
+            base["GrupoOcupacion"].isin(grupos_rack)
+        ].copy()
+        piso = base.loc[
+            base["GrupoOcupacion"].isin(grupos_piso)
+        ].copy()
+
+        capacidad_rack = float(len(rack))
+        ocupado_rack = float(
+            rack["Ocupada"].fillna(False).sum()
+        )
+
+        capacidad_piso = float(
+            pd.to_numeric(
+                piso["CapacidadNumerica"],
+                errors="coerce",
+            ).fillna(0).sum()
+        )
+        ocupado_piso = float(
+            piso[
+                [
+                    "ContenedoresOcupados",
+                    "CapacidadNumerica",
+                ]
+            ]
+            .apply(
+                pd.to_numeric,
+                errors="coerce",
+            )
+            .fillna(0)
+            .min(axis=1)
+            .sum()
+        )
+
+        capacidad = capacidad_rack + capacidad_piso
+        ocupado = ocupado_rack + ocupado_piso
+        libre = max(capacidad - ocupado, 0.0)
+        porcentaje = (
+            ocupado / capacidad * 100
+            if capacidad
+            else 0.0
+        )
+
+        return {
+            "capacidad": capacidad,
+            "ocupado": ocupado,
+            "libre": libre,
+            "porcentaje": porcentaje,
+            "ubicaciones": int(
+                len(rack) + len(piso)
+            ),
+            "unidad": "posiciones",
+        }
+
+    # ------------------------------------------------------
+    # GRUPOS INDIVIDUALES
+    # ------------------------------------------------------
+    if grupo == "Picking Rack":
         base = base.loc[
-            base["GrupoOcupacion"].isin(["Almacén", "Pasillo"])
-        ]
-    elif grupo == "Picking Rack":
-        base = base.loc[base["GrupoOcupacion"].eq("Picking")].copy()
-        mascara_cajones = (
-            base["Pasillo"].astype("string").str.strip().str.lstrip("0").eq("20")
-            | base["Tercio"].astype("string").str.upper().str.strip().eq("CAJONES")
+            base["GrupoOcupacion"].eq("Picking")
+        ].copy()
+
+        mascara_picking_cajones = (
+            base["Pasillo"]
+            .astype("string")
+            .str.strip()
+            .str.lstrip("0")
+            .eq("20")
+            | base["Tercio"]
+            .astype("string")
+            .str.upper()
+            .str.strip()
+            .eq("CAJONES")
         )
-        base = base.loc[~mascara_cajones]
-    elif grupo == "Cajones":
-        base = base.loc[base["GrupoOcupacion"].eq("Picking")].copy()
-        mascara_cajones = (
-            base["Pasillo"].astype("string").str.strip().str.lstrip("0").eq("20")
-            | base["Tercio"].astype("string").str.upper().str.strip().eq("CAJONES")
+
+        base = base.loc[
+            ~mascara_picking_cajones
+        ].copy()
+
+    elif grupo == "Picking Cajones":
+        base = base.loc[
+            base["GrupoOcupacion"].eq("Picking")
+        ].copy()
+
+        mascara_picking_cajones = (
+            base["Pasillo"]
+            .astype("string")
+            .str.strip()
+            .str.lstrip("0")
+            .eq("20")
+            | base["Tercio"]
+            .astype("string")
+            .str.upper()
+            .str.strip()
+            .eq("CAJONES")
         )
-        base = base.loc[mascara_cajones]
+
+        base = base.loc[
+            mascara_picking_cajones
+        ].copy()
+
     elif grupo:
-        base = base.loc[base["GrupoOcupacion"].eq(grupo)]
+        base = base.loc[
+            base["GrupoOcupacion"].eq(grupo)
+        ].copy()
 
     usa_capacidad_pallets = grupo in {
         "Aceituna",
@@ -634,20 +739,41 @@ def resumir_ocupacion(
     }
 
     if usa_capacidad_pallets:
-        capacidad = float(base["CapacidadNumerica"].sum())
+        capacidad = float(
+            pd.to_numeric(
+                base["CapacidadNumerica"],
+                errors="coerce",
+            ).fillna(0).sum()
+        )
         ocupado = float(
-            base[["ContenedoresOcupados", "CapacidadNumerica"]]
+            base[
+                [
+                    "ContenedoresOcupados",
+                    "CapacidadNumerica",
+                ]
+            ]
+            .apply(
+                pd.to_numeric,
+                errors="coerce",
+            )
+            .fillna(0)
             .min(axis=1)
             .sum()
         )
         unidad = "contenedores"
     else:
         capacidad = float(len(base))
-        ocupado = float(base["Ocupada"].sum())
+        ocupado = float(
+            base["Ocupada"].fillna(False).sum()
+        )
         unidad = "ubicaciones"
 
-    libre = max(capacidad - ocupado, 0)
-    porcentaje = ocupado / capacidad * 100 if capacidad else 0
+    libre = max(capacidad - ocupado, 0.0)
+    porcentaje = (
+        ocupado / capacidad * 100
+        if capacidad
+        else 0.0
+    )
 
     return {
         "capacidad": capacidad,
@@ -657,6 +783,7 @@ def resumir_ocupacion(
         "ubicaciones": int(len(base)),
         "unidad": unidad,
     }
+
 
 
 def grafico_donut_ocupacion(
