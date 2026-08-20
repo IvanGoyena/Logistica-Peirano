@@ -620,6 +620,41 @@ def obtener_tabla_operativa(tabla):
 
 )
 
+    # ------------------------------------------------------
+    # UNA FILA OPERATIVA POR PREPARACIÓN / CARRO
+    # ------------------------------------------------------
+    # El Informe Tareas puede traer varias filas internas para una
+    # misma preparación, repitiendo el mismo carro en el tablero.
+    # La combinación Preparación + Carro conserva pedidos distintos
+    # y elimina solamente duplicados operativos.
+    operativa["_PreparacionKey"] = (
+        operativa["Preparacion"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
+
+    operativa["_CarroKey"] = (
+        operativa["Carro"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"^[^A-Za-z0-9]*", "", regex=True)
+        .str.strip()
+        .str.upper()
+    )
+
+    operativa = (
+        operativa
+        .drop_duplicates(
+            subset=["_PreparacionKey", "_CarroKey"],
+            keep="first",
+        )
+        .drop(
+            columns=["_PreparacionKey", "_CarroKey"],
+            errors="ignore",
+        )
+    )
+
     operativa.reset_index(
 
         drop=True,
