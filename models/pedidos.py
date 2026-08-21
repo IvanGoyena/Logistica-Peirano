@@ -61,6 +61,8 @@ def normalizar_pedidos_digip(
         "fechaestimadadeentrega": "FechaEstimadaEntrega",
         "despachodescripcion": "DespachoDescripcion",
         "despacho": "DespachoDescripcion",
+        "unidadespedidas": "UnidadesPedidas",
+        "unidadessatisfechas": "UnidadesSatisfechas",
     }
 
     columnas_originales = list(tabla.columns)
@@ -181,6 +183,22 @@ def normalizar_pedidos_digip(
         )
 
     # ------------------------------------------------------
+    # UNIDADES INFORMADAS POR DIGIP
+    # ------------------------------------------------------
+    # Campos incorporados recientemente al reporte Pedidos DIGIP.
+    # Se conservan separados de TotalUnidades para no modificar el
+    # contrato histórico utilizado por Pedidos, Despachos y Tareas.
+    for columna in [
+        "UnidadesPedidas",
+        "UnidadesSatisfechas",
+    ]:
+        if columna in tabla.columns:
+            tabla[columna] = (
+                pd.to_numeric(tabla[columna], errors="coerce")
+                .fillna(0)
+            )
+
+    # ------------------------------------------------------
     # FECHAS
     # ------------------------------------------------------
     for columna in [
@@ -191,6 +209,7 @@ def normalizar_pedidos_digip(
             tabla[columna] = pd.to_datetime(
                 tabla[columna],
                 errors="coerce",
+                dayfirst=True,
             )
 
     return tabla
