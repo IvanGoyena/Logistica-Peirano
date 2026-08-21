@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -10,11 +11,314 @@ from utils.gestion_cobertura import (
 )
 from utils.pedidos.carga import cargar_datos_cobertura
 
+
+def _normalizar_pedido_cobertura(serie: pd.Series) -> pd.Series:
+    return (
+        serie
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.split()
+        .str[-1]
+        .str.split("-")
+        .str[0]
+        .str.strip()
+    )
+
+
+def _construir_estado_transmision_cobertura(
+    df_detalle_erp: pd.DataFrame | None,
+    df_pedidos_digip: pd.DataFrame | None,
+    tabla_transmisiones: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    Construye una fila por pedido con el avance operativo de transmisión.
+
+    Unidades transmitidas/gestionadas = remitidas + reservadas del ERP,
+    limitadas a la cantidad original de cada línea. Esto mantiene el avance
+    aun cuando una parte ya fue remitida y la reserva vuelve a cero.
+
+    DIGIP y Pedidos Transmisión se usan como evidencia de transmisión y
+    para obtener la fecha.
+    """
+    columnas = [
+        "Pedido",
+        "UnidadesOriginales",
+        "UnidadesTransmitidas",
+        "UnidadesSinTransmitir",
+        "PorcentajeTransmitido",
+        "FechaTransmision",
+        "PedidoTransmitido",
+        "FuenteTransmision",
+    ]
+
+    if df_detalle_erp is None or df_detalle_erp.empty:
+        return pd.DataFrame(columns=columnas)
+
+    detalle = df_detalle_erp.copy()
+
+    if "nro_com" not in detalle.columns or "can_art" not in detalle.columns:
+        return pd.DataFrame(columns=columnas)
+
+    detalle["Pedido"] = _normalizar_pedido_cobertura(detalle["nro_com"])
+
+    for columna in ["can_art", "can_rem", "can_reserv"]:
+        if columna not in detalle.columns:
+            detalle[columna] = 0
+        detalle[columna] = (
+            pd.to_numeric(detalle[columna], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+        )
+
+    detalle["UnidadesOriginalesLinea"] = detalle["can_art"]
+    detalle["UnidadesGestionadasLinea"] = (
+        detalle["can_rem"] + detalle["can_reserv"]
+    ).clip(lower=0)
+
+    detalle["UnidadesGestionadasLinea"] = detalle[
+        ["UnidadesGestionadasLinea", "UnidadesOriginalesLinea"]
+    ].min(axis=1)
+
+    avance = (
+        detalle
+        .groupby("Pedido", as_index=False)
+        .agg(
+            UnidadesOriginales=("UnidadesOriginalesLinea", "sum"),
+            UnidadesTransmitidas=("UnidadesGestionadasLinea", "sum"),
+        )
+    )
+
+    avance["UnidadesOriginales"] = (
+        pd.to_numeric(avance["UnidadesOriginales"], errors="coerce")
+        .fillna(0).round(0).astype(int)
+    )
+    avance["UnidadesTransmitidas"] = (
+        pd.to_numeric(avance["UnidadesTransmitidas"], errors="coerce")
+        .fillna(0).round(0).astype(int)
+    )
+    avance["UnidadesSinTransmitir"] = (
+        avance["UnidadesOriginales"] - avance["UnidadesTransmitidas"]
+    ).clip(lower=0)
+
+    avance["PorcentajeTransmitido"] = (
+        avance["UnidadesTransmitidas"]
+        .div(avance["UnidadesOriginales"].replace(0, pd.NA))
+        .mul(100)
+        .fillna(0)
+        .clip(lower=0, upper=100)
+        .round(1)
+    )
+
+    pedidos_en_digip: set[str] = set()
+    fecha_digip = pd.DataFrame(columns=["Pedido", "FechaDIGIP"])
+
+    if df_pedidos_digip is not None and not df_pedidos_digip.empty:
+        digip = df_pedidos_digip.copy()
+        columna_codigo = next(
+            (
+                c for c in ["Codigo", "Código pedido", "Codigo pedido"]
+                if c in digip.columns
+            ),
+            None,
+        )
+
+        if columna_codigo is not None:
+            digip["Pedido"] = _normalizar_pedido_cobertura(
+                digip[columna_codigo]
+            )
+
+            estado = (
+                digip.get("Estado", pd.Series("", index=digip.index))
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+
+            columna_unidades = next(
+                (
+                    c for c in ["Unidades pedidas", "TotalUnidades"]
+                    if c in digip.columns
+                ),
+                None,
+            )
+
+            unidades_digip = (
+                pd.to_numeric(digip[columna_unidades], errors="coerce")
+                .fillna(0)
+                if columna_unidades is not None
+                else pd.Series(1, index=digip.index)
+            )
+
+            mascara_valida = (
+                digip["Pedido"].ne("")
+                & ~estado.eq("ELIMINADO")
+                & unidades_digip.gt(0)
+            )
+
+            pedidos_en_digip = set(
+                digip.loc[mascara_valida, "Pedido"].astype(str)
+            )
+
+            if "Fecha" in digip.columns:
+                digip["FechaDIGIP"] = pd.to_datetime(
+                    digip["Fecha"],
+                    errors="coerce",
+                    dayfirst=True,
+                )
+                fecha_digip = (
+                    digip.loc[mascara_valida, ["Pedido", "FechaDIGIP"]]
+                    .groupby("Pedido", as_index=False)
+                    .agg(FechaDIGIP=("FechaDIGIP", "max"))
+                )
+
+    fechas_transmision = pd.DataFrame(
+        columns=["Pedido", "FechaTransmisionERP"]
+    )
+    pedidos_con_transmision: set[str] = set()
+
+    if tabla_transmisiones is not None and not tabla_transmisiones.empty:
+        trans = tabla_transmisiones.copy()
+
+        if "Pedido" in trans.columns:
+            trans["Pedido"] = _normalizar_pedido_cobertura(trans["Pedido"])
+
+            fecha_col = next(
+                (
+                    c for c in [
+                        "FechaTransmisionERP",
+                        "F Envio Digip",
+                        "FechaEnvioDIGIP",
+                    ]
+                    if c in trans.columns
+                ),
+                None,
+            )
+
+            if fecha_col is not None:
+                trans["FechaTransmisionERP"] = pd.to_datetime(
+                    trans[fecha_col],
+                    errors="coerce",
+                    dayfirst=True,
+                )
+                fechas_transmision = (
+                    trans[["Pedido", "FechaTransmisionERP"]]
+                    .groupby("Pedido", as_index=False)
+                    .agg(FechaTransmisionERP=("FechaTransmisionERP", "max"))
+                )
+
+            pedidos_con_transmision = set(
+                trans.loc[trans["Pedido"].ne(""), "Pedido"].astype(str)
+            )
+
+    avance = avance.merge(
+        fechas_transmision,
+        on="Pedido",
+        how="left",
+        validate="one_to_one",
+    )
+    avance = avance.merge(
+        fecha_digip,
+        on="Pedido",
+        how="left",
+        validate="one_to_one",
+    )
+
+    avance["FechaTransmision"] = (
+        avance["FechaTransmisionERP"]
+        .combine_first(avance["FechaDIGIP"])
+    )
+
+    # Dos evidencias equivalentes de que el pedido fue transmitido:
+    # - Pedido Transmisión: transmisión abierta/vigente.
+    # - Pedidos DIGIP: el pedido ya existe en el WMS, aunque la transmisión
+    #   ya no aparezca en el reporte de transmisiones abiertas.
+    evidencia_transmision = avance["Pedido"].isin(pedidos_con_transmision)
+    evidencia_digip = avance["Pedido"].isin(pedidos_en_digip)
+    evidencia = evidencia_transmision | evidencia_digip
+
+    avance["PedidoTransmitido"] = evidencia
+
+    # Campo de diagnóstico para poder comprobar de dónde salió la evidencia.
+    avance["FuenteTransmision"] = np.select(
+        [
+            evidencia_transmision & evidencia_digip,
+            evidencia_transmision,
+            evidencia_digip,
+        ],
+        [
+            "Pedido Transmisión + DIGIP",
+            "Pedido Transmisión",
+            "DIGIP",
+        ],
+        default="",
+    )
+
+    return avance[columnas].copy()
+
+
+
+
+def _csv_excel_cobertura(tabla: pd.DataFrame) -> bytes:
+    """
+    Genera CSV compatible con Excel en configuración regional española/argentina:
+    separador ; y coma decimal. Mantiene las columnas numéricas como números.
+    """
+    salida = tabla.copy()
+
+    # Fuerza como numéricas las columnas conocidas antes de serializar.
+    columnas_numericas = [
+        "PorcentajeCobertura",
+        "PorcentajeTransmitido",
+        "LineasOriginales",
+        "LineasYaCerradas",
+        "LineasPendientes",
+        "LineasRemanentes",
+        "UnidadesSolicitadas",
+        "UnidadesCubiertas",
+        "UnidadesFaltantes",
+        "UnidadesEnTransito",
+        "FaltanteLuegoTransito",
+        "CodigosConDiferencia",
+        "CodigosCubiertos",
+        "UnidadesOriginales",
+        "UnidadesTransmitidas",
+        "UnidadesSinTransmitir",
+        "CantidadSolicitada",
+        "CantidadCubierta",
+        "CantidadFaltante",
+        "DisponibleERPInicial",
+        "TransitoERP",
+        "DisponibleWMS",
+        "DiferenciaERPvsWMS",
+        "FaltanteInmediato",
+        "Comprometido",
+        "PedidosAfectados",
+    ]
+    for columna in columnas_numericas:
+        if columna in salida.columns:
+            salida[columna] = pd.to_numeric(
+                salida[columna],
+                errors="coerce",
+            )
+
+    return salida.to_csv(
+        index=False,
+        sep=";",
+        decimal=",",
+        encoding="utf-8-sig",
+    ).encode("utf-8-sig")
+
+
 def render_cobertura(
     df_pedidos: pd.DataFrame,
     df_pendientes_erp: pd.DataFrame,
     tabla_clientes: pd.DataFrame,
     tabla_detalle_dashboard: pd.DataFrame,
+    df_detalle_erp: pd.DataFrame | None = None,
+    tabla_transmisiones: pd.DataFrame | None = None,
 ) -> None:
         datos_cobertura = cargar_datos_cobertura()
         df_disponible_digip = datos_cobertura["disponible_digip"]
@@ -30,6 +334,53 @@ def render_cobertura(
             tabla_clientes=tabla_clientes,
             tabla_pendientes_oc=df_fechas_oc,
         )
+
+        estado_transmision = _construir_estado_transmision_cobertura(
+            df_detalle_erp=df_detalle_erp,
+            df_pedidos_digip=df_pedidos,
+            tabla_transmisiones=tabla_transmisiones,
+        )
+
+        if not resumen_cobertura_erp.empty:
+            resumen_cobertura_erp = resumen_cobertura_erp.copy()
+            resumen_cobertura_erp["Pedido"] = _normalizar_pedido_cobertura(
+                resumen_cobertura_erp["Pedido"]
+            )
+            resumen_cobertura_erp = resumen_cobertura_erp.merge(
+                estado_transmision,
+                on="Pedido",
+                how="left",
+                validate="one_to_one",
+            )
+
+            for columna in [
+                "UnidadesOriginales",
+                "UnidadesTransmitidas",
+                "UnidadesSinTransmitir",
+            ]:
+                resumen_cobertura_erp[columna] = (
+                    pd.to_numeric(
+                        resumen_cobertura_erp[columna],
+                        errors="coerce",
+                    )
+                    .fillna(0)
+                    .astype(int)
+                )
+
+            resumen_cobertura_erp["PorcentajeTransmitido"] = (
+                pd.to_numeric(
+                    resumen_cobertura_erp["PorcentajeTransmitido"],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .round(1)
+            )
+
+            resumen_cobertura_erp["PedidoTransmitido"] = (
+                resumen_cobertura_erp["PedidoTransmitido"]
+                .fillna(False)
+                .astype(bool)
+            )
         st.subheader("🚨 Compromisos ERP sin cobertura")
         st.caption(
             "La cobertura inmediata se calcula con el disponible aprobado del ERP "
@@ -108,8 +459,8 @@ def render_cobertura(
 
             pedidos_informados = obtener_pedidos_informados()
 
-            filtro_1, filtro_2, filtro_3 = st.columns(
-                [1.05, 1.05, 1.35]
+            filtro_1, filtro_2, filtro_3, filtro_4 = st.columns(
+                [0.95, 1.05, 1.25, 1.25]
             )
 
             with filtro_1:
@@ -150,12 +501,79 @@ def render_cobertura(
                     for estado in estados_cobertura_ui
                 ]
 
+            with filtro_4:
+                etiquetas_gestion = {
+                    "Pendiente de informar": "PENDIENTE DE INFORMAR",
+                    "Informado": "INFORMADO",
+                    "Pedido transmitido": "PEDIDO TRANSMITIDO",
+                }
+                estados_gestion_ui = st.multiselect(
+                    "Estado de gestión",
+                    options=list(etiquetas_gestion.keys()),
+                    default=[],
+                    key="filtro_estado_gestion_cobertura",
+                )
+                estados_gestion = [
+                    etiquetas_gestion[estado]
+                    for estado in estados_gestion_ui
+                ]
+
             vista_resumen = resumen_cobertura_erp.copy()
 
             vista_resumen["Informado"] = (
                 vista_resumen["Pedido"]
                 .astype(str)
                 .isin(pedidos_informados)
+            )
+
+            vista_resumen["EstadoGestion"] = "PENDIENTE DE INFORMAR"
+            vista_resumen.loc[
+                vista_resumen["Informado"],
+                "EstadoGestion",
+            ] = "INFORMADO"
+            vista_resumen.loc[
+                vista_resumen["PedidoTransmitido"],
+                "EstadoGestion",
+            ] = "PEDIDO TRANSMITIDO"
+
+            gestion_problemas = vista_resumen.loc[
+                vista_resumen["EstadoCobertura"].isin(
+                    [
+                        "SIN COBERTURA TOTAL",
+                        "SIN COBERTURA PARCIAL",
+                        "COBERTURA EN TRÁNSITO",
+                    ]
+                )
+            ].copy()
+
+            g1, g2, g3 = st.columns(3)
+            g1.metric(
+                "🔴 Pendientes de informar",
+                int(
+                    gestion_problemas["EstadoGestion"]
+                    .eq("PENDIENTE DE INFORMAR")
+                    .sum()
+                ),
+            )
+            g2.metric(
+                "📨 Informados",
+                int(
+                    gestion_problemas["EstadoGestion"]
+                    .eq("INFORMADO")
+                    .sum()
+                ),
+            )
+            g3.metric(
+                "✅ Pedidos transmitidos",
+                int(
+                    gestion_problemas["EstadoGestion"]
+                    .eq("PEDIDO TRANSMITIDO")
+                    .sum()
+                ),
+                help=(
+                    "Pedidos con unidades remitidas/reservadas y evidencia "
+                    "de transmisión en DIGIP o Pedidos Transmisión."
+                ),
             )
 
             if solo_problemas:
@@ -171,7 +589,12 @@ def render_cobertura(
 
             if ocultar_informados:
                 vista_resumen = vista_resumen.loc[
-                    ~vista_resumen["Informado"]
+                    ~vista_resumen["EstadoGestion"].eq("INFORMADO")
+                ].copy()
+
+            if estados_gestion:
+                vista_resumen = vista_resumen.loc[
+                    vista_resumen["EstadoGestion"].isin(estados_gestion)
                 ].copy()
 
             if estados_cobertura:
@@ -190,6 +613,56 @@ def render_cobertura(
                 .astype(str)
                 .isin(pedidos_visibles)
             ].copy()
+
+            # Hereda el estado de gestión del pedido al detalle por artículo.
+            if not vista_lineas.empty:
+                vista_lineas["Pedido"] = _normalizar_pedido_cobertura(
+                    vista_lineas["Pedido"]
+                )
+                estado_gestion_detalle = (
+                    vista_resumen[["Pedido", "EstadoGestion"]]
+                    .drop_duplicates(subset=["Pedido"])
+                    .copy()
+                )
+                estado_gestion_detalle["Pedido"] = _normalizar_pedido_cobertura(
+                    estado_gestion_detalle["Pedido"]
+                )
+                vista_lineas = vista_lineas.merge(
+                    estado_gestion_detalle,
+                    on="Pedido",
+                    how="left",
+                    validate="many_to_one",
+                )
+                vista_lineas["EstadoGestion"] = (
+                    vista_lineas["EstadoGestion"]
+                    .fillna("PENDIENTE DE INFORMAR")
+                    .replace(
+                        {
+                            "PENDIENTE DE INFORMAR": "Pendiente de informar",
+                            "INFORMADO": "Informado",
+                            "PEDIDO TRANSMITIDO": "Pedido transmitido",
+                        }
+                    )
+                )
+
+                columnas_detalle_prioritarias = [
+                    "Pedido",
+                    "Fecha",
+                    "ClienteCodigo",
+                    "ClienteDescripcion",
+                    "Planificacion",
+                    "EstadoGestion",
+                    "ArticuloCodigo",
+                    "ArticuloDescripcion",
+                ]
+                columnas_detalle_ordenadas = [
+                    c for c in columnas_detalle_prioritarias
+                    if c in vista_lineas.columns
+                ] + [
+                    c for c in vista_lineas.columns
+                    if c not in columnas_detalle_prioritarias
+                ]
+                vista_lineas = vista_lineas[columnas_detalle_ordenadas]
 
             if solo_problemas:
                 # El botón controla específicamente la tabla de detalle:
@@ -401,12 +874,48 @@ def render_cobertura(
             st.markdown("#### Resumen por pedido")
 
             vista_resumen_display = vista_resumen.copy()
+
+            columnas_prioritarias = [
+                "Pedido",
+                "Fecha",
+                "ClienteCodigo",
+                "ClienteDescripcion",
+                "Planificacion",
+                "EstadoGestion",
+                "PorcentajeTransmitido",
+                "UnidadesOriginales",
+                "UnidadesTransmitidas",
+                "UnidadesSinTransmitir",
+                "FechaTransmision",
+                "CategoriaPedidoPendiente",
+            ]
+            columnas_ordenadas = [
+                c for c in columnas_prioritarias
+                if c in vista_resumen_display.columns
+            ] + [
+                c for c in vista_resumen_display.columns
+                if c not in columnas_prioritarias
+            ]
+            vista_resumen_display = vista_resumen_display[
+                columnas_ordenadas
+            ]
+
             etiquetas_estado_display = {
                 "SIN COBERTURA TOTAL": "Sin cobertura total",
                 "SIN COBERTURA PARCIAL": "Sin cobertura parcial",
                 "COBERTURA EN TRÁNSITO": "Cobertura en tránsito",
                 "COBERTURA COMPLETA": "Cobertura completa",
             }
+
+            vista_resumen_display["EstadoGestion"] = (
+                vista_resumen_display["EstadoGestion"].replace(
+                    {
+                        "PENDIENTE DE INFORMAR": "Pendiente de informar",
+                        "INFORMADO": "Informado",
+                        "PEDIDO TRANSMITIDO": "Pedido transmitido",
+                    }
+                )
+            )
 
             for columna_estado in [
                 "EstadoCobertura",
@@ -424,6 +933,34 @@ def render_cobertura(
                 width="stretch",
                 height=300,
                 column_config={
+                    "EstadoGestion": st.column_config.TextColumn(
+                        "Estado gestión",
+                        width="medium",
+                    ),
+                    "PorcentajeTransmitido": st.column_config.ProgressColumn(
+                        "% transmitido",
+                        min_value=0,
+                        max_value=100,
+                        format="%.1f %%",
+                        width="medium",
+                    ),
+                    "UnidadesOriginales": st.column_config.NumberColumn(
+                        "Unidades originales",
+                        format="%d",
+                    ),
+                    "UnidadesTransmitidas": st.column_config.NumberColumn(
+                        "Unidades transmitidas",
+                        format="%d",
+                    ),
+                    "UnidadesSinTransmitir": st.column_config.NumberColumn(
+                        "Sin transmitir",
+                        format="%d",
+                    ),
+                    "FechaTransmision": st.column_config.DateColumn(
+                        "Fecha transmisión",
+                        format="DD/MM/YYYY",
+                        width="medium",
+                    ),
                     "Informado": st.column_config.CheckboxColumn(
                         "Informado",
                         disabled=True,
@@ -494,6 +1031,10 @@ def render_cobertura(
                     width="stretch",
                     height=600,
                     column_config={
+                        "EstadoGestion": st.column_config.TextColumn(
+                            "Estado gestión",
+                            width="medium",
+                        ),
                         "Fecha": st.column_config.DateColumn(
                             "Fecha",
                             format="DD/MM/YYYY",
@@ -641,11 +1182,7 @@ def render_cobertura(
             with col_descarga1:
                 st.download_button(
                     "⬇️ Descargar resumen",
-                    data=vista_resumen.to_csv(
-                        index=False,
-                        sep=";",
-                        encoding="utf-8-sig",
-                    ).encode("utf-8-sig"),
+                    data=_csv_excel_cobertura(vista_resumen),
                     file_name="Pedidos_ERP_Sin_Cobertura.csv",
                     mime="text/csv",
                     key="descargar_resumen_cobertura_erp",
@@ -655,11 +1192,7 @@ def render_cobertura(
             with col_descarga2:
                 st.download_button(
                     "⬇️ Descargar detalle",
-                    data=vista_lineas.to_csv(
-                        index=False,
-                        sep=";",
-                        encoding="utf-8-sig",
-                    ).encode("utf-8-sig"),
+                    data=_csv_excel_cobertura(vista_lineas),
                     file_name="Detalle_Pedidos_ERP_Sin_Cobertura.csv",
                     mime="text/csv",
                     key="descargar_detalle_cobertura_erp",
@@ -669,11 +1202,7 @@ def render_cobertura(
             with col_descarga3:
                 st.download_button(
                     "⬇️ Descargar diagnóstico",
-                    data=resumen_codigos_faltantes.to_csv(
-                        index=False,
-                        sep=";",
-                        encoding="utf-8-sig",
-                    ).encode("utf-8-sig"),
+                    data=_csv_excel_cobertura(resumen_codigos_faltantes),
                     file_name="Diagnostico_Stock_ERP_WMS.csv",
                     mime="text/csv",
                     key="descargar_diagnostico_stock_erp_wms",

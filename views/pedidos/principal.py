@@ -974,6 +974,8 @@ def render_modulo_pedidos() -> None:
             df_pendientes_erp=df_pendientes_erp,
             tabla_clientes=tabla_clientes,
             tabla_detalle_dashboard=tabla_detalle_dashboard,
+            df_detalle_erp=df_detalle,
+            tabla_transmisiones=tabla_transmisiones,
         )
     else:
         from views.pedidos.tabla_gestiones import render_tabla_gestiones
