@@ -184,7 +184,26 @@ def render_dashboard_despachos(
         .clip(lower=0)
     )
 
+    # Para los indicadores visuales mostramos las unidades originales
+    # del pedido, igual que en el módulo Pedidos.
+    # TotalUnidades se mantiene como cantidad pendiente ERP para la lógica
+    # de planificación/cobertura de despacho.
+    columna_unidades_visual = (
+        "UnidadesPedido"
+        if "UnidadesPedido" in base_dashboard.columns
+        else "TotalUnidades"
+    )
+
     base_dashboard["UnidadesDashboard"] = (
+        pd.to_numeric(
+            base_dashboard[columna_unidades_visual],
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+    )
+
+    base_dashboard["UnidadesPendientesDashboard"] = (
         pd.to_numeric(
             base_dashboard["TotalUnidades"],
             errors="coerce",
@@ -197,12 +216,19 @@ def render_dashboard_despachos(
         base_dashboard["PlanificacionDashboard"].eq("RETIRA")
     )
 
+    mascara_sin_planificacion_dashboard = (
+        base_dashboard["PlanificacionDashboard"].eq("SIN PLANIFICACIÓN")
+    )
+
     base_retira_dashboard = base_dashboard.loc[
         mascara_retira_dashboard
     ].copy()
 
+    # Los pedidos SIN PLANIFICACIÓN tienen su KPI propio.
+    # No deben contarse también como pedidos de reparto.
     base_reparto_dashboard = base_dashboard.loc[
         ~mascara_retira_dashboard
+        & ~mascara_sin_planificacion_dashboard
     ].copy()
 
     mascara_camion_dashboard = (

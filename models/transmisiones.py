@@ -40,7 +40,6 @@ def construir_tabla_transmisiones(
 
     columnas_requeridas = {
         "Pedido",
-        "Nro Envio",
         "Estado",
         "F Envio Digip",
     }
@@ -54,6 +53,12 @@ def construir_tabla_transmisiones(
             "Faltan columnas en Pedidos Transmisión: "
             f"{columnas_faltantes}"
         )
+
+    # "Nro Envio" existía en versiones anteriores del reporte.
+    # El reporte actual puede no traerlo; se conserva la salida
+    # NroEnvioERP para no romper los módulos que consumen esta tabla.
+    if "Nro Envio" not in tabla.columns:
+        tabla["Nro Envio"] = ""
 
     tabla = tabla.rename(
         columns={
