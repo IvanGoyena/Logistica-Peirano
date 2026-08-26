@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "publicado_en": "2026-08-25T09:10:29",
-  "firma_historicos_hash": "7200547513e342682ae114e07d703b668b3c251cc0641ca883c3c5ea027761bf",
-  "filas_tareas": 26929,
-  "filas_detalle": 219362,
+  "publicado_en": "2026-08-26T06:42:56",
+  "firma_historicos_hash": "042952eff7dfe2783546a43907626bc743d2cbbba8f1a184ed852b163f84a2e2",
+  "filas_tareas": 27087,
+  "filas_detalle": 220739,
   "fecha_minima": "2026-02-05T00:00:00",
   "fecha_maxima": "2026-08-25T00:00:00",
   "archivo_tareas": "metricas_tareas_enriquecidas.parquet",
