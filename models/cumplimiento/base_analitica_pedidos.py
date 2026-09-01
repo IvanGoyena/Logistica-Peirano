@@ -9,7 +9,7 @@ import pandas as pd
 
 from models.cumplimiento.historico_proceso_pedidos import resumir_hitos_pedido
 
-MODELO_CICLO_VERSION = "2026-08-04-v7-digip-cerrados-base"
+MODELO_CICLO_VERSION = "2026-08-27-v8-digip-nuevo-reporte"
 
 
 # ==========================================================
@@ -75,12 +75,19 @@ def _buscar_columna(df: pd.DataFrame, candidatos: Iterable[str]) -> str | None:
 def _buscar_columna_pedido(df: pd.DataFrame) -> str | None:
     """Detecta la columna de pedido aun cuando el reporte cambia el encabezado."""
     exactos = [
+        # Reporte DIGIP actual (27/08/2026): esta es la clave logística/ERP.
+        # Debe priorizarse sobre "Pedido Id", que es el ID interno de DIGIP.
+        "Código pedido", "Codigo pedido", "Código Pedido", "Codigo Pedido",
+        "CodigoPedido",
+        # Formatos históricos / alternativos.
         "Pedido", "Numero", "Número", "NumeroPedido", "NúmeroPedido",
         "PedidoNumero", "Nro Pedido", "NroPedido", "Número de pedido",
-        "Numero de pedido", "Pedido ID", "PedidoId", "IdPedido",
+        "Numero de pedido",
         "Documento", "NumeroDocumento", "Número Documento",
         "Pedido ERP", "Numero Pedido ERP", "Número Pedido ERP",
         "Pedido Externo", "Referencia Pedido",
+        # IDs internos quedan como último recurso.
+        "Pedido ID", "PedidoId", "IdPedido",
     ]
     encontrada = _buscar_columna(df, exactos)
     if encontrada is not None:
@@ -175,7 +182,7 @@ def _a_datetime(serie: pd.Series) -> pd.Series:
         try:
             fecha = pd.to_datetime(valor, errors="coerce", dayfirst=True)
             if pd.isna(fecha):
-                fecha = pd.to_datetime(valor, errors="coerce", dayfirst=False)
+                fecha = pd.to_datetime(valor, errors="coerce", dayfirst=True)
             if pd.isna(fecha):
                 return pd.NaT
 
@@ -238,7 +245,15 @@ def preparar_pedidos_digip(df: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame(columns=["ClavePedido"])
 
     base = df.copy()
-    col_pedido = _buscar_columna(base, ["Codigo"]) or _buscar_columna_pedido(base)
+    # El reporte DIGIP nuevo separa "Pedido Id" (ID interno) de
+    # "Código pedido" (código real del pedido). Siempre priorizamos el segundo.
+    col_pedido = _buscar_columna(
+        base,
+        [
+            "Código pedido", "Codigo pedido", "Código Pedido",
+            "Codigo Pedido", "CodigoPedido", "Codigo",
+        ],
+    ) or _buscar_columna_pedido(base)
     if col_pedido is None:
         # Último recurso: analiza el contenido de cada columna. Se priorizan
         # campos con valores numéricos o códigos del tipo 0001-00202684.
@@ -283,7 +298,7 @@ def preparar_pedidos_digip(df: pd.DataFrame | None) -> pd.DataFrame:
                 f"Muestras: {muestra_columnas}"
             )
 
-    if _normalizar_texto(col_pedido) == "CODIGO":
+    if _normalizar_texto(col_pedido) in {"CODIGO", "CODIGOPEDIDO"}:
         base["ClavePedido"] = base[col_pedido].map(normalizar_codigo_pedido_digip)
     else:
         base["ClavePedido"] = base[col_pedido].map(normalizar_clave_pedido)
@@ -304,7 +319,7 @@ def preparar_pedidos_digip(df: pd.DataFrame | None) -> pd.DataFrame:
 
     campos = {
         "PedidoOriginal": [col_pedido],
-        "ClienteCodigo": ["ClienteCodigo", "Código Cliente", "Cod Cliente"],
+        "ClienteCodigo": ["ClienteCodigo", "Código Cliente", "Código cliente", "Codigo cliente", "Cod Cliente"],
         "Cliente": ["ClienteDescripcion", "Cliente", "Razón Social", "Razon Social"],
         "EstadoPedido": ["Estado", "PedidoEstado", "Estado Pedido"],
         "EstadoPreparacion": ["PreparacionEstado", "Estado Preparacion", "Estado preparación"],
@@ -325,6 +340,9 @@ def preparar_pedidos_digip(df: pd.DataFrame | None) -> pd.DataFrame:
             "CodigoEntrega", "Codigo Entrega", "Código Entrega",
         ],
         "UnidadesPedidas": [
+            # Reporte DIGIP actual.
+            "Unidades pedidas", "Unidades Pedidas", "UnidadesPedidas",
+            # Encabezados históricos / alternativos.
             "TotalUnidades", "Total Unidades", "UnidadesTotales",
             "Unidades Totales", "Unidades", "CantidadTotal",
             "Cantidad Total", "TotalCantidad", "Total Cantidad",

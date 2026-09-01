@@ -1631,23 +1631,28 @@ def render_conciliacion(
                 width="stretch",
             )
 
+    # El gráfico operativo muestra todos los artículos críticos con
+    # diferencia ERP vs WMS, ordenados de mayor a menor diferencia.
     top = (
         tabla.loc[
-            tabla["EstadoConciliacion"]
-            .ne("Conciliado")
+            tabla["PrioridadInventario"].eq("Crítica")
+            & tabla["EstadoConciliacion"].ne("Conciliado")
         ]
-        .head(20)
+        .sort_values(
+            "DiferenciaAbsoluta",
+            ascending=False,
+        )
         .copy()
     )
 
     st.markdown(
-        "#### Top 20 diferencias ERP vs WMS"
+        "#### 🚨 Artículos críticos con diferencia ERP vs WMS"
     )
 
     if top.empty:
         st.success(
-            "No se detectaron diferencias "
-            "con la configuración actual."
+            "No se detectaron artículos críticos con diferencia "
+            "ERP vs WMS con la configuración actual."
         )
 
     else:

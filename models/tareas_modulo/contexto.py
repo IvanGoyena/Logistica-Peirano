@@ -17,11 +17,12 @@ from models.tareas import (
 def _normalizar_fecha_control(serie: pd.Series) -> pd.Series:
     """
     El reporte mensual Control utiliza fechas con formato MM/DD/YYYY.
-    Por ejemplo, dentro de "Control Agosto 2026", 08/04/2026 es 4 de agosto.
+    Por ejemplo, dentro de "Control Agosto 2026", 08/25/2026 es 25 de agosto.
     """
     return pd.to_datetime(
         serie,
         errors="coerce",
+        format="mixed",
         dayfirst=False,
     )
 
