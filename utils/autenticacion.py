@@ -62,8 +62,23 @@ def inicializar_sesion() -> None:
 # ==========================================================
 
 def mostrar_login(autenticador):
+    """
+    Intenta restaurar primero la autenticación desde la cookie persistente.
+    """
 
-    # Si ya inició sesión, no mostrar el formulario
+    if st.session_state.get("authentication_status") is True:
+        return
+
+    # Recuperación silenciosa de la cookie ante refresh/F5.
+    try:
+        autenticador.login(location="unrendered")
+    except Exception as error:
+        print(
+            "No se pudo restaurar automáticamente la sesión desde cookie: "
+            f"{type(error).__name__}: {error}"
+        )
+
+    # Si la cookie era válida, streamlit-authenticator reconstruyó la sesión.
     if st.session_state.get("authentication_status") is True:
         return
 
@@ -91,6 +106,7 @@ def mostrar_login(autenticador):
 
     elif estado is None:
         st.info("Ingresá tus credenciales.")
+
 
 # ==========================================================
 # SINCRONIZAR USUARIO Y ROL
