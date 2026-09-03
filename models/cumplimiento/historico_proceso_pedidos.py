@@ -54,7 +54,7 @@ def _a_datetime(serie: pd.Series) -> pd.Series:
     faltantes = resultado.isna() & serie.notna()
     if faltantes.any():
         resultado.loc[faltantes] = pd.to_datetime(
-            serie.loc[faltantes], errors="coerce", dayfirst=False
+            serie.loc[faltantes], errors="coerce", dayfirst=True
         )
     return resultado
 

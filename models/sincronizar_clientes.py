@@ -15,6 +15,7 @@ import unicodedata
 import pandas as pd
 
 from config_planificacion import ZONAS_PLANIFICACION
+from models.pedidos import normalizar_pedidos_digip
 
 
 ESTADOS_LISTOS = {
@@ -191,22 +192,55 @@ def preparar_pendientes_erp(df_pendientes: pd.DataFrame) -> pd.DataFrame:
 
 
 def preparar_pedidos_digip(df_pedidos_digip: pd.DataFrame) -> pd.DataFrame:
-    """Reduce el crudo DIGIP a una fila útil por pedido."""
+    """Reduce el crudo DIGIP a una fila útil por pedido.
 
-    columnas_requeridas = {"Codigo", "CodigoDespacho"}
-    faltantes = columnas_requeridas.difference(df_pedidos_digip.columns)
+    Usa el normalizador central de models.pedidos para soportar tanto
+    el formato histórico como el formato nuevo del reporte DIGIP.
+    """
 
-    if faltantes:
-        raise ValueError(
-            "Faltan columnas en Pedidos DIGIP: "
-            f"{sorted(faltantes)}"
+    if df_pedidos_digip is None or df_pedidos_digip.empty:
+        return pd.DataFrame(
+            columns=[
+                "Pedido",
+                "CodigoDespacho",
+                "DespachoDescripcion",
+                "Domicilio",
+                "Localidad",
+                "Provincia",
+                "ClienteCodigo",
+                "ClienteDescripcion",
+            ]
         )
 
-    tabla = df_pedidos_digip.copy()
-    tabla["Pedido"] = tabla["Codigo"].apply(normalizar_pedido_desde_codigo)
-    tabla["CodigoDespacho"] = normalizar_codigo(tabla["CodigoDespacho"])
+    crudo = df_pedidos_digip.copy()
 
+    # Campos geográficos que Maestro Clientes necesita y que no forman
+    # parte obligatoria del contrato central de Pedidos.
+    aliases_maestro = {
+        "Dirección": "Domicilio",
+        "Direccion": "Domicilio",
+        "Provincia": "Provincia",
+    }
+
+    for origen, destino in aliases_maestro.items():
+        if origen in crudo.columns and destino not in crudo.columns:
+            crudo = crudo.rename(columns={origen: destino})
+
+    # En el reporte nuevo, "Despacho Id.1" contiene la localidad visible
+    # (ej.: CABA, CASEROS), no un identificador numérico.
+    if "Localidad" not in crudo.columns and "Despacho Id.1" in crudo.columns:
+        crudo["Localidad"] = crudo["Despacho Id.1"]
+
+    tabla = normalizar_pedidos_digip(crudo)
+
+    # El normalizador central resuelve, entre otros:
+    # Código pedido -> Codigo -> Pedido
+    # Código cliente -> ClienteCodigo
+    # Código despacho -> CodigoDespacho
+    # Despacho -> DespachoDescripcion
     for columna in [
+        "CodigoDespacho",
+        "DespachoDescripcion",
         "Domicilio",
         "Localidad",
         "Provincia",
@@ -215,7 +249,17 @@ def preparar_pedidos_digip(df_pedidos_digip: pd.DataFrame) -> pd.DataFrame:
     ]:
         if columna not in tabla.columns:
             tabla[columna] = ""
-        tabla[columna] = tabla[columna].fillna("").astype(str).str.strip()
+
+        tabla[columna] = (
+            tabla[columna]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\.0$", "", regex=True)
+        )
+
+    tabla["Pedido"] = normalizar_codigo(tabla["Pedido"])
+    tabla["CodigoDespacho"] = normalizar_codigo(tabla["CodigoDespacho"])
 
     # Se prioriza una fila que sí tenga código de despacho.
     tabla["_tiene_despacho"] = tabla["CodigoDespacho"].ne("")
@@ -233,6 +277,7 @@ def preparar_pedidos_digip(df_pedidos_digip: pd.DataFrame) -> pd.DataFrame:
         [
             "Pedido",
             "CodigoDespacho",
+            "DespachoDescripcion",
             "Domicilio",
             "Localidad",
             "Provincia",
@@ -240,7 +285,6 @@ def preparar_pedidos_digip(df_pedidos_digip: pd.DataFrame) -> pd.DataFrame:
             "ClienteDescripcion",
         ]
     ].copy()
-
 
 def construir_referencia_historica(
     tabla_clientes: pd.DataFrame,

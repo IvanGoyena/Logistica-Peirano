@@ -366,10 +366,11 @@ def _leer_dataframe_github_cache(
     ruta_github: str,
 ) -> pd.DataFrame:
     """
-    Caché breve para maestros/fuentes marcadas cache=True.
+    Caché global breve para todas las lecturas desde GitHub.
 
-    Las fuentes operativas usan cache=False y consultan GitHub
-    cada vez que la caché del módulo se invalida.
+    Evita consultar repetidamente la API ante cada rerun de Streamlit.
+    El TTL es de 5 minutos y el botón global "Actualizar datos" puede
+    invalidarla mediante st.cache_data.clear().
     """
     return _leer_dataframe_github_sin_cache(
         ruta_github
@@ -385,14 +386,15 @@ def leer_archivo_github(
         ruta_github
     )
 
-    if cache:
-        return _leer_dataframe_github_cache(
-            ruta_github
-        ).copy()
-
-    return _leer_dataframe_github_sin_cache(
+    # Todas las lecturas remotas comparten la caché breve de 5 minutos.
+    # El parámetro `cache` se conserva por compatibilidad con los módulos
+    # existentes, pero ya no permite disparar consultas sin límite a la API.
+    #
+    # Una actualización manual sigue siendo inmediata porque app.py ejecuta
+    # st.cache_data.clear(), invalidando esta función cacheada.
+    return _leer_dataframe_github_cache(
         ruta_github
-    )
+    ).copy()
 
 
 def limpiar_cache_github_reader() -> None:

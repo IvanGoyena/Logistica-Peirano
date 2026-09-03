@@ -20,6 +20,7 @@ COLUMNAS_FINALES_DESPACHOS = [
     "ZonaAgrupadorExpreso",
     "ZonaExpreso",
     "Planificacion",
+    "UnidadesPedido",
     "TotalUnidades",
     "TotalM3",
     "TotalSKUs",
@@ -148,6 +149,15 @@ def construir_tabla_operativa_despachos(
             errors="coerce",
         )
         .fillna(0)
+    )
+
+    # Unidades originales del pedido según la construcción base
+    # utilizada también por el módulo Pedidos.
+    # Se preservan para visualización y control cruzado.
+    tabla["UnidadesPedido"] = (
+        unidades_totales_originales
+        .round(0)
+        .astype(int)
     )
 
     volumen_total_original = (
@@ -414,6 +424,7 @@ def construir_tabla_operativa_despachos(
     )
 
     for columna in [
+        "UnidadesPedido",
         "TotalUnidades",
         "TotalSKUs",
         "ImporteERP",

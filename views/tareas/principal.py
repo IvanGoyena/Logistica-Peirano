@@ -8,6 +8,7 @@ from utils.rendimiento import medir_tiempo, mostrar_info_dataframe
 from utils.tareas.carga import cargar_fuentes_tareas, invalidar_cache_tareas
 from utils.tareas.formatos import preparar_tabla_operativa_visual, resaltar_carro
 from utils.tareas.graficos import grafico_avance_despacho, grafico_sectorizaciones
+from views.tareas.estadisticas import render_estadisticas_tareas
 from utils.tareas.estilo_pantalla import (
     aplicar_estilo_pantalla,
     perfil_visual,
@@ -247,4 +248,8 @@ def render_tareas() -> None:
             construir_contexto_tareas.clear()
             st.rerun()
 
-    _render_fragmento_operativo(perfil)
+    tab_operacion, tab_estadisticas = st.tabs(["⚡ Operación en vivo", "📊 Estadísticas"])
+    with tab_operacion:
+        _render_fragmento_operativo(perfil)
+    with tab_estadisticas:
+        render_estadisticas_tareas()

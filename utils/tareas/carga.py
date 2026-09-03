@@ -225,6 +225,81 @@ def _leer_historico_control() -> pd.DataFrame:
     )
 
 
+
+
+# ==========================================================
+# HISTORICO FILTRAR PREPARACION
+# ==========================================================
+
+@st.cache_data(ttl=270, show_spinner=False)
+def _leer_historico_preparaciones() -> pd.DataFrame:
+    carpeta = Path(CARPETA_WMS)
+    if not carpeta.exists():
+        return pd.DataFrame()
+    rutas = sorted({r.resolve() for patron in (
+        "Filtrar Preparacion*.csv", "Filtrar Preparación*.csv",
+        "Filtrar Preparacion*.xlsx", "Filtrar Preparación*.xlsx",
+    ) for r in carpeta.glob(patron) if r.is_file()})
+    tablas = []
+    for ruta in rutas:
+        try:
+            if ruta.suffix.lower() == ".csv":
+                t = pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8-sig")
+            else:
+                t = pd.read_excel(ruta)
+            if not t.empty:
+                t = t.copy(); t["ArchivoOrigenPreparacion"] = ruta.name; tablas.append(t)
+        except Exception:
+            continue
+    if not tablas:
+        return pd.DataFrame()
+    total = pd.concat(tablas, ignore_index=True, sort=False)
+    claves = [c for c in ["Id", "ContenedorDetalleId", "TareaId", "ControlContenedorId"] if c in total.columns]
+    if claves:
+        total = total.drop_duplicates(subset=claves, keep="last")
+    return total.reset_index(drop=True)
+
+
+
+# ==========================================================
+# HISTORICO ANALITICO DE PREPARACION
+# ==========================================================
+
+@st.cache_data(ttl=270, show_spinner=False)
+def _leer_analitico_preparacion() -> pd.DataFrame:
+    """Consolida Preparacion <Mes> <Año>.*, excluyendo Filtrar Preparacion."""
+    carpeta = Path(CARPETA_WMS)
+    if not carpeta.exists():
+        return pd.DataFrame()
+
+    rutas = []
+    for patron in (
+        "Preparacion*.csv", "Preparación*.csv",
+        "Preparacion*.xlsx", "Preparación*.xlsx",
+        "preparacion*.csv", "preparación*.csv",
+    ):
+        rutas.extend(carpeta.glob(patron))
+
+    rutas = sorted({r.resolve() for r in rutas if r.is_file() and not r.name.lower().startswith("filtrar")})
+    tablas = []
+    for ruta in rutas:
+        try:
+            if ruta.suffix.lower() == ".csv":
+                t = pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8-sig")
+            else:
+                t = pd.read_excel(ruta)
+            if t is not None and not t.empty and "TareaId" in t.columns:
+                t = t.copy()
+                t["ArchivoOrigenAnaliticoPreparacion"] = ruta.name
+                tablas.append(t)
+        except Exception:
+            continue
+    if not tablas:
+        return pd.DataFrame()
+    total = pd.concat(tablas, ignore_index=True, sort=False)
+    # Un TareaId contiene muchas líneas: deduplicamos solo filas idénticas, no la tarea.
+    return total.drop_duplicates().reset_index(drop=True)
+
 # ==========================================================
 # RESPALDO EN SESSION STATE
 # ==========================================================
@@ -403,6 +478,35 @@ def cargar_fuentes_tareas() -> dict[str, object]:
         "control_historico"
     ] = control
 
+    # Filtrar Preparacion es histórico/complementario para la pestaña Estadísticas.
+    try:
+        prep_origen = _leer_historico_preparaciones()
+    except Exception as error:
+        prep_origen = pd.DataFrame()
+        mensajes.append(f"Histórico Filtrar Preparacion: {type(error).__name__}.")
+
+    prep, _, mensaje_prep = _recuperar_fuente(
+        "preparaciones_historico", prep_origen, "Histórico Filtrar Preparacion"
+    )
+    fuentes["preparaciones_historico"] = prep
+    if mensaje_prep and prep.empty:
+        mensajes.append(mensaje_prep)
+
+
+    # Analítico de Preparación: fuente consolidada para estadísticas históricas.
+    try:
+        analitico_prep_origen = _leer_analitico_preparacion()
+    except Exception as error:
+        analitico_prep_origen = pd.DataFrame()
+        mensajes.append(f"Analítico Preparación: {type(error).__name__}.")
+
+    analitico_prep, _, mensaje_analitico_prep = _recuperar_fuente(
+        "preparacion_analitico", analitico_prep_origen, "Analítico Preparación"
+    )
+    fuentes["preparacion_analitico"] = analitico_prep
+    if mensaje_analitico_prep and analitico_prep.empty:
+        mensajes.append(mensaje_analitico_prep)
+
     if (
         mensaje_control
         and control.empty
@@ -435,3 +539,5 @@ def invalidar_cache_tareas() -> None:
     _leer_dinamicas.clear()
     _leer_maestras.clear()
     _leer_historico_control.clear()
+    _leer_historico_preparaciones.clear()
+    _leer_analitico_preparacion.clear()
