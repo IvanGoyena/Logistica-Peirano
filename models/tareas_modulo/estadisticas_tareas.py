@@ -244,7 +244,26 @@ def _live_eventos(base: pd.DataFrame, proceso: str) -> pd.DataFrame:
     e["Fuente"] = "En vivo"
     e["DatoConsolidado"] = False
     e["LineaId"] = _id(e["ContenedorDetalleId"]) if "ContenedorDetalleId" in e.columns else e.index.astype(str)
-    unidades = pd.to_numeric(e.get("UnidadesSatisfecha", e.get("Unidades", 0)), errors="coerce").fillna(0)
+    # IMPORTANTE:
+    # Picking y Control NO usan la misma columna de unidades en Filtrar Preparación.
+    #
+    # - Picking: UnidadesSatisfecha representa correctamente las unidades pickeadas.
+    # - Control: ContenedorUnidades representa las unidades efectivamente controladas.
+    #
+    # Usar UnidadesSatisfecha para Control infla el resultado porque esa columna
+    # corresponde a la línea/preparación y puede ser mayor que la cantidad del
+    # contenedor realmente controlado.
+    if picking:
+        unidades = pd.to_numeric(
+            e.get("UnidadesSatisfecha", e.get("Unidades", 0)),
+            errors="coerce",
+        ).fillna(0)
+    else:
+        unidades = pd.to_numeric(
+            e.get("ContenedorUnidades", e.get("Unidades", 0)),
+            errors="coerce",
+        ).fillna(0)
+
     e["UnidadesProceso"] = unidades
     e["PickeosMetric"] = 1.0
 

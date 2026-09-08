@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 
 
@@ -38,8 +40,10 @@ def construir_tabla_tareas(
     # PEDIDOS
     # ------------------------------------------------------
 
-    pedidos = df_pedidos[
-    [
+    # Campos del pedido necesarios para la operación.
+    # "Pedido" se incorpora si existe para soportar:
+    # 1 Pedido = varias Preparaciones = varios Carros.
+    columnas_pedido = [
         "PreparacionID",
         "ClienteCodigo",
         "ClienteDescripcion",
@@ -49,9 +53,13 @@ def construir_tabla_tareas(
         "Fecha",
         "TotalUnidades",
         "TotalSKUs",
-        "DetalleFamilias"
+        "DetalleFamilias",
     ]
-].copy()
+
+    if "Pedido" in df_pedidos.columns:
+        columnas_pedido.append("Pedido")
+
+    pedidos = df_pedidos[columnas_pedido].copy()
 
     # Claves auxiliares para cruzar preparaciones sin modificar
     # los IDs originales ni convertir nulos en cadenas vacías.
@@ -343,32 +351,36 @@ def construir_tabla_tareas(
         "TotalUnidades",
         "TotalSKUs",
         "DetalleFamilias",
+        *(["Pedido"] if "Pedido" in tabla.columns else []),
 
     ]
 ].copy()
 
-    tabla.columns = [
+    nombres_finales = [
+        "Prioridad",
+        "Orden",
+        "Categoria",
+        "FechaHora",
+        "Estado",
+        "Preparacion",
+        "Cliente",
+        "Area",
+        "Despacho",
+        "Hora",
+        "Carro",
+        "Usuario",
+        "EstadoPreparacion",
+        "TipoPreparacion",
+        "EstadoPedido",
+        "Unidades",
+        "SKUs",
+        "Familias",
+    ]
 
-    "Prioridad",
-    "Orden",
-    "Categoria",
-    "FechaHora",
-    "Estado",
-    "Preparacion",
-    "Cliente",
-    "Area",
-    "Despacho",
-    "Hora",
-    "Carro",
-    "Usuario",
-    "EstadoPreparacion",
-    "TipoPreparacion",
-    "EstadoPedido",
-    "Unidades",
-    "SKUs",
-    "Familias"
+    if "Pedido" in tabla.columns:
+        nombres_finales.append("Pedido")
 
-]
+    tabla.columns = nombres_finales
     
 
     
@@ -823,102 +835,91 @@ def obtener_avance_despachos(tabla):
 
 
 def obtener_carros_criticos(
-
     tabla_operativa,
     avance_despachos
-
 ):
+    """
+    Devuelve los pedidos/carros que pueden cerrar despachos.
+
+    Compatible con ambos escenarios:
+    - Actual: 1 pedido = 1 preparación = 1 carro.
+    - Nuevo:  1 pedido = varias preparaciones = varios carros.
+
+    La salida queda a nivel Pedido/Cliente:
+        Despacho | Cliente | Carros | Sector
+
+    Cada preparación sigue siendo un carro independiente. Cuando un pedido
+    tenga varias preparaciones, sus carros se consolidan en una sola fila.
+    """
+
+    columnas_salida = ["Despacho", "Cliente", "Carros", "Sector"]
+
+    if tabla_operativa is None or tabla_operativa.empty:
+        return pd.DataFrame(columns=columnas_salida)
+
+    if avance_despachos is None or avance_despachos.empty:
+        return pd.DataFrame(columns=columnas_salida)
+
     criticos = avance_despachos[
+        avance_despachos["Avance"] >= 50
+    ].copy()
 
-    avance_despachos["Avance"] >= 50
+    if criticos.empty:
+        return pd.DataFrame(columns=columnas_salida)
 
-].copy()
-    
     tabla = tabla_operativa.merge(
+        criticos[
+            [
+                "Despacho",
+                "Avance",
+                "TotalPreparaciones",
+                "PreparacionesFinalizadas",
+            ]
+        ],
+        on="Despacho",
+        how="inner",
+    )
 
-    criticos[
-
-        [
-
-            "Despacho",
-
-            "Avance",
-
-            "TotalPreparaciones",
-
-            "PreparacionesFinalizadas"
-
-        ]
-
-    ],
-
-    on="Despacho",
-
-    how="inner"
-
-)
-
+    # Solo carros actualmente en curso.
     tabla = tabla[
+        tabla["Categoria"].eq("En Curso")
+    ].copy()
 
-    tabla["Categoria"] == "En Curso"
+    if tabla.empty:
+        return pd.DataFrame(columns=columnas_salida)
 
-].copy()
-    
     tabla["Faltan"] = (
-
-    tabla["TotalPreparaciones"]
-
-    -
-
-    tabla["PreparacionesFinalizadas"]
-
-)
-    
-    tabla = tabla.sort_values(
-
-    [
-
-        "Avance",
-
-        "Faltan",
-
-        "Hora"
-
-    ],
-
-    ascending=[
-
-        False,
-
-        True,
-
-        True
-
-    ]
-
-)
-    tabla = tabla[
-
-    [
-
-        "Despacho",
-
-        "Carro",
-
-        "Cliente",
-
-        "Unidades",
-
-    ]
-
-]
-    
+        tabla["TotalPreparaciones"]
+        - tabla["PreparacionesFinalizadas"]
+    )
 
     # ------------------------------------------------------
-    # UNA FILA POR CARRO / DESPACHO
+    # NORMALIZACIÓN
     # ------------------------------------------------------
-    # Una preparación puede generar varias tareas y repetir el mismo
-    # carro. En este tablero cada carro debe mostrarse una sola vez.
+
+    def _texto_limpio(valor):
+        if pd.isna(valor):
+            return ""
+        return str(valor).strip()
+
+    def _sector_corto(valor):
+        """
+        Primeras 3 letras del sector/área.
+        Ej.: SANITARIOS -> SAN / IMPORTADO -> IMP / NACIONAL -> NAC
+        """
+        texto = _texto_limpio(valor).upper()
+        return texto[:3] if texto else "---"
+
+    def _carro_limpio(valor):
+        texto = _texto_limpio(valor)
+        # Conservamos el icono visual que ya usa el tablero.
+        return texto
+
+    tabla["_SectorCorto"] = tabla["Area"].apply(_sector_corto)
+    tabla["_CarroMostrar"] = tabla["Carro"].apply(_carro_limpio)
+
+    # El mismo carro puede repetirse por tareas internas.
+    # Lo dejamos una sola vez antes de consolidar el pedido.
     tabla["_CarroKey"] = (
         tabla["Carro"]
         .fillna("")
@@ -927,6 +928,7 @@ def obtener_carros_criticos(
         .str.strip()
         .str.upper()
     )
+
     tabla["_DespachoKey"] = (
         tabla["Despacho"]
         .fillna("")
@@ -935,17 +937,158 @@ def obtener_carros_criticos(
         .str.upper()
     )
 
+    tabla["_ClienteKey"] = (
+        tabla["Cliente"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # Si ya tenemos Pedido, esa es la clave correcta para agrupar
+    # varias preparaciones/carros del mismo pedido.
+    # Si todavía no existe en la fuente, mantenemos compatibilidad
+    # agrupando por Despacho + Cliente.
+    if "Pedido" in tabla.columns:
+        pedido_key = (
+            tabla["Pedido"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.upper()
+        )
+        tabla["_PedidoKey"] = pedido_key
+        tabla.loc[tabla["_PedidoKey"].eq(""), "_PedidoKey"] = (
+            tabla.loc[tabla["_PedidoKey"].eq(""), "_ClienteKey"]
+        )
+    else:
+        tabla["_PedidoKey"] = tabla["_ClienteKey"]
+
     tabla = (
         tabla
+        .sort_values(
+            ["Avance", "Faltan", "FechaHora"],
+            ascending=[False, True, True],
+        )
         .drop_duplicates(
-            subset=["_DespachoKey", "_CarroKey"],
+            subset=["_DespachoKey", "_PedidoKey", "_CarroKey"],
             keep="first",
         )
-        .drop(columns=["_DespachoKey", "_CarroKey"], errors="ignore")
         .reset_index(drop=True)
     )
 
-    return tabla
+    # ------------------------------------------------------
+    # CONSOLIDAR VARIOS CARROS DEL MISMO PEDIDO
+    # ------------------------------------------------------
+
+    def _unicos_ordenados(serie):
+        salida = []
+        vistos = set()
+        for valor in serie:
+            texto = _texto_limpio(valor)
+            if not texto:
+                continue
+            clave = texto.upper()
+            if clave not in vistos:
+                vistos.add(clave)
+                salida.append(texto)
+        return salida
+
+    filas = []
+
+    for _, grupo in tabla.groupby(
+        ["_DespachoKey", "_PedidoKey"],
+        sort=False,
+        dropna=False,
+    ):
+        grupo = grupo.sort_values(
+            ["FechaHora", "_CarroKey"],
+            ascending=[True, True],
+        )
+
+        # IMPORTANTE:
+        # El sector debe quedar asociado al CARRO de la misma preparación.
+        # No generamos dos listas independientes (carros / sectores), porque
+        # eso pierde la relación 1 a 1 cuando un pedido tiene sectores distintos.
+        carros_sector = []
+        vistos_carro = set()
+
+        # Sumamos las unidades a nivel CARRO/PREPARACIÓN antes de mostrarlo.
+        # Así cada carro conserva su sector y su volumen real:
+        # 🚧 CARRO301 (NAC - 105) - 🚧 CARRO302 (IMP - 166)
+        for _, fila_carro in grupo.iterrows():
+            carro = _texto_limpio(fila_carro.get("_CarroMostrar", ""))
+            sector = _texto_limpio(fila_carro.get("_SectorCorto", ""))
+
+            if not carro:
+                continue
+
+            carro_key = (
+                re.sub(r"^[^A-Za-z0-9]*", "", carro)
+                .strip()
+                .upper()
+            )
+
+            if not carro_key or carro_key in vistos_carro:
+                continue
+
+            vistos_carro.add(carro_key)
+
+            # Todas las líneas del mismo carro/preparación.
+            mask_carro = grupo["_CarroMostrar"].astype(str).map(
+                lambda x: re.sub(r"^[^A-Za-z0-9]*", "", x).strip().upper()
+            ).eq(carro_key)
+
+            unidades_carro = pd.to_numeric(
+                grupo.loc[mask_carro, "Unidades"],
+                errors="coerce",
+            ).fillna(0).sum()
+
+            unidades_txt = f"{int(round(unidades_carro)):,}".replace(",", ".")
+
+            # Solo para visualización quitamos el prefijo CARRO.
+            # La clave interna sigue siendo CARRO301, CARRO302, etc.
+            carro_visual = re.sub(r"^CARRO\s*", "", carro_key, flags=re.IGNORECASE)
+
+            if sector and sector != "---":
+                carros_sector.append(f"🚧 {carro_visual} ({sector} - {unidades_txt})")
+            else:
+                carros_sector.append(f"🚧 {carro_visual} ({unidades_txt})")
+
+        filas.append(
+            {
+                "Despacho": _texto_limpio(grupo["Despacho"].iloc[0]),
+                "Cliente": _texto_limpio(grupo["Cliente"].iloc[0]),
+                # Cada carro ya sale con SU sector correcto.
+                # Ej.: 🚧 CARRO301 (NAC) - 🚧 CARRO302 (IMP)
+                "Carros": " - ".join(carros_sector),
+                # Se conserva por compatibilidad, pero la vista ya no depende de ella.
+                "Sector": "",
+                "_Avance": grupo["Avance"].iloc[0],
+                "_Faltan": grupo["Faltan"].iloc[0],
+                "_HoraOrden": grupo["FechaHora"].min(),
+            }
+        )
+
+    salida = pd.DataFrame(filas)
+
+    if salida.empty:
+        return pd.DataFrame(columns=columnas_salida)
+
+    salida = (
+        salida
+        .sort_values(
+            ["_Avance", "_Faltan", "_HoraOrden"],
+            ascending=[False, True, True],
+        )
+        .drop(
+            columns=["_Avance", "_Faltan", "_HoraOrden"],
+            errors="ignore",
+        )
+        .reset_index(drop=True)
+    )
+
+    return salida[columnas_salida]
 
 
 # ==========================================================

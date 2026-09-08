@@ -80,17 +80,43 @@ def _render_kpis(contexto: dict[str, object]) -> None:
         ),
     ]
 
-    html = '<div class="tareas-kpi-grid">'
-    for etiqueta, valor, detalle in tarjetas:
-        html += (
-            '<div class="tareas-kpi-card">'
-            f'<div class="tareas-kpi-label">{etiqueta}</div>'
-            f'<div class="tareas-kpi-value">{valor}</div>'
-            f'<div class="tareas-kpi-detail">{detalle}</div>'
-            '</div>'
-        )
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
+    # st.columns garantiza que las cuatro tarjetas ocupen TODO el ancho.
+    columnas = st.columns(4, gap="medium")
+
+    for columna, (etiqueta, valor, detalle) in zip(columnas, tarjetas):
+        with columna:
+            html = (
+                '<div class="tareas-kpi-card tareas-kpi-card-principal">'
+                f'<div class="tareas-kpi-label">{etiqueta}</div>'
+                f'<div class="tareas-kpi-value">{valor}</div>'
+                f'<div class="tareas-kpi-detail">{detalle}</div>'
+                '</div>'
+            )
+            st.markdown(html, unsafe_allow_html=True)
+
+    # Más presencia visual sin alterar el resto del estilo de la app.
+    st.markdown(
+        """
+        <style>
+        .tareas-kpi-card-principal {
+            width: 100% !important;
+            min-height: 150px !important;
+            padding: 20px 22px !important;
+            box-sizing: border-box !important;
+        }
+        .tareas-kpi-card-principal .tareas-kpi-label {
+            font-size: clamp(1rem, 1.08vw, 1.18rem) !important;
+        }
+        .tareas-kpi-card-principal .tareas-kpi-value {
+            font-size: clamp(2.8rem, 3.15vw, 3.75rem) !important;
+        }
+        .tareas-kpi-card-principal .tareas-kpi-detail {
+            font-size: clamp(.9rem, .97vw, 1.08rem) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_indicadores(
@@ -98,28 +124,31 @@ def _render_indicadores(
     *,
     perfil: str,
 ) -> None:
-    col_despachos, col_criticos, col_sectores = st.columns(
-        [1.05, 1.3, 1.05], vertical_alignment="top"
+    # 1) Avance de despachos arriba, ocupando todo el ancho.
+    with st.container(border=True):
+        st.markdown("#### 🚛 Avance de despachos")
+        sin_iniciar = contexto["despachos_sin_iniciar"]
+        if sin_iniciar:
+            st.caption(
+                f"Sin iniciar ({len(sin_iniciar)}): " + " · ".join(sin_iniciar)
+            )
+
+        avance = contexto["avance_despachos"]
+        if avance.empty:
+            st.info("No hay despachos activos con avance parcial.")
+        else:
+            # Los donuts quedan en una sola fila superior siempre que entren.
+            cantidad_columnas = min(len(avance), 5 if perfil == "tv" else 4)
+            cantidad_columnas = max(cantidad_columnas, 1)
+            columnas = st.columns(cantidad_columnas)
+            for indice, (_, fila) in enumerate(avance.iterrows()):
+                with columnas[indice % cantidad_columnas]:
+                    grafico_avance_despacho(fila, perfil=perfil)
+
+    # 2) Debajo: tabla a la izquierda y gráfico de sectores a la derecha.
+    col_criticos, col_sectores = st.columns(
+        [1.65, 1.0], vertical_alignment="top"
     )
-
-    with col_despachos:
-        with st.container(border=True):
-            st.markdown("#### 🚛 Avance de despachos")
-            sin_iniciar = contexto["despachos_sin_iniciar"]
-            if sin_iniciar:
-                st.caption(
-                    f"Sin iniciar ({len(sin_iniciar)}): " + " · ".join(sin_iniciar)
-                )
-
-            avance = contexto["avance_despachos"]
-            if avance.empty:
-                st.info("No hay despachos activos con avance parcial.")
-            else:
-                cantidad_columnas = 3 if perfil == "tv" else 2
-                columnas = st.columns(cantidad_columnas)
-                for indice, (_, fila) in enumerate(avance.iterrows()):
-                    with columnas[indice % cantidad_columnas]:
-                        grafico_avance_despacho(fila, perfil=perfil)
 
     with col_criticos:
         with st.container(border=True):
@@ -128,15 +157,27 @@ def _render_indicadores(
             if criticos.empty:
                 st.success("No hay carros críticos en este momento.")
             else:
+                # El modelo ya entrega cada carro emparejado con SU sector.
+                # Ej.: 🚧 CARRO301 (NAC) - 🚧 CARRO302 (IMP)
+                # La vista solamente elimina la columna auxiliar Sector.
+                criticos = criticos.drop(columns=["Sector"], errors="ignore")
+
                 if "Unidades" in criticos.columns:
                     criticos["Unidades"] = pd.to_numeric(
                         criticos["Unidades"], errors="coerce"
                     ).fillna(0).astype(int)
+
                 st.dataframe(
                     criticos,
                     width="stretch",
                     hide_index=True,
                     height=430,
+                    column_config={
+                        "Carros": st.column_config.TextColumn(
+                            "Carros",
+                            width="large",
+                        ),
+                    },
                 )
 
     with col_sectores:

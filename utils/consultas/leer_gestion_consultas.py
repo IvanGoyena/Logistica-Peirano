@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 import pandas as pd
 
@@ -17,6 +18,16 @@ from utils.google_sheets import (
     leer_hoja,
     asegurar_hoja,
 )
+
+
+# Última lectura correcta por hoja.
+# Sirve como respaldo ante cortes transitorios de Google Sheets
+# durante la vida del proceso de Streamlit.
+_ULTIMA_LECTURA_GOOGLE: dict[str, pd.DataFrame] = {}
+
+# Reintentos ante errores de red transitorios.
+_INTENTOS_LECTURA_GOOGLE = 3
+_ESPERA_REINTENTO_SEGUNDOS = 1.5
 
 
 # ==========================================================
@@ -141,30 +152,57 @@ def leer_tabla_google(
     columna_fecha: str | None = None,
 ) -> pd.DataFrame:
     """
-    Lee una hoja de Google Sheets y garantiza que tenga
-    las columnas esperadas por la aplicación.
+    Lee una hoja de Google Sheets con reintentos ante cortes de red.
+
+    Si Google falla después de los reintentos y existe una lectura correcta
+    previa de esa misma hoja en memoria, devuelve esa copia como respaldo.
+    Si todavía no hubo ninguna lectura correcta, mantiene el error visible
+    para no ocultar un problema real de conexión o configuración.
     """
 
-    try:
+    ultimo_error: Exception | None = None
+    tabla = None
 
-        tabla = leer_hoja(
-            nombre_hoja=nombre_hoja,
-            columnas=columnas,
-        )
+    for intento in range(1, _INTENTOS_LECTURA_GOOGLE + 1):
+        try:
+            tabla = leer_hoja(
+                nombre_hoja=nombre_hoja,
+                columnas=columnas,
+            )
+            ultimo_error = None
+            break
 
-    except Exception as error:
+        except Exception as error:
+            ultimo_error = error
+
+            print(
+                f"Google Sheets: error leyendo '{nombre_hoja}' "
+                f"(intento {intento}/{_INTENTOS_LECTURA_GOOGLE}): "
+                f"{type(error).__name__}: {error}"
+            )
+
+            if intento < _INTENTOS_LECTURA_GOOGLE:
+                time.sleep(_ESPERA_REINTENTO_SEGUNDOS * intento)
+
+    if ultimo_error is not None:
+        respaldo = _ULTIMA_LECTURA_GOOGLE.get(nombre_hoja)
+
+        if respaldo is not None:
+            print(
+                f"Google Sheets: se usa la última lectura correcta "
+                f"de '{nombre_hoja}' como respaldo."
+            )
+            return respaldo.copy().reset_index(drop=True)
 
         raise RuntimeError(
             f"No se pudo leer la hoja "
-            f"'{nombre_hoja}' de Google Sheets: "
-            f"{error}"
-        ) from error
+            f"'{nombre_hoja}' de Google Sheets después de "
+            f"{_INTENTOS_LECTURA_GOOGLE} intentos: "
+            f"{ultimo_error}"
+        ) from ultimo_error
 
     if tabla is None:
-
-        tabla = crear_dataframe_vacio(
-            columnas
-        )
+        tabla = crear_dataframe_vacio(columnas)
 
     tabla = asegurar_columnas(
         tabla,
@@ -172,22 +210,23 @@ def leer_tabla_google(
     )
 
     if "Pedido" in tabla.columns:
-
         tabla["Pedido"] = (
             tabla["Pedido"]
             .apply(normalizar_pedido)
         )
 
     if columna_fecha:
-
         tabla = ordenar_por_fecha(
             tabla,
             columna_fecha,
         )
 
-    return tabla.reset_index(
-        drop=True
-    )
+    tabla = tabla.reset_index(drop=True)
+
+    # Guardamos únicamente lecturas exitosas.
+    _ULTIMA_LECTURA_GOOGLE[nombre_hoja] = tabla.copy()
+
+    return tabla
 
 
 # ==========================================================

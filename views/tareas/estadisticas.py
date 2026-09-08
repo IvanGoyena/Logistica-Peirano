@@ -14,6 +14,30 @@ from utils.tareas.carga import cargar_fuentes_tareas
 from utils.estilo_graficos import aplicar_formato_visual_plotly
 
 
+# Usuarios que no deben participar de esta vista estadística.
+# Se normaliza el texto para que diferencias de mayúsculas/minúsculas
+# o espacios no vuelvan a incorporarlos.
+USUARIOS_EXCLUIDOS_ESTADISTICAS = {
+    "GASTON ALEJANDRO KIRICZUK",
+    "IVAN GOYENA",
+    "LUCAS VEGA",
+    "JUAN MANUEL ESPINDOLA",
+}
+
+
+def _normalizar_usuario(valor) -> str:
+    return " ".join(str(valor).strip().upper().split())
+
+
+def _excluir_usuarios(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "Usuario" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    x = df.copy()
+    normalizados = x["Usuario"].fillna("").map(_normalizar_usuario)
+    return x.loc[~normalizados.isin(USUARIOS_EXCLUIDOS_ESTADISTICAS)].copy()
+
+
 def _fmt(n: float) -> str:
     return f"{int(n):,}".replace(",", ".")
 
@@ -128,6 +152,11 @@ def render_estadisticas_tareas() -> None:
         fuentes.get("articulos"),
     )
 
+    # Regla global de esta vista: estos usuarios no participan de KPIs,
+    # rankings, gráficos, filtros ni radiografía.
+    pick = _excluir_usuarios(pick)
+    control = _excluir_usuarios(control)
+
     fechas = pd.concat([
         pick.get("FechaEvento", pd.Series(dtype="datetime64[ns]")),
         control.get("FechaEvento", pd.Series(dtype="datetime64[ns]")),
@@ -135,6 +164,48 @@ def render_estadisticas_tareas() -> None:
     if fechas.empty:
         st.info("El histórico no contiene eventos de Picking o Control con fecha válida.")
         return
+
+
+    st.markdown(
+        """
+        <style>
+        .tareas-kpi-grid {
+            display: grid !important;
+            grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+            gap: 10px !important;
+            width: 100% !important;
+            align-items: stretch !important;
+            margin-bottom: 10px !important;
+        }
+        .tareas-kpi-card {
+            min-width: 0 !important;
+            min-height: 112px !important;
+            padding: 11px 13px !important;
+            border-radius: 10px !important;
+        }
+        .tareas-kpi-label {
+            font-size: 0.86rem !important;
+            line-height: 1.15 !important;
+            margin-bottom: 7px !important;
+        }
+        .tareas-kpi-value {
+            font-size: 1.9rem !important;
+            line-height: 1.05 !important;
+            margin-bottom: 8px !important;
+        }
+        .tareas-kpi-detail {
+            font-size: 0.75rem !important;
+            line-height: 1.2 !important;
+        }
+        @media (max-width: 1100px) {
+            .tareas-kpi-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.subheader("📊 Estadísticas de Operación")
     st.caption("Modelo híbrido: analíticos DIGIP para datos consolidados + Filtrar Preparación para el delta en vivo.")
@@ -183,6 +254,41 @@ def render_estadisticas_tareas() -> None:
     kp = _kpis_proceso(pick_f)
     kc = _kpis_proceso(control_f)
 
+    # KPI gerencial de Control:
+    # contamos preparaciones/carros únicos controlados, no ControlContenedorId.
+    # Priorizamos IdPreparacion si está disponible; "Id" queda como respaldo
+    # porque el modelo híbrido puede normalizar allí el identificador de preparación.
+    if control_f is None or control_f.empty:
+        carros_controlados = 0
+    elif "IdPreparacion" in control_f.columns:
+        carros_controlados = int(
+            control_f["IdPreparacion"]
+            .replace("", pd.NA)
+            .dropna()
+            .nunique()
+        )
+    elif "Id" in control_f.columns:
+        carros_controlados = int(
+            control_f["Id"]
+            .replace("", pd.NA)
+            .dropna()
+            .nunique()
+        )
+    else:
+        carros_controlados = 0
+
+    # Promedio solicitado: primer KPI / segundo KPI.
+    # Picking = Unidades pickeadas / Pickeos
+    # Control = Unidades controladas / Pickeos control
+    promedio_lineas_pick = (
+        kp["unidades"] / kp["pickeos"]
+        if kp["pickeos"] else 0
+    )
+    promedio_lineas_control = (
+        kc["unidades"] / kc["pickeos"]
+        if kc["pickeos"] else 0
+    )
+
     st.markdown("#### 🏆 KPIs Picking")
     _render_kpi_cards([
         ("Unidades pickeadas", _fmt(kp["unidades"]), "Volumen procesado en Picking"),
@@ -190,15 +296,17 @@ def render_estadisticas_tareas() -> None:
         ("Tareas", _fmt(kp["eventos"]), "CuantasTareas consolidado / proxy en vivo"),
         ("SKUs", _fmt(kp["skus"]), "Artículos únicos trabajados"),
         ("Usuarios activos", _fmt(kp["usuarios"]), "Operarios con actividad"),
+        ("Promedio líneas", f"{promedio_lineas_pick:.2f}", "Unidades / pickeos"),
     ])
 
     st.markdown("#### 📦 KPIs Control")
     _render_kpi_cards([
         ("Unidades controladas", _fmt(kc["unidades"]), "Volumen procesado en Control"),
         ("Pickeos control", _fmt(kc["pickeos"]), "Líneas controladas"),
-        ("Controles", _fmt(kc["eventos"]), "ControlContenedor detectados"),
+        ("Carros controlados", _fmt(carros_controlados), "Preparaciones / carros únicos controlados"),
         ("SKUs", _fmt(kc["skus"]), "Artículos únicos controlados"),
         ("Usuarios activos", _fmt(kc["usuarios"]), "Operarios con actividad"),
+        ("Promedio líneas", f"{promedio_lineas_control:.2f}", "Unidades / pickeos control"),
     ])
 
     # PICKING: tabla + participación del proceso
