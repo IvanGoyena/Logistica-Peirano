@@ -8,7 +8,6 @@ from utils.rendimiento import medir_tiempo, mostrar_info_dataframe
 from utils.tareas.carga import cargar_fuentes_tareas, invalidar_cache_tareas
 from utils.tareas.formatos import preparar_tabla_operativa_visual, resaltar_carro
 from utils.tareas.graficos import grafico_avance_despacho, grafico_sectorizaciones
-from views.tareas.estadisticas import render_estadisticas_tareas
 from utils.tareas.estilo_pantalla import (
     aplicar_estilo_pantalla,
     perfil_visual,
@@ -194,13 +193,280 @@ def _render_tabla(
     *,
     perfil: str,
 ) -> None:
-    tabla = preparar_tabla_operativa_visual(contexto["tabla_operativa"])
+    tabla_base = contexto["tabla_operativa"].copy()
+    tabla = preparar_tabla_operativa_visual(tabla_base)
+
+    # Mostrar explícitamente la división operativa antes de que exista el carro.
+    # El modelo mantiene el orden por Preparación y Área, de modo que las tareas
+    # de un mismo cliente/preparación quedan juntas sin ordenar por Cliente.
+    if len(tabla) == len(tabla_base):
+        tabla = tabla.reset_index(drop=True)
+        tabla_base = tabla_base.reset_index(drop=True)
+
+        if "Preparacion" in tabla_base.columns:
+            tabla.insert(1, "Preparación", tabla_base["Preparacion"])
+
+        if "Area" in tabla_base.columns:
+            area_visible = (
+                tabla_base["Area"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+            )
+            tabla.insert(3 if "Preparación" in tabla.columns else 2, "Área", area_visible)
+
+        # Si todavía no fue tomada, el carro no existe. Lo dejamos explícito
+        # para diferenciar una tarea pendiente sectorizada de un dato faltante.
+        if "Carro" in tabla.columns and "Categoria" in tabla_base.columns:
+            pendiente = tabla_base["Categoria"].astype(str).eq("Pendiente")
+            carro_vacio = tabla["Carro"].fillna("").astype(str).str.strip().eq("")
+            tabla.loc[pendiente & carro_vacio, "Carro"] = "⏳ Sin asignar"
+
     st.markdown("### 📋 Operación en curso")
-    st.caption(f"{len(tabla)} registros activos")
+
+    # Filtro operativo por despacho. Solo afecta la tabla visible.
+    columna_despacho = None
+    if "Despacho" in tabla.columns:
+        columna_despacho = "Despacho"
+    elif "DespachoDescripcion" in tabla.columns:
+        columna_despacho = "DespachoDescripcion"
+
+    despacho_seleccionado = "Todos"
+    if columna_despacho is not None:
+        opciones_despacho = (
+            tabla[columna_despacho]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        opciones_despacho = sorted(
+            valor for valor in opciones_despacho.unique().tolist() if valor
+        )
+
+        despacho_seleccionado = st.selectbox(
+            "Filtrar por despacho",
+            ["Todos"] + opciones_despacho,
+            key="operacion_filtro_despacho",
+        )
+
+        if despacho_seleccionado != "Todos":
+            tabla = tabla.loc[
+                tabla[columna_despacho]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .eq(despacho_seleccionado)
+            ].copy()
+
+            # Aplicar el mismo filtro sobre la tabla operativa original.
+            # La inteligencia necesita columnas técnicas como Preparacion,
+            # Area y Categoria que la tabla visual renombra/oculta.
+            if "Despacho" in tabla_base.columns:
+                tabla_base = tabla_base.loc[
+                    tabla_base["Despacho"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq(despacho_seleccionado)
+                ].copy()
+            elif "DespachoDescripcion" in tabla_base.columns:
+                tabla_base = tabla_base.loc[
+                    tabla_base["DespachoDescripcion"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq(despacho_seleccionado)
+                ].copy()
+
+    if despacho_seleccionado == "Todos":
+        st.caption(f"{len(tabla)} registros activos")
+    else:
+        st.caption(f"{len(tabla)} registros · Despacho: {despacho_seleccionado}")
 
     if tabla.empty:
-        st.info("No hay tareas operativas para mostrar.")
+        st.info("No hay tareas operativas para mostrar con el despacho seleccionado.")
         return
+
+    # ======================================================
+    # INTELIGENCIA OPERATIVA: TAREAS QUE CIERRAN PREPARACIONES
+    # ======================================================
+    # IMPORTANTE: usar tabla_base, no la tabla visual.
+    # preparar_tabla_operativa_visual renombra Preparacion -> Preparación
+    # y Area -> Área, por eso la versión anterior producía KeyError.
+    intel = tabla_base.copy()
+    intel["_Prep"] = intel["Preparacion"].astype("string").fillna("").str.strip()
+    intel["_Area"] = intel["Area"].fillna("").astype(str).str.strip().str.upper()
+    intel["_Categoria"] = intel["Categoria"].astype(str).str.strip()
+    intel["_Resuelta"] = intel["_Categoria"].eq("Finalizado")
+    intel["_Pendiente"] = ~intel["_Resuelta"]
+
+    for c in ["Unidades", "SKUs", "VolumenM3", "PesoKg"]:
+        if c not in intel.columns:
+            intel[c] = 0.0
+        intel[c] = pd.to_numeric(intel[c], errors="coerce").fillna(0.0)
+
+    # Estado real de cada preparación según sus áreas.
+    prep_estado = (
+        intel.groupby("_Prep", as_index=False)
+        .agg(AreasTotales=("_Area", "nunique"))
+    )
+    areas_pend = (
+        intel.loc[intel["_Pendiente"]]
+        .groupby("_Prep")["_Area"].nunique()
+        .rename("AreasPendientes")
+    )
+    areas_res = (
+        intel.loc[intel["_Resuelta"]]
+        .groupby("_Prep")["_Area"].nunique()
+        .rename("AreasResueltas")
+    )
+    prep_estado = prep_estado.merge(areas_pend, on="_Prep", how="left").merge(
+        areas_res, on="_Prep", how="left"
+    )
+    prep_estado[["AreasPendientes", "AreasResueltas"]] = (
+        prep_estado[["AreasPendientes", "AreasResueltas"]].fillna(0).astype(int)
+    )
+
+    pendientes_i = intel.loc[intel["_Pendiente"]].merge(
+        prep_estado, on="_Prep", how="left"
+    )
+
+    if not pendientes_i.empty:
+        agg = {
+            "Cliente": "first",
+            "Despacho": "first",
+            "Unidades": "max",
+            "SKUs": "max",
+            "VolumenM3": "max",
+            "PesoKg": "max",
+            "AreasTotales": "max",
+            "AreasResueltas": "max",
+            "AreasPendientes": "max",
+            "Categoria": "first",
+        }
+        if "Vehiculo" in pendientes_i.columns:
+            agg["Vehiculo"] = "first"
+
+        prioridad = (
+            pendientes_i.groupby(["_Prep", "_Area"], as_index=False).agg(agg)
+        )
+
+        # 45% cierre inmediato + 25% cercanía al cierre +
+        # 20% quick win físico + 10% continuidad de una tarea ya tomada.
+        prioridad["CierraPreparacion"] = prioridad["AreasPendientes"].eq(1)
+        prioridad["CercaniaCierre"] = (
+            1.0 - (
+                (prioridad["AreasPendientes"] - 1).clip(lower=0)
+                / prioridad["AreasTotales"].clip(lower=1)
+            )
+        ).clip(0, 1)
+
+        vol = prioridad["VolumenM3"].clip(lower=0)
+        uni = prioridad["Unidades"].clip(lower=0)
+        max_vol = float(vol.max()) if len(vol) else 0.0
+        max_uni = float(uni.max()) if len(uni) else 0.0
+        facilidad_vol = 1 - (vol / max_vol) if max_vol > 0 else 1.0
+        facilidad_uni = 1 - (uni / max_uni) if max_uni > 0 else 1.0
+        prioridad["QuickWin"] = (facilidad_vol * 0.6 + facilidad_uni * 0.4).clip(0, 1)
+        prioridad["EnCurso"] = prioridad["Categoria"].astype(str).eq("En Curso")
+
+        prioridad["ScorePrioridad"] = (
+            prioridad["CierraPreparacion"].astype(float) * 45
+            + prioridad["CercaniaCierre"] * 25
+            + prioridad["QuickWin"] * 20
+            + prioridad["EnCurso"].astype(float) * 10
+        ).clip(0, 100).round().astype(int)
+
+        prioridad["Accion"] = "🟡 SIGUIENTE"
+        prioridad.loc[prioridad["ScorePrioridad"].lt(50), "Accion"] = "⚪ COLA"
+        prioridad.loc[prioridad["ScorePrioridad"].ge(70), "Accion"] = "🟠 ALTA"
+        prioridad.loc[prioridad["CierraPreparacion"], "Accion"] = "🔥 CERRAR YA"
+
+        prioridad = prioridad.sort_values(
+            ["CierraPreparacion", "ScorePrioridad", "AreasPendientes", "VolumenM3"],
+            ascending=[False, False, True, True],
+        ).reset_index(drop=True)
+
+        impacto_area = (
+            prioridad.groupby("_Area", as_index=False)
+            .agg(
+                Tareas=("_Prep", "nunique"),
+                CierraAhora=("CierraPreparacion", "sum"),
+                ScoreProm=("ScorePrioridad", "mean"),
+                VolPend=("VolumenM3", "sum"),
+            )
+            .sort_values(
+                ["CierraAhora", "ScoreProm", "Tareas"],
+                ascending=[False, False, False],
+            )
+        )
+
+        st.markdown("#### 🎯 Tareas que cierran Preparaciones")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Preparaciones por cerrar", int(prioridad["_Prep"].nunique()))
+        k2.metric(
+            "Cerrables ahora",
+            int(prioridad.loc[prioridad["CierraPreparacion"], "_Prep"].nunique()),
+        )
+        k3.metric("Tareas / áreas pendientes", int(len(prioridad)))
+        k4.metric("Volumen pendiente", f"{prioridad['VolumenM3'].sum():.2f} m³")
+
+        if not impacto_area.empty:
+            top = impacto_area.iloc[0]
+            area_top = str(top["_Area"]).strip()
+            cierres_top = int(top["CierraAhora"])
+            tareas_top = int(top["Tareas"])
+            if cierres_top:
+                st.success(
+                    f"**Prioridad ahora: {area_top}.** "
+                    f"Atacar {tareas_top} tarea(s) de esta área permite cerrar "
+                    f"**{cierres_top} preparación(es) inmediatamente**."
+                )
+            else:
+                st.info(
+                    f"**Prioridad ahora: {area_top}.** "
+                    "Es el área con mejor combinación entre cercanía al cierre, "
+                    "esfuerzo restante y continuidad operativa."
+                )
+
+        c1, c2 = st.columns([1.0, 2.0], vertical_alignment="top")
+        with c1:
+            st.markdown("**Orden recomendado por área**")
+            ta = impacto_area.copy()
+            ta["Score"] = ta["ScoreProm"].round().astype(int)
+            ta["Vol. pend."] = ta["VolPend"].round(2)
+            ta = ta.rename(columns={"_Area": "Área", "CierraAhora": "Cierra prep."})
+            st.dataframe(
+                ta[["Área", "Tareas", "Cierra prep.", "Score", "Vol. pend."]],
+                hide_index=True, width="stretch", height=275,
+            )
+
+        with c2:
+            st.markdown("**Qué conviene sacar primero**")
+            tm = prioridad.copy()
+            tm["Preparación"] = tm["_Prep"]
+            tm["Área"] = tm["_Area"]
+            tm["Áreas listas"] = tm["AreasResueltas"].astype(int)
+            tm["Faltan"] = tm["AreasPendientes"].astype(int)
+            tm["Vol. m³"] = tm["VolumenM3"].round(3)
+            tm["Prioridad"] = tm["ScorePrioridad"]
+            cols = [
+                "Accion", "Prioridad", "Preparación", "Cliente", "Área",
+                "Áreas listas", "Faltan", "Unidades", "SKUs", "Vol. m³",
+            ]
+            if "Vehiculo" in tm.columns:
+                tm["Vehículo sugerido"] = tm["Vehiculo"].fillna("").astype(str)
+                cols.insert(5, "Vehículo sugerido")
+            st.dataframe(
+                tm[cols].head(15), hide_index=True, width="stretch", height=275,
+            )
+
+        st.caption(
+            "Prioridad: cierre inmediato de preparación → cercanía al cierre → "
+            "quick win por volumen/unidades → continuidad de tareas ya tomadas."
+        )
+        st.divider()
 
     st.dataframe(
         tabla.style.format({"Unidades": "{:.0f}", "SKUs": "{:.0f}"}).apply(
@@ -289,8 +555,20 @@ def render_tareas() -> None:
             construir_contexto_tareas.clear()
             st.rerun()
 
-    tab_operacion, tab_estadisticas = st.tabs(["⚡ Operación en vivo", "📊 Estadísticas"])
-    with tab_operacion:
-        _render_fragmento_operativo(perfil)
-    with tab_estadisticas:
+    # Navegación con carga bajo demanda: a diferencia de st.tabs,
+    # solamente se ejecuta la vista seleccionada. Esto evita construir
+    # Estadísticas mientras el usuario está trabajando en Operación en vivo.
+    vista = st.segmented_control(
+        "Vista del módulo",
+        options=["⚡ Operación en vivo", "📊 Estadísticas"],
+        default="⚡ Operación en vivo",
+        key="tareas_vista_modulo",
+        label_visibility="collapsed",
+    )
+
+    if vista == "📊 Estadísticas":
+        from views.tareas.estadisticas import render_estadisticas_tareas
+
         render_estadisticas_tareas()
+    else:
+        _render_fragmento_operativo(perfil)

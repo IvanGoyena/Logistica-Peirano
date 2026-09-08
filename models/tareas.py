@@ -338,6 +338,8 @@ def construir_tabla_tareas(
         "Categoria",
         "FechaHora",
         "TareaEstado",
+        "Articulos",
+        "ArticulosDescripcion",
         "PreparacionId",
         "ClienteDescripcion",
         "AreaDescripcion",
@@ -352,6 +354,9 @@ def construir_tabla_tareas(
         "TotalSKUs",
         "DetalleFamilias",
         *(["Pedido"] if "Pedido" in tabla.columns else []),
+        *(["Vehiculo"] if "Vehiculo" in tabla.columns else []),
+        *(["Peso"] if "Peso" in tabla.columns else []),
+        *(["Volumen"] if "Volumen" in tabla.columns else []),
 
     ]
 ].copy()
@@ -362,6 +367,8 @@ def construir_tabla_tareas(
         "Categoria",
         "FechaHora",
         "Estado",
+        "_ArticulosTarea",
+        "_ArticulosDescripcionTarea",
         "Preparacion",
         "Cliente",
         "Area",
@@ -379,11 +386,25 @@ def construir_tabla_tareas(
 
     if "Pedido" in tabla.columns:
         nombres_finales.append("Pedido")
+    if "Vehiculo" in tabla.columns:
+        nombres_finales.append("Vehiculo")
+    if "Peso" in tabla.columns:
+        nombres_finales.append("Peso")
+    if "Volumen" in tabla.columns:
+        nombres_finales.append("Volumen")
 
     tabla.columns = nombres_finales
-    
 
-    
+    # Informe Tareas: Peso en gramos y Volumen en mm³.
+    if "Peso" in tabla.columns:
+        tabla["PesoKg"] = pd.to_numeric(tabla["Peso"], errors="coerce").fillna(0) / 1000.0
+    if "Volumen" in tabla.columns:
+        tabla["VolumenM3"] = pd.to_numeric(tabla["Volumen"], errors="coerce").fillna(0) / 1_000_000_000.0
+
+    # Normalizar el ID visible antes de construir cualquier vista derivada.
+    tabla["Preparacion"] = (tabla["Preparacion"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True))
+    tabla["Preparacion"] = tabla["Preparacion"].where(tabla["Preparacion"].notna() & tabla["Preparacion"].ne(""), pd.NA)
+
     return tabla
 
 # ==========================================================
@@ -440,21 +461,11 @@ def obtener_resumen_operativo(
 # CARROS EN CURSO
 # ------------------------------------------------------
 
+    # Los carros abiertos no vencen por fecha.
     resumen["CarrosEnCurso"] = (
+        tabla.loc[tabla["Categoria"].eq("En Curso"), "Carro"].dropna().nunique()
+    )
 
-    tabla[
-
-        (tabla["Categoria"] == "En Curso")
-
-        &
-
-        (tabla["FechaHora"].dt.normalize() >= fecha_inicio)
-
-    ]["Carro"]
-
-    .nunique()
-
-)
 
 # ------------------------------------------------------
 # CARROS FINALIZADOS
@@ -583,11 +594,31 @@ def obtener_tabla_operativa(tabla):
 
     fecha_operativa = operativa["FechaHora"].dt.normalize().max()
     fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
-    operativa = operativa[
 
-    operativa["FechaHora"].dt.normalize() >= fecha_inicio
+    # Solo mostramos tareas pertenecientes a pedidos que siguen ABIERTOS.
+    # Si el pedido ya quedó COMPLETO/CERRADO, desaparece del tablero aunque
+    # DIGIP haya dejado una tarea o un CARRO técnicamente abierto.
+    estado_pedido = (
+        operativa["EstadoPedido"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    pedido_abierto = estado_pedido.isin(["PENDIENTE", "PREPARACION", "SUSPENDIDO", "SUSPENDIDA"])
+    operativa = operativa.loc[pedido_abierto].copy()
 
-].copy()
+    # Dentro de pedidos abiertos:
+    # - Pendientes / En Curso / Suspendidas: sin límite de fecha.
+    # - Finalizadas: solamente dentro de DIAS_TABLERO.
+    estado_tarea = operativa["Estado"].fillna("").astype(str).str.strip().str.upper()
+    es_suspendida = estado_tarea.str.contains("SUSPEND", na=False)
+    es_abierta = operativa["Categoria"].isin(["Pendiente", "En Curso"]) | es_suspendida
+    es_final_reciente = (
+        operativa["Categoria"].eq("Finalizado")
+        & operativa["FechaHora"].dt.normalize().ge(fecha_inicio)
+    )
+    operativa = operativa.loc[es_abierta | es_final_reciente].copy()
 
     operativa = operativa[
 
@@ -655,14 +686,35 @@ def obtener_tabla_operativa(tabla):
         .str.upper()
     )
 
+    # Para tareas ya tomadas, Preparacion + Carro sigue siendo la clave operativa.
+    # Para tareas PENDIENTES todavía no existe carro: si deduplicamos solo por
+    # Preparacion + Carro vacío, colapsamos todas las sectorizaciones en una sola fila.
+    # Por eso, mientras no haya carro, usamos también el Área como clave.
+    operativa["_AreaKey"] = (
+        operativa["Area"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    operativa["_ClaveOperativa"] = operativa["_CarroKey"]
+    mask_sin_carro = operativa["_CarroKey"].eq("")
+    operativa.loc[mask_sin_carro, "_ClaveOperativa"] = (
+        "PENDIENTE_AREA_" + operativa.loc[mask_sin_carro, "_AreaKey"]
+    )
+
     operativa = (
         operativa
         .drop_duplicates(
-            subset=["_PreparacionKey", "_CarroKey"],
+            subset=["_PreparacionKey", "_ClaveOperativa"],
             keep="first",
         )
+        .sort_values(
+            ["Orden", "_PreparacionKey", "_AreaKey", "FechaHora"],
+            ascending=[True, True, True, True],
+        )
         .drop(
-            columns=["_PreparacionKey", "_CarroKey"],
+            columns=["_PreparacionKey", "_CarroKey", "_AreaKey", "_ClaveOperativa"],
             errors="ignore",
         )
     )
@@ -684,45 +736,73 @@ def obtener_tabla_operativa(tabla):
 # ==========================================================
 
 def obtener_avance_despachos(tabla):
+    """
+    Avance por despacho usando una ventana de 72 hs hábiles = 3 días hábiles.
 
-    # ---------------------------------------
-    # FECHA OPERATIVA
-    # ---------------------------------------
+    IMPORTANTE:
+    - Para el avance SÍ se incluyen preparaciones de pedidos ya COMPLETOS,
+      porque son las que forman el numerador del despacho.
+    - La ventana evita mezclar reutilizaciones antiguas del mismo nombre
+      de despacho.
+    - Pendiente / En Curso / Finalizado participan si pertenecen a esa
+      ventana operativa.
+    """
+    columnas = [
+        "Despacho",
+        "TotalPreparaciones",
+        "PreparacionesFinalizadas",
+        "PreparacionesEnCurso",
+        "Avance",
+    ]
 
-    fecha_operativa = (
-        tabla["FechaHora"]
-        .dt.normalize()
-        .max()
+    if tabla is None or tabla.empty:
+        return pd.DataFrame(columns=columnas), []
+
+    df = tabla.copy()
+
+    # ------------------------------------------------------
+    # VENTANA: 3 DÍAS HÁBILES
+    # ------------------------------------------------------
+    fechas_validas = pd.to_datetime(
+        df["FechaHora"], errors="coerce"
     )
 
+    fecha_operativa = fechas_validas.dt.normalize().max()
+
+    if pd.isna(fecha_operativa):
+        return pd.DataFrame(columns=columnas), []
+
+    # Ejemplo: martes -> viernes como inicio de ventana.
     fecha_inicio = (
         fecha_operativa
-        - pd.Timedelta(days=DIAS_TABLERO - 1)
-    )
+        - pd.offsets.BDay(DIAS_TABLERO - 1)
+    ).normalize()
 
-    df = tabla[
-        tabla["FechaHora"].dt.normalize() >= fecha_inicio
+    df["FechaHora"] = fechas_validas
+
+    df = df.loc[
+        df["FechaHora"].dt.normalize().ge(fecha_inicio)
+        & df["FechaHora"].dt.normalize().le(fecha_operativa)
     ].copy()
 
-    # ---------------------------------------
-    # SOLO OPERACIÓN VIVA
-    # ---------------------------------------
+    # ------------------------------------------------------
+    # SOLO PREPARACIONES DE PEDIDO / DESPACHOS VÁLIDOS
+    # ------------------------------------------------------
+    if "TipoPreparacion" in df.columns:
+        df = df.loc[
+            df["TipoPreparacion"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .eq("PEDIDO")
+        ].copy()
 
-    df = df[
-        df["Categoria"].isin(
-            [
-                "Pendiente",
-                "En Curso",
-                "Finalizado",
-            ]
-        )
+    df = df.loc[
+        df["Categoria"].isin(["Pendiente", "En Curso", "Finalizado"])
     ].copy()
 
-    # ---------------------------------------
-    # ELIMINAR DESPACHOS VACÍOS
-    # ---------------------------------------
-
-    df = df[
+    df = df.loc[
         df["Despacho"]
         .fillna("")
         .astype(str)
@@ -730,52 +810,56 @@ def obtener_avance_despachos(tabla):
         .ne("")
     ].copy()
 
-    # ---------------------------------------
-    # TOTAL DE PREPARACIONES DEL DESPACHO
-    # ---------------------------------------
+    if df.empty:
+        return pd.DataFrame(columns=columnas), []
+
+    # Una preparación puede tener varias tareas/sectores.
+    # Para el avance cuenta una sola vez por despacho + preparación.
+    df["_PreparacionKey"] = (
+        df["Preparacion"]
+        .astype("string")
+        .str.strip()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+
+    df = df.loc[
+        df["_PreparacionKey"].notna()
+        & df["_PreparacionKey"].ne("")
+    ].copy()
 
     total = (
-        df
-        .groupby("Despacho")["Preparacion"]
+        df.groupby("Despacho")["_PreparacionKey"]
         .nunique()
-        .reset_index(
-            name="TotalPreparaciones"
-        )
+        .reset_index(name="TotalPreparaciones")
     )
-
-    # ---------------------------------------
-    # PREPARACIONES CERRADAS
-    #
-    # Finalizado significa:
-    # contenedor numérico + tarea finalizada
-    # ---------------------------------------
 
     finalizados = (
-        df[
-            df["Categoria"] == "Finalizado"
-        ]
-        .groupby("Despacho")["Preparacion"]
+        df.loc[df["Categoria"].eq("Finalizado")]
+        .groupby("Despacho")["_PreparacionKey"]
         .nunique()
-        .reset_index(
-            name="PreparacionesFinalizadas"
+        .reset_index(name="PreparacionesFinalizadas")
+    )
+
+    en_curso = (
+        df.loc[df["Categoria"].eq("En Curso")]
+        .groupby("Despacho")["_PreparacionKey"]
+        .nunique()
+        .reset_index(name="PreparacionesEnCurso")
+    )
+
+    avance = (
+        total
+        .merge(finalizados, on="Despacho", how="left")
+        .merge(en_curso, on="Despacho", how="left")
+    )
+
+    for columna in [
+        "PreparacionesFinalizadas",
+        "PreparacionesEnCurso",
+    ]:
+        avance[columna] = (
+            avance[columna].fillna(0).astype(int)
         )
-    )
-
-    # ---------------------------------------
-    # UNIR RESULTADOS
-    # ---------------------------------------
-
-    avance = total.merge(
-        finalizados,
-        on="Despacho",
-        how="left"
-    )
-
-    avance["PreparacionesFinalizadas"] = (
-        avance["PreparacionesFinalizadas"]
-        .fillna(0)
-        .astype(int)
-    )
 
     avance["TotalPreparaciones"] = (
         avance["TotalPreparaciones"]
@@ -783,56 +867,55 @@ def obtener_avance_despachos(tabla):
         .astype(int)
     )
 
-    # ---------------------------------------
-    # PORCENTAJE
-    # ---------------------------------------
-
     avance["Avance"] = (
         avance["PreparacionesFinalizadas"]
-        /
-        avance["TotalPreparaciones"]
-        * 100
-    ).round(0)
+        .div(
+            avance["TotalPreparaciones"]
+            .replace(0, pd.NA)
+        )
+        .mul(100)
+        .fillna(0)
+        .round(0)
+    )
 
-    # ---------------------------------------
-    # GUARDAR DESPACHOS SIN INICIAR
-    # Antes de quitarlos de las donas
-    # ---------------------------------------
+    # ------------------------------------------------------
+    # DESPACHOS ABIERTOS DENTRO DE LA VENTANA
+    # ------------------------------------------------------
+    # Un despacho se considera iniciado si tiene al menos una preparación
+    # En Curso o Finalizada. Pendientes puras quedan como "Sin iniciar".
+    iniciadas = (
+        avance["PreparacionesFinalizadas"]
+        + avance["PreparacionesEnCurso"]
+    )
 
     despachos_sin_iniciar = (
-        avance[
-            avance["Avance"] == 0
-        ]["Despacho"]
+        avance.loc[
+            iniciadas.eq(0),
+            "Despacho",
+        ]
         .sort_values()
         .tolist()
     )
 
-    # ---------------------------------------
-    # SOLO DONAS DE DESPACHOS ACTIVOS
-    # ---------------------------------------
-
-    avance = avance[
-        (
-            avance["Avance"] > 0
-        )
-        &
-        (
-            avance["Avance"] < 100
-        )
+    # Solo mostramos avance de despachos que ya arrancaron y todavía no
+    # llegaron al 100%. Los completos siguen contando para calcular el
+    # porcentaje, pero no se dibuja una dona de un despacho ya cerrado.
+    avance = avance.loc[
+        iniciadas.gt(0)
+        & avance["Avance"].lt(100)
     ].copy()
 
     avance = avance.sort_values(
-        "Avance",
-        ascending=True
+        ["Avance", "Despacho"],
+        ascending=[True, True],
     )
 
     return avance, despachos_sin_iniciar
 
-    # ---------------------------------------
-    # CARROS CRITICOS
-    # ---------------------------------------
 
-
+# ==========================================================
+# CARROS CRITICOS
+# ==========================================================
 
 def obtener_carros_criticos(
     tabla_operativa,
@@ -880,9 +963,17 @@ def obtener_carros_criticos(
         how="inner",
     )
 
-    # Solo carros actualmente en curso.
-    tabla = tabla[
+    # Carros operativamente abiertos: En Curso o Suspendidos.
+    estado_tarea = (
+        tabla["Estado"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    tabla = tabla.loc[
         tabla["Categoria"].eq("En Curso")
+        | estado_tarea.str.contains("SUSPEND", na=False)
     ].copy()
 
     if tabla.empty:

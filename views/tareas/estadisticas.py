@@ -9,6 +9,8 @@ from models.tareas_modulo.estadisticas_tareas import (
     construir_eventos_hibridos,
     estado_calidad,
     resumen_usuarios,
+    construir_score_productividad,
+    construir_campeonato_productividad,
 )
 from utils.tareas.carga import cargar_fuentes_tareas
 from utils.estilo_graficos import aplicar_formato_visual_plotly
@@ -85,7 +87,7 @@ def _tabla_ranking(eventos: pd.DataFrame, proceso: str) -> pd.DataFrame:
         return ranking
 
     tabla = ranking.copy()
-    tabla.insert(0, "#", range(1, len(tabla) + 1))
+    tabla.insert(0, "#", pd.Series(range(1, len(tabla) + 1), dtype="string"))
     if proceso == "Control":
         tabla = tabla.rename(columns={"Tareas": "Controles", "Unid/Tarea": "Unid/Control"})
 
@@ -136,7 +138,7 @@ def _grafico_participacion(eventos: pd.DataFrame, titulo: str) -> None:
 
 
 def render_estadisticas_tareas() -> None:
-    carga = cargar_fuentes_tareas()
+    carga = cargar_fuentes_tareas(incluir_estadisticas=True)
     fuentes = carga["fuentes"]
     crudo = fuentes.get("preparaciones_historico", pd.DataFrame())
     if crudo is None or crudo.empty:
@@ -321,6 +323,220 @@ def render_estadisticas_tareas() -> None:
     with col_grafico_pick:
         st.markdown("#### 📊 Participación Picking")
         _grafico_participacion(pick_f, "Picking")
+
+
+    # ======================================================
+    # SCORE + CAMPEONATO DE PRODUCTIVIDAD PICKING
+    # ======================================================
+    st.divider()
+    st.markdown("### 🏆 Score y Campeonato de Productividad Picking")
+    st.caption(
+        "Cada tarea cerrada genera un Score de 0–120 y suma puntos al campeonato. "
+        "Score = eficiencia de la tarea · Puntos = mérito acumulado. "
+        "Referencias mensuales estables · Jornada productiva 06:00–17:00."
+    )
+
+    tareas_camp, diario_camp, mensual_camp, refs_camp = construir_campeonato_productividad(
+        fuentes.get("preparacion_analitico"),
+        fuentes.get("volumetria"),
+        fuentes.get("ubicaciones"),
+        fecha_referencia=hasta,
+        usuarios_excluidos=USUARIOS_EXCLUIDOS_ESTADISTICAS,
+    )
+
+    # ------------------------------------------------------
+    # RANKING DEL DÍA / PERÍODO SELECCIONADO
+    # ------------------------------------------------------
+    if tareas_camp.empty:
+        st.info("Todavía no hay tareas cerradas del Analítico para calcular puntos en este mes.")
+    else:
+        dias_sel = tareas_camp.loc[
+            (tareas_camp["Fecha"].dt.date >= desde)
+            & (tareas_camp["Fecha"].dt.date <= hasta)
+        ].copy()
+        if usuario != "Todos":
+            dias_sel = dias_sel.loc[dias_sel["Usuario"].eq(usuario)].copy()
+
+        st.markdown("#### 📅 Ranking del período seleccionado")
+        if dias_sel.empty:
+            st.info(
+                "Hay actividad en vivo, pero todavía no hay tareas cerradas/consolidadas "
+                "en el Analítico para este período. Los puntos se incorporan cuando la tarea cierra."
+            )
+        else:
+            ranking_periodo = (
+                dias_sel.groupby("Usuario", as_index=False)
+                .agg(
+                    Puntos=("PuntosTarea", "sum"),
+                    Score=("ScoreTarea", "mean"),
+                    Tareas=("TareaId", "nunique"),
+                    Horas=("Horas", "sum"),
+                    Unidades=("Unidades", "sum"),
+                    Lineas=("Lineas", "sum"),
+                )
+                .sort_values(["Puntos", "Score"], ascending=False)
+                .reset_index(drop=True)
+            )
+            ranking_periodo.insert(0, "#", range(1, len(ranking_periodo) + 1))
+            ranking_periodo["Puntos"] = ranking_periodo["Puntos"].round(1)
+            ranking_periodo["Score"] = ranking_periodo["Score"].round(1)
+            ranking_periodo["Horas"] = ranking_periodo["Horas"].round(2)
+
+            rp1, rp2 = st.columns([1.55, .85], vertical_alignment="top")
+            with rp1:
+                st.dataframe(ranking_periodo, hide_index=True, width="stretch", height=330)
+            with rp2:
+                graf = ranking_periodo.sort_values("Puntos", ascending=True)
+                fig = px.bar(
+                    graf, x="Puntos", y="Usuario", orientation="h",
+                    text="Puntos", title="Puntos del período",
+                )
+                fig = aplicar_formato_visual_plotly(fig, altura=330)
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+        # --------------------------------------------------
+        # RANKING MENSUAL
+        # --------------------------------------------------
+        mes_nombre = pd.Timestamp(hasta).strftime("%m/%Y")
+        st.markdown(f"#### 🏆 Ranking mensual · {mes_nombre}")
+
+        tabla_mes = mensual_camp.copy()
+        if usuario != "Todos":
+            tabla_mes = tabla_mes.loc[tabla_mes["Usuario"].eq(usuario)].copy()
+        tabla_mes = tabla_mes.rename(columns={
+            "PosicionMes": "#",
+            "ScorePromedio": "Score prom.",
+            "PuntosMes": "Puntos",
+            "DiasActivos": "Días",
+            "Oro": "🥇",
+            "Plata": "🥈",
+            "Bronce": "🥉",
+        })
+        cols_mes = ["#", "Usuario", "Puntos", "Score prom.", "Días", "Tareas", "Horas", "Unidades", "Líneas", "🥇", "🥈", "🥉"]
+        tabla_mes = tabla_mes.rename(columns={"Lineas": "Líneas"})
+        tabla_mes = tabla_mes[[c for c in cols_mes if c in tabla_mes.columns]]
+
+        rm1, rm2 = st.columns([1.55, .85], vertical_alignment="top")
+        with rm1:
+            st.dataframe(tabla_mes, hide_index=True, width="stretch", height=390)
+        with rm2:
+            graf_mes = mensual_camp.sort_values("PuntosMes", ascending=True)
+            fig = px.bar(
+                graf_mes, x="PuntosMes", y="Usuario", orientation="h",
+                text="PuntosMes", title="Campeonato mensual",
+            )
+            fig = aplicar_formato_visual_plotly(fig, altura=390)
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+        # --------------------------------------------------
+        # EVOLUCIÓN DIARIA DEL MES
+        # --------------------------------------------------
+        st.markdown("#### 📈 Evolución diaria")
+        evo = diario_camp.copy()
+        if usuario != "Todos":
+            evo = evo.loc[evo["Usuario"].eq(usuario)].copy()
+        if not evo.empty:
+            e1, e2 = st.columns(2, vertical_alignment="top")
+            with e1:
+                fig = px.line(
+                    evo, x="FechaDia", y="Score", color="Usuario",
+                    markers=True, title="Score diario",
+                )
+                fig = aplicar_formato_visual_plotly(fig, altura=360)
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+            with e2:
+                # Acumulado real de puntos a medida que avanza el mes.
+                acum = evo.sort_values(["Usuario", "FechaDia"]).copy()
+                acum["Puntos acumulados"] = acum.groupby("Usuario")["Puntos"].cumsum()
+                fig = px.line(
+                    acum, x="FechaDia", y="Puntos acumulados", color="Usuario",
+                    markers=True, title="Puntos acumulados del mes",
+                )
+                fig = aplicar_formato_visual_plotly(fig, altura=360)
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+        # --------------------------------------------------
+        # DESGLOSE POR USUARIO + TAREAS QUE SUMARON PUNTOS
+        # --------------------------------------------------
+        st.markdown("#### 🔎 Puntos tarea por tarea")
+        opciones_camp = mensual_camp["Usuario"].tolist()
+        if usuario != "Todos" and usuario in opciones_camp:
+            indice_default = opciones_camp.index(usuario)
+        else:
+            indice_default = 0
+
+        elegido_camp = st.selectbox(
+            "Operario para analizar",
+            opciones_camp,
+            index=indice_default,
+            key="est_campeonato_usuario_v2",
+        )
+        tareas_u = tareas_camp.loc[tareas_camp["Usuario"].eq(elegido_camp)].copy()
+        tareas_u = tareas_u.loc[
+            (tareas_u["Fecha"].dt.date >= desde)
+            & (tareas_u["Fecha"].dt.date <= hasta)
+        ].copy()
+
+        if tareas_u.empty:
+            st.info("Ese operario no tiene tareas cerradas dentro del período seleccionado.")
+        else:
+            resumen_u = mensual_camp.loc[mensual_camp["Usuario"].eq(elegido_camp)].iloc[0]
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Puntos mes", f"{resumen_u['PuntosMes']:.1f}")
+            k2.metric("Score promedio", f"{resumen_u['ScorePromedio']:.1f}")
+            k3.metric("Tareas mes", int(resumen_u["Tareas"]))
+            k4.metric("Posición mes", f"#{int(resumen_u['PosicionMes'])}")
+
+            detalle_t = tareas_u.copy()
+            detalle_t["Fecha"] = detalle_t["Fecha"].dt.strftime("%d/%m/%Y")
+            detalle_t["Minutos"] = detalle_t["MinutosOperativos"].round(1)
+            detalle_t["Score"] = detalle_t["ScoreTarea"].round(1)
+            detalle_t["Puntos"] = detalle_t["PuntosTarea"].round(2)
+            detalle_t["Recorrido"] = detalle_t["RecorridoEqM"].round(1)
+            detalle_t["m³"] = detalle_t["M3"].round(3)
+            detalle_t["Kg"] = detalle_t["Kg"].round(1)
+            detalle_t = detalle_t[[
+                "Fecha", "TareaId", "Unidades", "Lineas", "SKUs",
+                "Minutos", "m³", "Kg", "Recorrido", "Score", "Puntos",
+            ]].rename(columns={"Lineas": "Líneas"})
+            st.dataframe(detalle_t, hide_index=True, width="stretch", height=390)
+
+            # Desglose visual de la tarea seleccionada.
+            tarea_opts = tareas_u["TareaId"].astype(str).tolist()
+            tarea_sel = st.selectbox(
+                "Ver composición de una tarea",
+                tarea_opts,
+                key="est_score_tarea_v2",
+            )
+            ft = tareas_u.loc[tareas_u["TareaId"].astype(str).eq(str(tarea_sel))].iloc[0]
+            desglose_t = pd.DataFrame({
+                "Componente": ["Unidades/h", "Tareas/h", "Líneas/h", "Volumen/h", "Kg/h", "Recorrido/h"],
+                "Puntos": [ft["PtsUnid"], ft["PtsTareas"], ft["PtsLineas"], ft["PtsM3"], ft["PtsKg"], ft["PtsRecorrido"]],
+            })
+            desglose_t["Puntos"] = desglose_t["Puntos"].round(1)
+            d1, d2 = st.columns([.8, 1.7], vertical_alignment="top")
+            with d1:
+                st.metric("Score tarea", f"{ft['ScoreTarea']:.1f}")
+                st.metric("Puntos tarea", f"{ft['PuntosTarea']:.2f}")
+                st.metric("Minutos operativos", f"{ft['MinutosOperativos']:.1f}")
+            with d2:
+                fig = px.bar(
+                    desglose_t, x="Puntos", y="Componente", orientation="h",
+                    text="Puntos", title=f"Composición · Tarea {tarea_sel}",
+                )
+                fig.update_xaxes(range=[0, 120])
+                fig = aplicar_formato_visual_plotly(fig, altura=330)
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+        st.caption(
+            "Los puntos se generan únicamente con tareas cerradas/consolidadas del Analítico. "
+            "Una tarea abierta sigue visible en Picking, pero entra al campeonato al cerrarse. "
+            "Puntos tarea = Score tarea / 10, por lo que cada tarea puede aportar hasta 12 puntos."
+        )
+
 
     st.divider()
 

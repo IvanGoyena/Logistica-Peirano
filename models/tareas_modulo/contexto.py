@@ -61,7 +61,7 @@ def obtener_control_dia_anterior(
         .fillna("")
         .astype(str)
         .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\.0+$", "", regex=True)
     )
     control["Unidades"] = pd.to_numeric(
         control["Unidades"], errors="coerce"
@@ -139,6 +139,382 @@ def obtener_control_dia_anterior(
     }
 
 
+def _normalizar_id(valor: object) -> str:
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    texto = texto.replace(".0", "") if texto.endswith(".0") else texto
+    return texto
+
+
+def _normalizar_pedido_erp(valor: object) -> str:
+    """Convierte variantes DIGIP/ERP a la clave numérica del pedido."""
+    texto = _normalizar_id(valor)
+    if not texto:
+        return ""
+    # DIGIP: '0001  215205-1' -> '215205'
+    texto = texto.split("-")[0].strip()
+    partes = texto.split()
+    if partes:
+        texto = partes[-1]
+    return texto
+
+
+def _normalizar_sector(valor: object) -> str:
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip().upper()
+    equivalencias = {
+        "NAC": "NACIONAL",
+        "IMP": "IMPORTADO",
+        "BLI": "BLISTER",
+        "BAC": "BACHAS",
+        "SAN": "SANITARIOS",
+        "REP": "REPUESTOS",
+        "FLE": "FLEXIBLES",
+        "ACC": "ACCESORIOS",
+        "VAR": "VARIOS",
+    }
+    return equivalencias.get(texto, texto)
+
+
+def _extraer_codigo_articulo(descripcion: object) -> str:
+    """Informe Tareas solo informa el código cuando la tarea tiene 1 artículo."""
+    if pd.isna(descripcion):
+        return ""
+    texto = str(descripcion).strip()
+    if not texto:
+        return ""
+    # Ej.: '81-180 - DUCHA ...' -> '81-180'
+    return texto.split(" - ", 1)[0].strip().upper()
+
+
+def enriquecer_tareas_con_detalle(
+    tabla_tareas: pd.DataFrame,
+    df_detalle: pd.DataFrame,
+    df_articulos: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Reparte unidades/SKUs/familias a nivel tarea.
+
+    Versión optimizada:
+    - prepara el detalle ERP una sola vez;
+    - genera índices agregados por Pedido+Artículo y Pedido+Sector;
+    - evita filtrar/copiar df_detalle por cada fila de tarea.
+
+    Mantiene la misma prioridad:
+    1) artículo exacto cuando DIGIP informa un único artículo;
+    2) Pedido + Área/Sector para tareas de varios artículos;
+    3) sin correspondencia si no puede asignarse de forma segura.
+    """
+    if tabla_tareas is None or tabla_tareas.empty:
+        return tabla_tareas, pd.DataFrame()
+
+    if (
+        df_detalle is None
+        or df_detalle.empty
+        or df_articulos is None
+        or df_articulos.empty
+    ):
+        return tabla_tareas, pd.DataFrame()
+
+    tareas = tabla_tareas.copy()
+    detalle = df_detalle.copy()
+    maestro = df_articulos.copy()
+
+    requeridas_detalle = {"nro_com", "cod_art", "can_art"}
+    if (
+        not requeridas_detalle.issubset(detalle.columns)
+        or "COD_ART" not in maestro.columns
+    ):
+        return tareas, pd.DataFrame()
+
+    # ------------------------------------------------------
+    # NORMALIZACIÓN DEL DETALLE ERP
+    # ------------------------------------------------------
+    detalle["_PedidoKey"] = detalle["nro_com"].map(_normalizar_pedido_erp)
+    detalle["_ArticuloKey"] = (
+        detalle["cod_art"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+    detalle["_Cantidad"] = pd.to_numeric(
+        detalle["can_art"], errors="coerce"
+    ).fillna(0)
+
+    # ------------------------------------------------------
+    # MAESTRO DE ARTÍCULOS
+    # ------------------------------------------------------
+    maestro["_ArticuloKey"] = (
+        maestro["COD_ART"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+
+    cols_maestro = ["_ArticuloKey"]
+    for c in ["Sectorizacion", "Familia", "Familia_2"]:
+        if c in maestro.columns:
+            cols_maestro.append(c)
+
+    maestro = (
+        maestro[cols_maestro]
+        .drop_duplicates("_ArticuloKey", keep="first")
+    )
+
+    detalle = detalle.merge(
+        maestro,
+        on="_ArticuloKey",
+        how="left",
+        validate="many_to_one",
+    )
+
+    if "Sectorizacion" in detalle.columns:
+        detalle["_SectorKey"] = detalle["Sectorizacion"].map(
+            _normalizar_sector
+        )
+    else:
+        detalle["_SectorKey"] = ""
+
+    # ------------------------------------------------------
+    # NORMALIZACIÓN DE TAREAS
+    # ------------------------------------------------------
+    tareas["_PedidoKey"] = tareas.get(
+        "Pedido",
+        pd.Series(index=tareas.index, dtype=object),
+    ).map(_normalizar_pedido_erp)
+
+    tareas["_AreaKey"] = tareas["Area"].map(_normalizar_sector)
+
+    tareas["_ArticuloExacto"] = tareas.get(
+        "_ArticulosDescripcionTarea",
+        pd.Series(index=tareas.index, dtype=object),
+    ).map(_extraer_codigo_articulo)
+
+    tareas["_CantArticulosTarea"] = pd.to_numeric(
+        tareas.get("_ArticulosTarea", 0),
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+    # ------------------------------------------------------
+    # AGREGADOS PRECALCULADOS
+    # ------------------------------------------------------
+    # Antes se hacía:
+    # detalle.loc[detalle["_PedidoKey"].eq(pedido)].copy()
+    # para CADA tarea. Ahora todo se calcula una sola vez.
+
+    por_articulo = (
+        detalle.groupby(
+            ["_PedidoKey", "_ArticuloKey"],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            Unidades=("_Cantidad", "sum"),
+        )
+    )
+
+    # Pedido+Artículo siempre representa un SKU exacto.
+    por_articulo["SKUs"] = (
+        por_articulo["Unidades"].ne(0).astype(int)
+    )
+    por_articulo["Familias"] = ""
+
+    if "Sectorizacion" in detalle.columns:
+        # Texto de familias/sectores por Pedido + Sector.
+        sector_etiquetas = (
+            detalle.assign(
+                _Etiqueta=detalle["Sectorizacion"]
+                .fillna("Sin sector")
+                .astype(str)
+                .str.strip()
+            )
+            .groupby(
+                ["_PedidoKey", "_SectorKey", "_Etiqueta"],
+                dropna=False,
+            )["_Cantidad"]
+            .sum()
+            .reset_index()
+        )
+
+        sector_etiquetas = sector_etiquetas.loc[
+            sector_etiquetas["_Cantidad"].ne(0)
+        ].copy()
+
+        if not sector_etiquetas.empty:
+            sector_etiquetas["Parte"] = (
+                sector_etiquetas["_Etiqueta"].astype(str)
+                + " ("
+                + sector_etiquetas["_Cantidad"].astype(int).astype(str)
+                + ")"
+            )
+            textos_sector = (
+                sector_etiquetas
+                .sort_values(
+                    ["_PedidoKey", "_SectorKey", "_Cantidad"],
+                    ascending=[True, True, False],
+                )
+                .groupby(
+                    ["_PedidoKey", "_SectorKey"],
+                    dropna=False,
+                )["Parte"]
+                .agg(" | ".join)
+                .rename("Familias")
+                .reset_index()
+            )
+        else:
+            textos_sector = pd.DataFrame(
+                columns=["_PedidoKey", "_SectorKey", "Familias"]
+            )
+    else:
+        textos_sector = pd.DataFrame(
+            columns=["_PedidoKey", "_SectorKey", "Familias"]
+        )
+
+    por_sector = (
+        detalle.groupby(
+            ["_PedidoKey", "_SectorKey"],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            Unidades=("_Cantidad", "sum"),
+            SKUs=(
+                "_ArticuloKey",
+                lambda s: int(
+                    s[
+                        detalle.loc[s.index, "_Cantidad"].ne(0)
+                    ].nunique()
+                ),
+            ),
+        )
+    )
+
+    por_sector = por_sector.merge(
+        textos_sector,
+        on=["_PedidoKey", "_SectorKey"],
+        how="left",
+    )
+    por_sector["Familias"] = por_sector["Familias"].fillna("")
+
+    mapa_articulo = {
+        (str(r["_PedidoKey"]), str(r["_ArticuloKey"])): (
+            int(r["Unidades"]),
+            int(r["SKUs"]),
+            str(r["Familias"]),
+        )
+        for _, r in por_articulo.iterrows()
+    }
+
+    mapa_sector = {
+        (str(r["_PedidoKey"]), str(r["_SectorKey"])): (
+            int(r["Unidades"]),
+            int(r["SKUs"]),
+            str(r["Familias"]),
+        )
+        for _, r in por_sector.iterrows()
+    }
+
+    # ------------------------------------------------------
+    # LOOKUPS O(1) POR TAREA
+    # ------------------------------------------------------
+    unidades: list[int] = []
+    skus: list[int] = []
+    familias: list[str] = []
+    metodos: list[str] = []
+    alertas: list[dict[str, object]] = []
+
+    columnas_lookup = [
+        "_PedidoKey",
+        "_AreaKey",
+        "_ArticuloExacto",
+        "_CantArticulosTarea",
+        "Preparacion",
+        "Area",
+    ]
+
+    for fila in tareas[columnas_lookup].itertuples(index=False, name=None):
+        (
+            pedido,
+            area,
+            articulo_exacto,
+            cant_articulos,
+            preparacion,
+            area_visible,
+        ) = fila
+
+        pedido = "" if pd.isna(pedido) else str(pedido)
+        area = "" if pd.isna(area) else str(area)
+        articulo_exacto = (
+            "" if pd.isna(articulo_exacto) else str(articulo_exacto)
+        )
+
+        asignacion = None
+        metodo = "sin_correspondencia"
+
+        if cant_articulos == 1 and articulo_exacto:
+            asignacion = mapa_articulo.get(
+                (pedido, articulo_exacto)
+            )
+            if asignacion is not None:
+                metodo = "articulo_exacto"
+
+        if asignacion is None and area:
+            asignacion = mapa_sector.get((pedido, area))
+            if asignacion is not None:
+                metodo = "sectorizacion"
+
+        if asignacion is None:
+            unidades.append(0)
+            skus.append(0)
+            familias.append("⚠ Sin correspondencia")
+            metodos.append(metodo)
+
+            if pedido:
+                alertas.append(
+                    {
+                        "Preparacion": preparacion,
+                        "Pedido": pedido,
+                        "Area": area_visible,
+                        "Motivo": (
+                            "No se pudo asignar detalle ERP a esta tarea "
+                            "sin duplicar unidades."
+                        ),
+                    }
+                )
+            continue
+
+        total_unidades, total_skus, texto_familias = asignacion
+        unidades.append(total_unidades)
+        skus.append(total_skus)
+        familias.append(texto_familias)
+        metodos.append(metodo)
+
+    tareas["Unidades"] = unidades
+    tareas["SKUs"] = skus
+    tareas["Familias"] = familias
+    tareas["_MetodoEnriquecimiento"] = metodos
+
+    alertas_df = pd.DataFrame(alertas)
+
+    tareas = tareas.drop(
+        columns=[
+            "_PedidoKey",
+            "_AreaKey",
+            "_ArticuloExacto",
+            "_CantArticulosTarea",
+        ],
+        errors="ignore",
+    )
+
+    return tareas, alertas_df
+
+
 @st.cache_data(show_spinner="Preparando el centro de control...")
 def construir_contexto_tareas(
     df_tareas: pd.DataFrame,
@@ -161,6 +537,14 @@ def construir_contexto_tareas(
         df_tareas,
         tabla_pedidos,
         df_clientes,
+    )
+
+    # Enriquecimiento a nivel TAREA: evita repetir TotalUnidades/TotalSKUs
+    # del pedido en cada sector/preparación.
+    tabla_tareas, alertas_sectorizacion = enriquecer_tareas_con_detalle(
+        tabla_tareas,
+        df_detalle,
+        df_articulos,
     )
 
     tabla_operativa = obtener_tabla_operativa(tabla_tareas)
@@ -190,9 +574,11 @@ def construir_contexto_tareas(
         pedidos_resumen,
     )
 
+    # El avance necesita la historia reciente COMPLETA, incluidos pedidos
+    # que ya cerraron. La tabla visual sigue usando solo pedidos abiertos.
     avance_despachos, despachos_sin_iniciar = obtener_avance_despachos(tabla_tareas)
     carros_criticos = obtener_carros_criticos(tabla_operativa, avance_despachos)
-    pendiente_pick = obtener_pendiente_pick(tabla_tareas, tabla_pedidos)
+    pendiente_pick = obtener_pendiente_pick(tabla_operativa, tabla_pedidos)
     control_dia_anterior = obtener_control_dia_anterior(df_control)
 
     mascara_estado_activo = (
@@ -222,14 +608,14 @@ def construir_contexto_tareas(
         tabla_tareas["Preparacion"]
         .astype("string")
         .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\.0+$", "", regex=True)
     )
 
     tabla_pedidos["PreparacionID"] = (
         tabla_pedidos["PreparacionID"]
         .astype("string")
         .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\.0+$", "", regex=True)
     )
 
     tabla_tareas["Preparacion"] = tabla_tareas["Preparacion"].where(
@@ -244,7 +630,7 @@ def construir_contexto_tareas(
         pd.NA,
     )
 
-    tareas_unidades = tabla_tareas.merge(
+    tareas_unidades = tabla_operativa.merge(
         tabla_pedidos[["PreparacionID", "TotalUnidades"]],
         left_on="Preparacion",
         right_on="PreparacionID",
@@ -269,10 +655,48 @@ def construir_contexto_tareas(
         .sum()
     )
 
-    preparaciones_activas = tabla_tareas.loc[
-        tabla_tareas["Categoria"].isin(["Pendiente", "En Curso"]),
-        "Preparacion",
-    ].dropna().astype(str).unique()
+    estado_tarea_operativa = (
+        tabla_operativa["Estado"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    mascara_abierta_operativa = (
+        tabla_operativa["Categoria"].isin(["Pendiente", "En Curso"])
+        | estado_tarea_operativa.str.contains("SUSPEND", na=False)
+    )
+
+    preparaciones_activas = (
+        tabla_operativa.loc[
+            mascara_abierta_operativa,
+            "Preparacion",
+        ]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+    )
+
+    # Segunda clave para tareas viejas: Pedido ERP.
+    # Así una preparación abierta de la semana anterior no se pierde del gráfico
+    # si el ID de preparación histórico difiere de la referencia actual.
+    if "Pedido" in tabla_operativa.columns:
+        pedidos_activos_serie = (
+            tabla_operativa.loc[
+                mascara_abierta_operativa,
+                "Pedido",
+            ]
+            .dropna()
+            .map(_normalizar_pedido_erp)
+        )
+        pedidos_activos = set(
+            pedidos_activos_serie.loc[
+                pedidos_activos_serie.ne("")
+            ].tolist()
+        )
+    else:
+        pedidos_activos = set()
 
     columnas_sector = [
         columna
@@ -287,17 +711,50 @@ def construir_contexto_tareas(
     ]
 
     if columnas_sector:
+        mascara_sector_activo = (
+            tabla_pedidos["PreparacionID"]
+            .astype("string")
+            .str.strip()
+            .isin(preparaciones_activas)
+        )
+
+        if pedidos_activos and "Pedido" in tabla_pedidos.columns:
+            pedido_key_tabla = tabla_pedidos["Pedido"].map(
+                _normalizar_pedido_erp
+            )
+            mascara_sector_activo = (
+                mascara_sector_activo
+                | pedido_key_tabla.isin(pedidos_activos)
+            )
+
+        pedidos_sector_activos = tabla_pedidos.loc[
+            mascara_sector_activo
+        ].copy()
+
+        # Si coincidió por Preparación y por Pedido, la fila sigue contando una vez.
+        clave_dedupe = [
+            col for col in ["Pedido", "PreparacionID"]
+            if col in pedidos_sector_activos.columns
+        ]
+        if clave_dedupe:
+            pedidos_sector_activos = (
+                pedidos_sector_activos
+                .drop_duplicates(subset=clave_dedupe, keep="last")
+            )
+
         familias_operativas = (
-            tabla_pedidos.loc[
-                tabla_pedidos["PreparacionID"].isin(preparaciones_activas),
-                columnas_sector,
-            ]
+            pedidos_sector_activos[columnas_sector]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
             .sum()
             .sort_values(ascending=False)
         )
-        familias_operativas = familias_operativas.loc[familias_operativas.gt(0)]
+        familias_operativas = familias_operativas.loc[
+            familias_operativas.gt(0)
+        ]
     else:
         familias_operativas = pd.Series(dtype="float64")
+
 
     return {
         "tabla_pedidos": tabla_pedidos,
@@ -316,4 +773,5 @@ def construir_contexto_tareas(
         "unidades_carros_curso": unidades_carros_curso,
         "unidades_carros_finalizados": unidades_carros_finalizados,
         "familias_operativas": familias_operativas,
+        "alertas_sectorizacion": alertas_sectorizacion,
     }
