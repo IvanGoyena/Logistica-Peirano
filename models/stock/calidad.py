@@ -1164,14 +1164,13 @@ def construir_ocupacion_calidad(
             "CapacidadPallets"
         ] = 1.0
     else:
+        # Capacidad Pallets puede llegar desde Excel como número (10.0, 100.0)
+        # o como texto con coma decimal. No se elimina el punto porque eso
+        # convertiría 10.0 -> 100 y 100.0 -> 1000, inflando la capacidad.
         capacidad_texto = (
             maestro_crudo[columna_capacidad]
             .astype("string")
-            .str.replace(
-                ".",
-                "",
-                regex=False,
-            )
+            .str.strip()
             .str.replace(
                 ",",
                 ".",

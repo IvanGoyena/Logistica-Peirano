@@ -963,7 +963,10 @@ def obtener_carros_criticos(
         how="inner",
     )
 
-    # Carros operativamente abiertos: En Curso o Suspendidos.
+    # Preparaciones operativamente abiertas:
+    # - En Curso / Suspendidas -> muestran su carro.
+    # - Pendientes sin carro   -> se marcan 🚫 SIN ASIGNAR.
+    # Las finalizadas no forman parte de la alerta.
     estado_tarea = (
         tabla["Estado"]
         .fillna("")
@@ -972,7 +975,7 @@ def obtener_carros_criticos(
         .str.upper()
     )
     tabla = tabla.loc[
-        tabla["Categoria"].eq("En Curso")
+        tabla["Categoria"].isin(["Pendiente", "En Curso"])
         | estado_tarea.str.contains("SUSPEND", na=False)
     ].copy()
 
@@ -1009,6 +1012,19 @@ def obtener_carros_criticos(
     tabla["_SectorCorto"] = tabla["Area"].apply(_sector_corto)
     tabla["_CarroMostrar"] = tabla["Carro"].apply(_carro_limpio)
 
+    # Detectar preparación/tarea todavía sin carro asignado.
+    carro_norm = (
+        tabla["_CarroMostrar"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    tabla["_SinAsignar"] = (
+        carro_norm.eq("")
+        | carro_norm.str.contains("SIN ASIGNAR", na=False)
+    )
+
     # El mismo carro puede repetirse por tareas internas.
     # Lo dejamos una sola vez antes de consolidar el pedido.
     tabla["_CarroKey"] = (
@@ -1018,6 +1034,20 @@ def obtener_carros_criticos(
         .str.replace(r"^[^A-Za-z0-9]*", "", regex=True)
         .str.strip()
         .str.upper()
+    )
+
+    # Para los sin asignar no podemos deduplicar por carro vacío:
+    # usamos Preparación + Área para conservar cada tarea pendiente.
+    prep_key = (
+        tabla["Preparacion"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+    area_key = tabla["Area"].fillna("").astype(str).str.strip().str.upper()
+    tabla.loc[tabla["_SinAsignar"], "_CarroKey"] = (
+        "SIN_ASIGNAR_" + prep_key + "_" + area_key
     )
 
     tabla["_DespachoKey"] = (
@@ -1111,24 +1141,24 @@ def obtener_carros_criticos(
             carro = _texto_limpio(fila_carro.get("_CarroMostrar", ""))
             sector = _texto_limpio(fila_carro.get("_SectorCorto", ""))
 
-            if not carro:
-                continue
-
-            carro_key = (
-                re.sub(r"^[^A-Za-z0-9]*", "", carro)
-                .strip()
-                .upper()
-            )
+            sin_asignar = bool(fila_carro.get("_SinAsignar", False))
+            carro_key = _texto_limpio(fila_carro.get("_CarroKey", "")).upper()
 
             if not carro_key or carro_key in vistos_carro:
                 continue
 
             vistos_carro.add(carro_key)
 
-            # Todas las líneas del mismo carro/preparación.
-            mask_carro = grupo["_CarroMostrar"].astype(str).map(
-                lambda x: re.sub(r"^[^A-Za-z0-9]*", "", x).strip().upper()
-            ).eq(carro_key)
+            if sin_asignar:
+                # La clave es única por Preparación + Área.
+                mask_carro = grupo["_CarroKey"].astype(str).eq(carro_key)
+            else:
+                # Todas las líneas del mismo carro/preparación.
+                mask_carro = grupo["_CarroMostrar"].astype(str).map(
+                    lambda x: re.sub(r"^[^A-Za-z0-9]*", "", x).strip().upper()
+                ).eq(
+                    re.sub(r"^[^A-Za-z0-9]*", "", carro).strip().upper()
+                )
 
             unidades_carro = pd.to_numeric(
                 grupo.loc[mask_carro, "Unidades"],
@@ -1137,14 +1167,25 @@ def obtener_carros_criticos(
 
             unidades_txt = f"{int(round(unidades_carro)):,}".replace(",", ".")
 
-            # Solo para visualización quitamos el prefijo CARRO.
-            # La clave interna sigue siendo CARRO301, CARRO302, etc.
-            carro_visual = re.sub(r"^CARRO\s*", "", carro_key, flags=re.IGNORECASE)
-
-            if sector and sector != "---":
-                carros_sector.append(f"🚧 {carro_visual} ({sector} - {unidades_txt})")
+            if sin_asignar:
+                if sector and sector != "---":
+                    carros_sector.append(f"🚫 SIN ASIGNAR ({sector} - {unidades_txt})")
+                else:
+                    carros_sector.append(f"🚫 SIN ASIGNAR ({unidades_txt})")
             else:
-                carros_sector.append(f"🚧 {carro_visual} ({unidades_txt})")
+                # Solo para visualización quitamos el prefijo CARRO.
+                carro_visual = re.sub(
+                    r"^CARRO\s*",
+                    "",
+                    re.sub(r"^[^A-Za-z0-9]*", "", carro).strip().upper(),
+                    flags=re.IGNORECASE,
+                )
+                if sector and sector != "---":
+                    carros_sector.append(f"🚧 {carro_visual} ({sector} - {unidades_txt})")
+                else:
+                    carros_sector.append(f"🚧 {carro_visual} ({unidades_txt})")
+
+        tiene_sin_asignar = bool(grupo["_SinAsignar"].any())
 
         filas.append(
             {
@@ -1158,6 +1199,7 @@ def obtener_carros_criticos(
                 "_Avance": grupo["Avance"].iloc[0],
                 "_Faltan": grupo["Faltan"].iloc[0],
                 "_HoraOrden": grupo["FechaHora"].min(),
+                "_SinAsignarOrden": 1 if tiene_sin_asignar else 0,
             }
         )
 
@@ -1169,11 +1211,11 @@ def obtener_carros_criticos(
     salida = (
         salida
         .sort_values(
-            ["_Avance", "_Faltan", "_HoraOrden"],
-            ascending=[False, True, True],
+            ["_SinAsignarOrden", "_Avance", "_Faltan", "_HoraOrden"],
+            ascending=[False, False, True, True],
         )
         .drop(
-            columns=["_Avance", "_Faltan", "_HoraOrden"],
+            columns=["_SinAsignarOrden", "_Avance", "_Faltan", "_HoraOrden"],
             errors="ignore",
         )
         .reset_index(drop=True)
