@@ -1280,17 +1280,17 @@ def obtener_organizacion_pre(tabla_operativa):
         return pd.DataFrame(columns=columnas)
 
     df["_Despacho"] = (
-        df["Despacho"].fillna("").astype(str).str.strip()
+        df["Despacho"].astype("string").fillna("").str.strip()
     )
     df = df.loc[df["_Despacho"].ne("")].copy()
     if df.empty:
         return pd.DataFrame(columns=columnas)
 
-    df["_Categoria"] = df["Categoria"].fillna("").astype(str).str.strip()
+    df["_Categoria"] = df["Categoria"].astype("string").fillna("").str.strip()
     df["_Resuelta"] = df["_Categoria"].eq("Finalizado")
 
     carro_pre = (
-        df["Carro"].fillna("").astype(str).str.strip()
+        df["Carro"].astype("string").fillna("").str.strip()
         if "Carro" in df.columns
         else pd.Series("", index=df.index, dtype="object")
     )
@@ -1313,7 +1313,7 @@ def obtener_organizacion_pre(tabla_operativa):
         df["Preparacion"].astype("string").fillna("").str.strip()
     )
     df["_Area"] = (
-        df["Area"].fillna("").astype(str).str.strip().str.upper()
+        df["Area"].astype("string").fillna("").str.strip().str.upper()
     )
 
     # Una tarea puede repetirse internamente. Consolidamos por despacho,
