@@ -11,6 +11,7 @@ from models.tareas import (
     obtener_pendiente_pick,
     obtener_resumen_operativo,
     obtener_tabla_operativa,
+    obtener_organizacion_pre,
 )
 
 
@@ -579,6 +580,7 @@ def construir_contexto_tareas(
     avance_despachos, despachos_sin_iniciar = obtener_avance_despachos(tabla_tareas)
     carros_criticos = obtener_carros_criticos(tabla_operativa, avance_despachos)
     pendiente_pick = obtener_pendiente_pick(tabla_operativa, tabla_pedidos)
+    organizacion_pre = obtener_organizacion_pre(tabla_operativa)
     control_dia_anterior = obtener_control_dia_anterior(df_control)
 
     mascara_estado_activo = (
@@ -765,6 +767,7 @@ def construir_contexto_tareas(
         "despachos_sin_iniciar": despachos_sin_iniciar,
         "carros_criticos": carros_criticos,
         "pendiente_pick": pendiente_pick,
+        "organizacion_pre": organizacion_pre,
         "control_dia_anterior": control_dia_anterior,
         "pedidos_pendientes": int(len(pedidos_sin_preparacion)),
         "unidades_pendientes": int(

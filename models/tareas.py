@@ -944,7 +944,7 @@ def obtener_carros_criticos(
         return pd.DataFrame(columns=columnas_salida)
 
     criticos = avance_despachos[
-        avance_despachos["Avance"] >= 50
+        avance_despachos["Avance"] >= 25
     ].copy()
 
     if criticos.empty:
@@ -1223,6 +1223,213 @@ def obtener_carros_criticos(
 
     return salida[columnas_salida]
 
+
+
+# ==========================================================
+# SUGERENCIA PROPIA DE EQUIPAMIENTO
+# ==========================================================
+
+# Regla operativa propia. No depende del Vehiculo sugerido por DIGIP.
+# CARRO MULTIPLE conserva como referencia 6 espacios de 0,212 m³.
+# DOBLE PALLET representa UNA sola tarea de hasta 2 pallets (3,60 m³).
+# APILADORA queda para tareas que superan ese volumen.
+VOLUMEN_CARRO_MULTIPLE_M3 = 6 * 0.212
+VOLUMEN_DOBLE_PALLET_M3 = 3.60
+
+
+def sugerir_equipamiento_operativo(volumen_m3):
+    volumen = pd.to_numeric(pd.Series([volumen_m3]), errors="coerce").fillna(0).iloc[0]
+    volumen = float(max(volumen, 0))
+
+    if volumen <= VOLUMEN_CARRO_MULTIPLE_M3:
+        return "🛒 CARRO MULTIPLE"
+    if volumen <= VOLUMEN_DOBLE_PALLET_M3:
+        return "📦 DOBLE PALLET"
+    return "🏗️ APILADORA"
+
+
+# ==========================================================
+# ORGANIZACIÓN PRE POR DESPACHO / CAMIONETA
+# ==========================================================
+
+def obtener_organizacion_pre(tabla_operativa):
+    """
+    Construye una sugerencia visual de ocupación PRE por Despacho/Camioneta.
+
+    PRE no se asigna por preparación individual: representa el lugar físico
+    donde se consolida el Despacho/Camioneta.
+
+    La asignación es una sugerencia del tablero:
+    - conserva hasta 4 despachos activos;
+    - prioriza despachos ya iniciados;
+    - luego los ordena por antigüedad;
+    - PRE 1..4 se muestran como posiciones físicas.
+    """
+    columnas = [
+        "PRE", "Despacho / Camioneta", "Estado", "Preparaciones",
+        "Áreas pendientes", "Áreas controladas", "Vol. pendiente m³",
+        "Área sugerida", "Equipamiento sugerido",
+    ]
+
+    if tabla_operativa is None or tabla_operativa.empty:
+        return pd.DataFrame(columns=columnas)
+
+    df = tabla_operativa.copy()
+
+    if "Despacho" not in df.columns:
+        return pd.DataFrame(columns=columnas)
+
+    df["_Despacho"] = (
+        df["Despacho"].fillna("").astype(str).str.strip()
+    )
+    df = df.loc[df["_Despacho"].ne("")].copy()
+    if df.empty:
+        return pd.DataFrame(columns=columnas)
+
+    df["_Categoria"] = df["Categoria"].fillna("").astype(str).str.strip()
+    df["_Resuelta"] = df["_Categoria"].eq("Finalizado")
+
+    carro_pre = (
+        df["Carro"].fillna("").astype(str).str.strip()
+        if "Carro" in df.columns
+        else pd.Series("", index=df.index, dtype="object")
+    )
+    df["_SinAsignar"] = (
+        ~df["_Resuelta"]
+        & ~df["_Categoria"].eq("En Curso")
+        & (
+            carro_pre.eq("")
+            | carro_pre.str.contains("SIN ASIGNAR", case=False, na=False)
+        )
+    )
+    df["_Abierta"] = ~df["_Resuelta"]
+
+    for c in ["VolumenM3"]:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    df["_Prep"] = (
+        df["Preparacion"].astype("string").fillna("").str.strip()
+    )
+    df["_Area"] = (
+        df["Area"].fillna("").astype(str).str.strip().str.upper()
+    )
+
+    # Una tarea puede repetirse internamente. Consolidamos por despacho,
+    # preparación y área antes de sumar volumen/estado.
+    detalle = (
+        df.sort_values("FechaHora")
+        .drop_duplicates(["_Despacho", "_Prep", "_Area"], keep="last")
+        .copy()
+    )
+
+    filas = []
+    for despacho, grupo in detalle.groupby("_Despacho", sort=False):
+        abiertas = grupo.loc[grupo["_Abierta"]].copy()
+        resueltas = grupo.loc[grupo["_Resuelta"]].copy()
+        por_tomar = grupo.loc[grupo["_SinAsignar"]].copy()
+
+        # Volumen/equipamiento = remanente todavía sin tomar.
+        volumen_pendiente = float(por_tomar["VolumenM3"].sum())
+        equipos = (
+            por_tomar["VolumenM3"]
+            .apply(sugerir_equipamiento_operativo)
+            .value_counts()
+        )
+
+        partes_equipo = []
+        for equipo in ["🛒 CARRO MULTIPLE", "📦 DOBLE PALLET", "🏗️ APILADORA"]:
+            cantidad = int(equipos.get(equipo, 0))
+            if cantidad:
+                partes_equipo.append(f"{cantidad} × {equipo}")
+
+        # Área sugerida dinámica: solo remanente todavía sin tomar.
+        if por_tomar.empty:
+            area_sugerida = "✅ COMPLETO"
+        else:
+            estado_prep = grupo.groupby("_Prep", as_index=False).agg(
+                AreasTotales=("_Area", "nunique")
+            )
+            pend_prep = por_tomar.groupby("_Prep")["_Area"].nunique().rename("AreasPendientes")
+            estado_prep = estado_prep.merge(pend_prep, on="_Prep", how="left")
+            estado_prep["AreasPendientes"] = estado_prep["AreasPendientes"].fillna(0).astype(int)
+
+            candidatos = por_tomar.merge(estado_prep, on="_Prep", how="left")
+            candidatos["CierraPreparacion"] = candidatos["AreasPendientes"].eq(1)
+            candidatos["CercaniaCierre"] = (
+                1.0 - (
+                    (candidatos["AreasPendientes"] - 1).clip(lower=0)
+                    / candidatos["AreasTotales"].clip(lower=1)
+                )
+            ).clip(0, 1)
+
+            vol = candidatos["VolumenM3"].clip(lower=0)
+            max_vol = float(vol.max()) if len(vol) else 0.0
+            candidatos["QuickWin"] = 1 - (vol / max_vol) if max_vol > 0 else 1.0
+            candidatos["ScoreArea"] = (
+                candidatos["CierraPreparacion"].astype(float) * 50
+                + candidatos["CercaniaCierre"] * 30
+                + candidatos["QuickWin"] * 20
+            )
+
+            ranking = candidatos.groupby("_Area", as_index=False).agg(
+                CierraAhora=("CierraPreparacion", "sum"),
+                ScoreProm=("ScoreArea", "mean"),
+                Tareas=("_Prep", "nunique"),
+                Volumen=("VolumenM3", "sum"),
+            ).sort_values(
+                ["CierraAhora", "ScoreProm", "Tareas", "Volumen"],
+                ascending=[False, False, False, True],
+            )
+
+            if ranking.empty:
+                area_sugerida = "—"
+            else:
+                top = ranking.iloc[0]
+                nombre = str(top["_Area"]).strip()
+                area_sugerida = f"🔥 {nombre}" if int(top["CierraAhora"]) > 0 else f"➡️ {nombre}"
+
+        en_curso = bool(
+            grupo["_Categoria"].eq("En Curso").any()
+            or grupo["_Resuelta"].any()
+        )
+        estado = "🟢 EN CURSO" if en_curso else "🟡 SIGUIENTE"
+
+        filas.append({
+            "Despacho / Camioneta": despacho,
+            "Estado": estado,
+            "Preparaciones": int(grupo["_Prep"].replace("", pd.NA).nunique()),
+            "Áreas pendientes": int(por_tomar["_Area"].replace("", pd.NA).nunique()),
+            "Áreas controladas": int(resueltas["_Area"].replace("", pd.NA).nunique()),
+            "Vol. pendiente m³": round(volumen_pendiente, 2),
+            "Área sugerida": area_sugerida,
+            "Equipamiento sugerido": (
+                " · ".join(partes_equipo)
+                if partes_equipo
+                else "✅ PICKING TOTALMENTE ASIGNADO"
+            ),
+            "_Iniciado": 0 if en_curso else 1,
+            "_Hora": grupo["FechaHora"].min(),
+        })
+
+    salida = pd.DataFrame(filas)
+    if salida.empty:
+        return pd.DataFrame(columns=columnas)
+
+    salida = salida.sort_values(
+        ["_Iniciado", "_Hora", "Despacho / Camioneta"],
+        ascending=[True, True, True],
+    ).reset_index(drop=True)
+
+    # Las cuatro posiciones físicas configuradas.
+    salida["PRE"] = [
+        f"PRE {i + 1}" if i < 4 else "⚠️ SIN PRE"
+        for i in range(len(salida))
+    ]
+
+    salida = salida.drop(columns=["_Iniciado", "_Hora"], errors="ignore")
+    return salida[columnas]
 
 # ==========================================================
 # FIN DEL MÓDULO TAREAS

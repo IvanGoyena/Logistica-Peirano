@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+import re
 import streamlit as st
 
 from models.tareas_modulo.contexto import construir_contexto_tareas
+from models.tareas import sugerir_equipamiento_operativo
 from utils.rendimiento import medir_tiempo, mostrar_info_dataframe
 from utils.tareas.carga import cargar_fuentes_tareas, invalidar_cache_tareas
 from utils.tareas.formatos import preparar_tabla_operativa_visual, resaltar_carro
@@ -151,29 +153,147 @@ def _render_indicadores(
 
     with col_criticos:
         with st.container(border=True):
-            st.markdown("#### 🚨 Carros que cierran despachos")
-            criticos = contexto["carros_criticos"].copy()
-            if criticos.empty:
-                st.success("No hay carros críticos en este momento.")
-            else:
-                # El modelo ya entrega cada carro emparejado con SU sector.
-                # Ej.: 🚧 CARRO301 (NAC) - 🚧 CARRO302 (IMP)
-                # La vista solamente elimina la columna auxiliar Sector.
-                criticos = criticos.drop(columns=["Sector"], errors="ignore")
+            st.markdown("#### 🚨 Estado de Preparaciones / Control")
 
-                if "Unidades" in criticos.columns:
-                    criticos["Unidades"] = pd.to_numeric(
-                        criticos["Unidades"], errors="coerce"
-                    ).fillna(0).astype(int)
+            control_base = contexto["tabla_operativa"].copy()
+
+            if control_base.empty:
+                st.info("No hay preparaciones operativas para mostrar.")
+            else:
+                # Normalización visual.
+                for col in ["Despacho", "Cliente", "Preparacion", "Area", "Carro", "Categoria"]:
+                    if col not in control_base.columns:
+                        control_base[col] = ""
+                    control_base[col] = (
+                        control_base[col]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                    )
+
+                control_base["Preparacion"] = (
+                    control_base["Preparacion"]
+                    .str.replace(r"\\.0+$", "", regex=True)
+                )
+                control_base["Area"] = control_base["Area"].str.upper()
+
+                # Filtro propio de esta tabla por Agrupador / Camioneta.
+                opciones_control = sorted(
+                    x for x in control_base["Despacho"].unique().tolist() if x
+                )
+                filtro_control = st.selectbox(
+                    "Agrupador / Camioneta",
+                    ["Todos"] + opciones_control,
+                    key="control_filtro_agrupador_camioneta",
+                )
+
+                if filtro_control != "Todos":
+                    control_base = control_base.loc[
+                        control_base["Despacho"].eq(filtro_control)
+                    ].copy()
+
+                def _estado_control_fila(fila):
+                    categoria = str(fila.get("Categoria", "")).strip()
+                    area = str(fila.get("Area", "")).strip().upper() or "SIN ÁREA"
+                    carro = str(fila.get("Carro", "")).strip()
+
+                    unidades = pd.to_numeric(
+                        pd.Series([fila.get("Unidades", 0)]), errors="coerce"
+                    ).fillna(0).iloc[0]
+                    unidades = int(round(float(unidades)))
+
+                    # Abreviaturas operativas.
+                    siglas_area = {
+                        "IMPORTADO": "IMP",
+                        "NACIONAL": "NAC",
+                        "SANITARIOS": "SAN",
+                        "INTERPLANTA": "INT",
+                    }
+                    area_corta = siglas_area.get(area, area[:3] if area else "S/A")
+
+                    # Mostrar SOLO símbolo + número: CARRO91 -> 91.
+                    numero_carro = re.sub(r"CARRO", "", carro, flags=re.IGNORECASE).strip()
+                    match_numero = re.search(r"\d+", numero_carro)
+                    if match_numero:
+                        numero_carro = match_numero.group(0)
+
+                    detalle_area = f"{area_corta} - {unidades} u."
+
+                    if categoria == "Finalizado":
+                        return f"✅ {detalle_area}"
+
+                    if (
+                        numero_carro
+                        and "SIN ASIGNAR" not in carro.upper()
+                        and carro.lower() != "nan"
+                    ):
+                        return f"🚧 {numero_carro} ({detalle_area})"
+
+                    return f"⏳ SIN ASIGNAR ({detalle_area})"
+
+                control_base["_DetalleControl"] = control_base.apply(
+                    _estado_control_fila, axis=1
+                )
+
+                # Una fila por Cliente + ID Preparación dentro de cada Despacho.
+                # Conservamos todas las áreas: controladas, tomadas y sin asignar.
+                agrupado_control = (
+                    control_base.groupby(
+                        ["Despacho", "Cliente", "Preparacion"],
+                        as_index=False,
+                        dropna=False,
+                    )
+                    .agg(
+                        Estado=(
+                            "_DetalleControl",
+                            lambda s: " · ".join(dict.fromkeys(
+                                x for x in s.astype(str).tolist() if x
+                            )),
+                        )
+                    )
+                )
+
+                # Orden: despacho -> cliente -> preparación numérica cuando sea posible.
+                agrupado_control["_PrepOrden"] = pd.to_numeric(
+                    agrupado_control["Preparacion"], errors="coerce"
+                )
+                agrupado_control = agrupado_control.sort_values(
+                    ["Despacho", "Cliente", "_PrepOrden", "Preparacion"],
+                    na_position="last",
+                ).drop(columns=["_PrepOrden"])
+
+                agrupado_control = agrupado_control.rename(
+                    columns={
+                        "Preparacion": "ID Preparación",
+                        "Estado": "Carros / Áreas",
+                    }
+                )
+
+                st.caption(
+                    f"{len(agrupado_control)} preparación(es) visibles"
+                    + (
+                        f" · {filtro_control}"
+                        if filtro_control != "Todos"
+                        else ""
+                    )
+                )
 
                 st.dataframe(
-                    criticos,
+                    agrupado_control[
+                        ["Despacho", "Cliente", "Carros / Áreas"]
+                    ],
                     width="stretch",
                     hide_index=True,
                     height=430,
                     column_config={
-                        "Carros": st.column_config.TextColumn(
-                            "Carros",
+                        "Despacho": st.column_config.TextColumn(
+                            "Agrupador / Camioneta", width="medium"
+                        ),
+                        "Cliente": st.column_config.TextColumn(
+                            "Cliente", width="medium"
+                        ),
+                        "Carros / Áreas": st.column_config.TextColumn(
+                            "Pendiente de control / Áreas controladas / Sin asignar",
                             width="large",
                         ),
                     },
@@ -299,7 +419,23 @@ def _render_tabla(
     intel["_Area"] = intel["Area"].fillna("").astype(str).str.strip().str.upper()
     intel["_Categoria"] = intel["Categoria"].astype(str).str.strip()
     intel["_Resuelta"] = intel["_Categoria"].eq("Finalizado")
-    intel["_Pendiente"] = ~intel["_Resuelta"]
+
+    carro_intel = (
+        intel["Carro"].fillna("").astype(str).str.strip()
+        if "Carro" in intel.columns
+        else pd.Series("", index=intel.index, dtype="object")
+    )
+    sin_carro = (
+        carro_intel.eq("")
+        | carro_intel.str.contains("SIN ASIGNAR", case=False, na=False)
+    )
+
+    # Remanente real: solo tareas que todavía no fueron tomadas.
+    intel["_Pendiente"] = (
+        ~intel["_Resuelta"]
+        & ~intel["_Categoria"].eq("En Curso")
+        & sin_carro
+    )
 
     for c in ["Unidades", "SKUs", "VolumenM3", "PesoKg"]:
         if c not in intel.columns:
@@ -369,13 +505,10 @@ def _render_tabla(
         facilidad_vol = 1 - (vol / max_vol) if max_vol > 0 else 1.0
         facilidad_uni = 1 - (uni / max_uni) if max_uni > 0 else 1.0
         prioridad["QuickWin"] = (facilidad_vol * 0.6 + facilidad_uni * 0.4).clip(0, 1)
-        prioridad["EnCurso"] = prioridad["Categoria"].astype(str).eq("En Curso")
-
         prioridad["ScorePrioridad"] = (
-            prioridad["CierraPreparacion"].astype(float) * 45
-            + prioridad["CercaniaCierre"] * 25
+            prioridad["CierraPreparacion"].astype(float) * 50
+            + prioridad["CercaniaCierre"] * 30
             + prioridad["QuickWin"] * 20
-            + prioridad["EnCurso"].astype(float) * 10
         ).clip(0, 100).round().astype(int)
 
         prioridad["Accion"] = "🟡 SIGUIENTE"
@@ -455,18 +588,103 @@ def _render_tabla(
                 "Accion", "Prioridad", "Preparación", "Cliente", "Área",
                 "Áreas listas", "Faltan", "Unidades", "SKUs", "Vol. m³",
             ]
-            if "Vehiculo" in tm.columns:
-                tm["Vehículo sugerido"] = tm["Vehiculo"].fillna("").astype(str)
-                cols.insert(5, "Vehículo sugerido")
+            # Sugerencia NUESTRA por volumetría; no usa Vehiculo de DIGIP.
+            tm["Vehículo sugerido"] = tm["VolumenM3"].apply(
+                sugerir_equipamiento_operativo
+            )
+            cols.insert(5, "Vehículo sugerido")
             st.dataframe(
                 tm[cols].head(15), hide_index=True, width="stretch", height=275,
             )
 
         st.caption(
             "Prioridad: cierre inmediato de preparación → cercanía al cierre → "
-            "quick win por volumen/unidades → continuidad de tareas ya tomadas."
+            "quick win por volumen/unidades. Las tareas ya tomadas salen de esta propuesta."
         )
         st.divider()
+
+    # ======================================================
+    # ORGANIZACIÓN FÍSICA PRE POR DESPACHO / CAMIONETA
+    # ======================================================
+    organizacion_pre = contexto.get("organizacion_pre", pd.DataFrame()).copy()
+
+    # Respetar el mismo filtro de despacho seleccionado en la pantalla.
+    if (
+        not organizacion_pre.empty
+        and despacho_seleccionado != "Todos"
+        and "Despacho / Camioneta" in organizacion_pre.columns
+    ):
+        organizacion_pre = organizacion_pre.loc[
+            organizacion_pre["Despacho / Camioneta"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .eq(despacho_seleccionado)
+        ].copy()
+
+    st.markdown("#### 📍 Organización de posiciones PRE")
+
+    if organizacion_pre.empty:
+        st.info("No hay Despachos/Camionetas activos para asignar a PRE.")
+    else:
+        # Completar visualmente las cuatro posiciones cuando se mira el tablero general.
+        if despacho_seleccionado == "Todos":
+            usados = set(organizacion_pre["PRE"].astype(str))
+            libres = []
+            for numero in range(1, 5):
+                pre = f"PRE {numero}"
+                if pre not in usados:
+                    libres.append({
+                        "PRE": pre,
+                        "Despacho / Camioneta": "—",
+                        "Estado": "⚪ LIBRE",
+                        "Preparaciones": 0,
+                        "Áreas pendientes": 0,
+                        "Áreas controladas": 0,
+                        "Vol. pendiente m³": 0.0,
+                        "Área sugerida": "—",
+                        "Equipamiento sugerido": "—",
+                    })
+            if libres:
+                organizacion_pre = pd.concat(
+                    [organizacion_pre, pd.DataFrame(libres)],
+                    ignore_index=True,
+                )
+
+        st.dataframe(
+            organizacion_pre,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "PRE": st.column_config.TextColumn("PRE", width="small"),
+                "Despacho / Camioneta": st.column_config.TextColumn(
+                    "Despacho / Camioneta", width="medium"
+                ),
+                "Área sugerida": st.column_config.TextColumn(
+                    "Área sugerida", width="medium"
+                ),
+                "Equipamiento sugerido": st.column_config.TextColumn(
+                    "Equipamiento sugerido", width="large"
+                ),
+                "Vol. pendiente m³": st.column_config.NumberColumn(
+                    "Vol. pendiente m³", format="%.2f"
+                ),
+            },
+        )
+
+        sin_pre = organizacion_pre[
+            organizacion_pre["PRE"].astype(str).str.contains("SIN PRE", na=False)
+        ]
+        if not sin_pre.empty:
+            st.warning(
+                f"⚠️ Hay {len(sin_pre)} Despacho(s)/Camioneta(s) activos sin posición PRE disponible."
+            )
+
+    st.caption(
+        "PRE organiza físicamente el Despacho/Camioneta. "
+        "El equipamiento es una sugerencia propia calculada por volumen y no depende de DIGIP."
+    )
+    st.divider()
 
     st.dataframe(
         tabla.style.format({"Unidades": "{:.0f}", "SKUs": "{:.0f}"}).apply(
