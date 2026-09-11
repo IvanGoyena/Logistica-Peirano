@@ -166,8 +166,8 @@ def _render_indicadores(
                         control_base[col] = ""
                     control_base[col] = (
                         control_base[col]
+                        .astype("string")
                         .fillna("")
-                        .astype(str)
                         .str.strip()
                     )
 
@@ -329,8 +329,8 @@ def _render_tabla(
         if "Area" in tabla_base.columns:
             area_visible = (
                 tabla_base["Area"]
+                .astype("string")
                 .fillna("")
-                .astype(str)
                 .str.strip()
                 .str.upper()
             )
@@ -340,7 +340,7 @@ def _render_tabla(
         # para diferenciar una tarea pendiente sectorizada de un dato faltante.
         if "Carro" in tabla.columns and "Categoria" in tabla_base.columns:
             pendiente = tabla_base["Categoria"].astype(str).eq("Pendiente")
-            carro_vacio = tabla["Carro"].fillna("").astype(str).str.strip().eq("")
+            carro_vacio = tabla["Carro"].astype("string").fillna("").str.strip().eq("")
             tabla.loc[pendiente & carro_vacio, "Carro"] = "⏳ Sin asignar"
 
     st.markdown("### 📋 Operación en curso")
@@ -373,8 +373,8 @@ def _render_tabla(
         if despacho_seleccionado != "Todos":
             tabla = tabla.loc[
                 tabla[columna_despacho]
+                .astype("string")
                 .fillna("")
-                .astype(str)
                 .str.strip()
                 .eq(despacho_seleccionado)
             ].copy()
@@ -385,16 +385,16 @@ def _render_tabla(
             if "Despacho" in tabla_base.columns:
                 tabla_base = tabla_base.loc[
                     tabla_base["Despacho"]
+                    .astype("string")
                     .fillna("")
-                    .astype(str)
                     .str.strip()
                     .eq(despacho_seleccionado)
                 ].copy()
             elif "DespachoDescripcion" in tabla_base.columns:
                 tabla_base = tabla_base.loc[
                     tabla_base["DespachoDescripcion"]
+                    .astype("string")
                     .fillna("")
-                    .astype(str)
                     .str.strip()
                     .eq(despacho_seleccionado)
                 ].copy()
@@ -416,12 +416,12 @@ def _render_tabla(
     # y Area -> Área, por eso la versión anterior producía KeyError.
     intel = tabla_base.copy()
     intel["_Prep"] = intel["Preparacion"].astype("string").fillna("").str.strip()
-    intel["_Area"] = intel["Area"].fillna("").astype(str).str.strip().str.upper()
+    intel["_Area"] = intel["Area"].astype("string").fillna("").str.strip().str.upper()
     intel["_Categoria"] = intel["Categoria"].astype(str).str.strip()
     intel["_Resuelta"] = intel["_Categoria"].eq("Finalizado")
 
     carro_intel = (
-        intel["Carro"].fillna("").astype(str).str.strip()
+        intel["Carro"].astype("string").fillna("").str.strip()
         if "Carro" in intel.columns
         else pd.Series("", index=intel.index, dtype="object")
     )
