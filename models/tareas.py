@@ -737,22 +737,32 @@ def obtener_tabla_operativa(tabla):
 
 def obtener_avance_despachos(tabla):
     """
-    Avance por despacho usando una ventana de 72 hs hábiles = 3 días hábiles.
+    Conserva el universo/filtros de la versión estable y cambia únicamente
+    la granularidad del avance: Preparación -> Tarea operativa.
 
     IMPORTANTE:
-    - Para el avance SÍ se incluyen preparaciones de pedidos ya COMPLETOS,
-      porque son las que forman el numerador del despacho.
-    - La ventana evita mezclar reutilizaciones antiguas del mismo nombre
-      de despacho.
-    - Pendiente / En Curso / Finalizado participan si pertenecen a esa
-      ventana operativa.
+    `tabla` llega NORMALIZADA desde contexto.py, por lo que aquí se usan:
+      Despacho, Preparacion, Carro, Area, Estado, Categoria,
+      FechaHora, VolumenM3 y Unidades.
+
+    El CSV crudo usa otros nombres (DespachoDescripcion, PreparacionId,
+    ContenedorNumero, AreaDescripcion, TareaEstado...), pero esos nombres
+    se normalizan antes de llegar a esta función.
     """
     columnas = [
         "Despacho",
+        "TotalTareas",
+        "TareasFinalizadas",
+        "TareasEnCurso",
+        "Avance",
+        "VolumenPendienteM3",
+        "VolumenTotalM3",
+        "UnidadesPendientes",
+        "UnidadesTotales",
+        # Compatibilidad con consumidores existentes
         "TotalPreparaciones",
         "PreparacionesFinalizadas",
         "PreparacionesEnCurso",
-        "Avance",
     ]
 
     if tabla is None or tabla.empty:
@@ -761,33 +771,54 @@ def obtener_avance_despachos(tabla):
     df = tabla.copy()
 
     # ------------------------------------------------------
-    # VENTANA: 3 DÍAS HÁBILES
+    # MISMA VENTANA / UNIVERSO DE LA VERSIÓN ESTABLE
     # ------------------------------------------------------
-    fechas_validas = pd.to_datetime(
-        df["FechaHora"], errors="coerce"
-    )
-
-    fecha_operativa = fechas_validas.dt.normalize().max()
+    df["FechaHora"] = pd.to_datetime(df["FechaHora"], errors="coerce")
+    fecha_operativa = df["FechaHora"].dt.normalize().max()
 
     if pd.isna(fecha_operativa):
         return pd.DataFrame(columns=columnas), []
 
-    # Ejemplo: martes -> viernes como inicio de ventana.
-    fecha_inicio = (
-        fecha_operativa
-        - pd.offsets.BDay(DIAS_TABLERO - 1)
-    ).normalize()
-
-    df["FechaHora"] = fechas_validas
-
-    df = df.loc[
-        df["FechaHora"].dt.normalize().ge(fecha_inicio)
-        & df["FechaHora"].dt.normalize().le(fecha_operativa)
-    ].copy()
-
     # ------------------------------------------------------
-    # SOLO PREPARACIONES DE PEDIDO / DESPACHOS VÁLIDOS
+    # ÚLTIMA UTILIZACIÓN DEL AGRUPADOR
     # ------------------------------------------------------
+    # Regla:
+    # 1) Si el agrupador tiene movimiento en la fecha operativa actual,
+    #    se toma SOLAMENTE ese día.
+    # 2) Si no tiene movimiento hoy, se toma la ventana de las últimas
+    #    72 horas corridas, para cubrir usos que quedaron de la semana anterior.
+    #
+    # Esto evita mezclar reutilizaciones viejas del mismo agrupador.
+    fecha_operativa_dia = fecha_operativa.normalize()
+    fecha_inicio_72h = fecha_operativa_dia - pd.Timedelta(hours=72)
+
+    partes_ultima_utilizacion = []
+
+    for despacho, grupo in df.groupby("Despacho", dropna=False, sort=False):
+        grupo = grupo.copy()
+        fechas_grupo = grupo["FechaHora"].dt.normalize()
+
+        if fechas_grupo.eq(fecha_operativa_dia).any():
+            grupo = grupo.loc[
+                fechas_grupo.eq(fecha_operativa_dia)
+            ].copy()
+        else:
+            grupo = grupo.loc[
+                grupo["FechaHora"].ge(fecha_inicio_72h)
+                & grupo["FechaHora"].le(fecha_operativa)
+            ].copy()
+
+        if not grupo.empty:
+            partes_ultima_utilizacion.append(grupo)
+
+    if partes_ultima_utilizacion:
+        df = pd.concat(
+            partes_ultima_utilizacion,
+            ignore_index=True,
+        )
+    else:
+        return pd.DataFrame(columns=columnas), []
+
     if "TipoPreparacion" in df.columns:
         df = df.loc[
             df["TipoPreparacion"]
@@ -802,113 +833,196 @@ def obtener_avance_despachos(tabla):
         df["Categoria"].isin(["Pendiente", "En Curso", "Finalizado"])
     ].copy()
 
-    df = df.loc[
-        df["Despacho"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .ne("")
-    ].copy()
+    df["Despacho"] = df["Despacho"].fillna("").astype(str).str.strip()
+    df = df.loc[df["Despacho"].ne("")].copy()
 
     if df.empty:
         return pd.DataFrame(columns=columnas), []
 
-    # Una preparación puede tener varias tareas/sectores.
-    # Para el avance cuenta una sola vez por despacho + preparación.
-    df["_PreparacionKey"] = (
+    # ------------------------------------------------------
+    # CLAVE DE TAREA
+    # ------------------------------------------------------
+    prep = (
         df["Preparacion"]
         .astype("string")
+        .fillna("")
         .str.strip()
         .str.replace(r"\.0+$", "", regex=True)
     )
 
-    df = df.loc[
-        df["_PreparacionKey"].notna()
-        & df["_PreparacionKey"].ne("")
-    ].copy()
+    carro = (
+        df["Carro"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.upper()
+    )
 
+    area = (
+        df["Area"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.upper()
+    )
+
+    # Tarea asignada: Preparación + carro/contenedor.
+    # Tarea aún no asignada: Preparación + área.
+    sin_carro = (
+        carro.eq("")
+        | carro.str.contains("SIN ASIGNAR", case=False, na=False)
+    )
+
+    df["_TareaKey"] = prep + "|" + carro
+    df.loc[sin_carro, "_TareaKey"] = (
+        prep.loc[sin_carro] + "|SIN_ASIGNAR|" + area.loc[sin_carro]
+    )
+
+    # Mantener el último estado conocido de cada tarea.
+    df = (
+        df.sort_values("FechaHora")
+        .drop_duplicates(["Despacho", "_TareaKey"], keep="last")
+        .copy()
+    )
+
+    # ------------------------------------------------------
+    # ESTADO INDIVIDUAL DE LA TAREA
+    # ------------------------------------------------------
+    # REGLA REAL DE CIERRE:
+    # una tarea NO está cerrada solamente porque TareaEstado diga FINALIZADA.
+    # Está cerrada cuando el contenedor dejó de ser CARRO y pasó a un
+    # CONTENEDOR NUMÉRICO (controlado/cerrado).
+    carro_estado = (
+        df["Carro"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.upper()
+    )
+
+    # Quitar iconos/prefijos visuales que pueda traer la tabla normalizada.
+    carro_limpio = (
+        carro_estado
+        .str.replace(r"^[^A-Z0-9]*", "", regex=True)
+        .str.strip()
+    )
+
+    es_carro = carro_limpio.str.contains("CARRO", na=False)
+
+    # Contenedor cerrado = valor numérico puro y distinto de CARRO.
+    es_contenedor_numerico = carro_limpio.str.fullmatch(r"\d+", na=False)
+
+    df["_TareaFinalizada"] = (
+        es_contenedor_numerico
+        & ~es_carro
+    )
+
+    # ------------------------------------------------------
+    # AVANCE POR TAREAS
+    # ------------------------------------------------------
     total = (
-        df.groupby("Despacho")["_PreparacionKey"]
+        df.groupby("Despacho")["_TareaKey"]
         .nunique()
-        .reset_index(name="TotalPreparaciones")
+        .reset_index(name="TotalTareas")
     )
 
-    finalizados = (
-        df.loc[df["Categoria"].eq("Finalizado")]
-        .groupby("Despacho")["_PreparacionKey"]
+    cerradas = (
+        df.loc[df["_TareaFinalizada"]]
+        .groupby("Despacho")["_TareaKey"]
         .nunique()
-        .reset_index(name="PreparacionesFinalizadas")
+        .reset_index(name="TareasFinalizadas")
     )
 
-    en_curso = (
-        df.loc[df["Categoria"].eq("En Curso")]
-        .groupby("Despacho")["_PreparacionKey"]
-        .nunique()
-        .reset_index(name="PreparacionesEnCurso")
-    )
-
-    avance = (
-        total
-        .merge(finalizados, on="Despacho", how="left")
-        .merge(en_curso, on="Despacho", how="left")
-    )
-
-    for columna in [
-        "PreparacionesFinalizadas",
-        "PreparacionesEnCurso",
-    ]:
-        avance[columna] = (
-            avance[columna].fillna(0).astype(int)
-        )
-
-    avance["TotalPreparaciones"] = (
-        avance["TotalPreparaciones"]
-        .fillna(0)
-        .astype(int)
+    avance = total.merge(cerradas, on="Despacho", how="left")
+    avance["TotalTareas"] = avance["TotalTareas"].fillna(0).astype(int)
+    avance["TareasFinalizadas"] = avance["TareasFinalizadas"].fillna(0).astype(int)
+    avance["TareasEnCurso"] = (
+        avance["TotalTareas"] - avance["TareasFinalizadas"]
     )
 
     avance["Avance"] = (
-        avance["PreparacionesFinalizadas"]
-        .div(
-            avance["TotalPreparaciones"]
-            .replace(0, pd.NA)
-        )
+        avance["TareasFinalizadas"]
+        .div(avance["TotalTareas"].replace(0, pd.NA))
         .mul(100)
         .fillna(0)
         .round(0)
     )
 
     # ------------------------------------------------------
-    # DESPACHOS ABIERTOS DENTRO DE LA VENTANA
+    # VOLUMEN + UNIDADES
     # ------------------------------------------------------
-    # Un despacho se considera iniciado si tiene al menos una preparación
-    # En Curso o Finalizada. Pendientes puras quedan como "Sin iniciar".
-    iniciadas = (
-        avance["PreparacionesFinalizadas"]
-        + avance["PreparacionesEnCurso"]
+    df["_Volumen"] = pd.to_numeric(
+        df["VolumenM3"] if "VolumenM3" in df.columns else 0,
+        errors="coerce",
+    ).fillna(0.0)
+
+    df["_Unidades"] = pd.to_numeric(
+        df["Unidades"] if "Unidades" in df.columns else 0,
+        errors="coerce",
+    ).fillna(0.0)
+
+    totales = (
+        df.groupby("Despacho", as_index=False)
+        .agg(
+            VolumenTotalM3=("_Volumen", "sum"),
+            UnidadesTotales=("_Unidades", "sum"),
+        )
     )
 
+    pendientes = (
+        df.loc[~df["_TareaFinalizada"]]
+        .groupby("Despacho", as_index=False)
+        .agg(
+            VolumenPendienteM3=("_Volumen", "sum"),
+            UnidadesPendientes=("_Unidades", "sum"),
+        )
+    )
+
+    avance = (
+        avance
+        .merge(totales, on="Despacho", how="left")
+        .merge(pendientes, on="Despacho", how="left")
+    )
+
+    for col in [
+        "VolumenPendienteM3",
+        "VolumenTotalM3",
+        "UnidadesPendientes",
+        "UnidadesTotales",
+    ]:
+        avance[col] = pd.to_numeric(avance[col], errors="coerce").fillna(0)
+
+    avance["VolumenPendienteM3"] = avance["VolumenPendienteM3"].round(2)
+    avance["VolumenTotalM3"] = avance["VolumenTotalM3"].round(2)
+    avance["UnidadesPendientes"] = avance["UnidadesPendientes"].round().astype(int)
+    avance["UnidadesTotales"] = avance["UnidadesTotales"].round().astype(int)
+
+    # ------------------------------------------------------
+    # COMPATIBILIDAD
+    # ------------------------------------------------------
+    avance["TotalPreparaciones"] = avance["TotalTareas"]
+    avance["PreparacionesFinalizadas"] = avance["TareasFinalizadas"]
+    avance["PreparacionesEnCurso"] = avance["TareasEnCurso"]
+
+    # ------------------------------------------------------
+    # MISMA PRESENTACIÓN GENERAL, PERO SIN OCULTAR UN
+    # DESPACHO ACTIVO SOLO POR TENER 0% DE AVANCE.
+    # ------------------------------------------------------
     despachos_sin_iniciar = (
-        avance.loc[
-            iniciadas.eq(0),
-            "Despacho",
-        ]
+        avance.loc[avance["TareasFinalizadas"].eq(0), "Despacho"]
         .sort_values()
         .tolist()
     )
 
-    # Solo mostramos avance de despachos que ya arrancaron y todavía no
-    # llegaron al 100%. Los completos siguen contando para calcular el
-    # porcentaje, pero no se dibuja una dona de un despacho ya cerrado.
-    avance = avance.loc[
-        iniciadas.gt(0)
-        & avance["Avance"].lt(100)
-    ].copy()
+    # Se muestran los despachos del universo operativo actual que aún no
+    # terminaron completamente. Los 0% siguen visibles como "sin iniciar"
+    # mediante la lista que consume principal.py.
+    avance = avance.loc[avance["Avance"].lt(100)].copy()
 
     avance = avance.sort_values(
         ["Avance", "Despacho"],
         ascending=[True, True],
-    )
+    ).reset_index(drop=True)
 
     return avance, despachos_sin_iniciar
 

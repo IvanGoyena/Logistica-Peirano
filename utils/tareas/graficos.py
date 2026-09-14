@@ -75,9 +75,29 @@ def grafico_avance_despacho(
 
     p = _parametros(perfil)
     avance = int(fila.get("Avance", 0))
-    cerrados = int(fila.get("PreparacionesFinalizadas", 0))
-    total = int(fila.get("TotalPreparaciones", 0))
+
+    # Nueva granularidad: TAREAS.
+    cerradas = int(
+        fila.get(
+            "TareasFinalizadas",
+            fila.get("PreparacionesFinalizadas", 0),
+        )
+    )
+    total = int(
+        fila.get(
+            "TotalTareas",
+            fila.get("TotalPreparaciones", 0),
+        )
+    )
     despacho = str(fila.get("Despacho", ""))
+
+    volumen_pendiente = float(fila.get("VolumenPendienteM3", 0) or 0)
+    volumen_total = float(fila.get("VolumenTotalM3", 0) or 0)
+    unidades_pendientes = int(fila.get("UnidadesPendientes", 0) or 0)
+    unidades_totales = int(fila.get("UnidadesTotales", 0) or 0)
+
+    fmt_u = lambda valor: f"{int(valor):,}".replace(",", ".")
+    fmt_v = lambda valor: f"{float(valor):.2f}"
 
     figura = go.Figure(
         go.Pie(
@@ -92,15 +112,22 @@ def grafico_avance_despacho(
                 "line": {"color": "#0B1119", "width": 3},
             },
             hovertemplate=(
-                f"<b>{despacho}</b><br>Avance: {avance}%<br>"
-                f"Preparaciones cerradas: {cerrados}<br>"
-                f"Preparaciones totales: {total}<extra></extra>"
+                f"<b>{despacho}</b><br>"
+                f"Avance por tareas: {avance}%<br>"
+                f"Tareas cerradas: {cerradas}<br>"
+                f"Tareas totales: {total}<br>"
+                f"Volumen pendiente: {fmt_v(volumen_pendiente)} m³<br>"
+                f"Volumen total: {fmt_v(volumen_total)} m³<br>"
+                f"Unidades pendientes: {fmt_u(unidades_pendientes)}<br>"
+                f"Unidades totales: {fmt_u(unidades_totales)}"
+                "<extra></extra>"
             ),
         )
     )
+
     figura.update_layout(
-        height=p["altura"],
-        margin={"l": 2, "r": 2, "t": p["margen_t"], "b": 2},
+        height=p["altura"] + 34,
+        margin={"l": 2, "r": 2, "t": p["margen_t"], "b": 34},
         paper_bgcolor=FONDO,
         plot_bgcolor=FONDO,
         font={"color": TEXTO},
@@ -112,21 +139,34 @@ def grafico_avance_despacho(
             },
             {
                 "text": f"<b>{avance}%</b>",
-                "x": .5, "y": .57, "showarrow": False,
+                "x": .5, "y": .59, "showarrow": False,
                 "font": {"size": p["porcentaje"], "color": TEXTO},
             },
             {
-                "text": f"<b>{cerrados} / {total}</b>",
-                "x": .5, "y": .35, "showarrow": False,
+                "text": f"<b>{cerradas} / {total} tareas</b>",
+                "x": .5, "y": .37, "showarrow": False,
                 "font": {"size": p["detalle"], "color": TEXTO_SECUNDARIO},
+            },
+            {
+                "text": (
+                    f"📦 {fmt_v(volumen_pendiente)} / {fmt_v(volumen_total)} m³"
+                    f" · 🔢 {fmt_u(unidades_pendientes)} / {fmt_u(unidades_totales)} u."
+                ),
+                "x": .5, "y": -.08, "showarrow": False,
+                "font": {
+                    "size": max(p["detalle"] - 2, 9),
+                    "color": TEXTO_SECUNDARIO,
+                },
             },
         ],
     )
+
     st.plotly_chart(
         figura,
         width="stretch",
         config={"displayModeBar": False, "responsive": True},
     )
+
 
 
 def grafico_sectorizaciones(

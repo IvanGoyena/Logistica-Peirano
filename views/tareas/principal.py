@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import re
+from io import BytesIO
 import streamlit as st
 
 from models.tareas_modulo.contexto import construir_contexto_tareas
@@ -134,9 +135,24 @@ def _render_indicadores(
                 f"Sin iniciar ({len(sin_iniciar)}): " + " · ".join(sin_iniciar)
             )
 
-        avance = contexto["avance_despachos"]
+        avance = contexto["avance_despachos"].copy()
+
+        # Solo mostrar agrupadores que ya tengan avance (> 0%).
+        # Este filtro es únicamente visual y no modifica el resto del tablero.
+        if not avance.empty:
+            if "Porcentaje" in avance.columns:
+                porcentaje = pd.to_numeric(
+                    avance["Porcentaje"], errors="coerce"
+                ).fillna(0)
+                avance = avance.loc[porcentaje.gt(0)].copy()
+            elif "TareasFinalizadas" in avance.columns:
+                finalizadas = pd.to_numeric(
+                    avance["TareasFinalizadas"], errors="coerce"
+                ).fillna(0)
+                avance = avance.loc[finalizadas.gt(0)].copy()
+
         if avance.empty:
-            st.info("No hay despachos activos con avance parcial.")
+            st.info("No hay despachos con avance iniciado.")
         else:
             # Los donuts quedan en una sola fila superior siempre que entren.
             cantidad_columnas = min(len(avance), 5 if perfil == "tv" else 4)
@@ -297,6 +313,55 @@ def _render_indicadores(
                             width="large",
                         ),
                     },
+                )
+
+                # Descarga operativa: respeta exactamente el filtro visible.
+                tabla_descarga = agrupado_control[
+                    ["Despacho", "Cliente", "Carros / Áreas"]
+                ].copy()
+                tabla_descarga = tabla_descarga.rename(
+                    columns={
+                        "Despacho": "Agrupador / Camioneta",
+                        "Carros / Áreas": "Pendiente de control / Áreas controladas / Sin asignar",
+                    }
+                )
+
+                salida_excel = BytesIO()
+                with pd.ExcelWriter(salida_excel, engine="openpyxl") as writer:
+                    tabla_descarga.to_excel(writer, index=False, sheet_name="Carros")
+                    ws = writer.book["Carros"]
+                    ws.freeze_panes = "A2"
+                    ws.auto_filter.ref = ws.dimensions
+
+                    from openpyxl.styles import Alignment, Font, PatternFill
+
+                    encabezado_fill = PatternFill("solid", fgColor="1F4E78")
+                    encabezado_font = Font(color="FFFFFF", bold=True)
+                    for celda in ws[1]:
+                        celda.fill = encabezado_fill
+                        celda.font = encabezado_font
+                        celda.alignment = Alignment(horizontal="center", vertical="center")
+
+                    anchos = {"A": 28, "B": 38, "C": 85}
+                    for columna, ancho in anchos.items():
+                        ws.column_dimensions[columna].width = ancho
+
+                    for fila in ws.iter_rows(min_row=2):
+                        for celda in fila:
+                            celda.alignment = Alignment(vertical="top", wrap_text=True)
+
+                salida_excel.seek(0)
+                nombre_filtro = (
+                    "TODOS" if filtro_control == "Todos"
+                    else re.sub(r"[^A-Za-z0-9_-]+", "_", filtro_control.strip())
+                )
+                st.download_button(
+                    "⬇️ Descargar carros",
+                    data=salida_excel.getvalue(),
+                    file_name=f"carros_control_{nombre_filtro}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="descargar_carros_control",
+                    width="stretch",
                 )
 
     with col_sectores:
