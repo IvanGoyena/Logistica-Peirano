@@ -782,41 +782,43 @@ def obtener_avance_despachos(tabla):
     # ------------------------------------------------------
     # ÚLTIMA UTILIZACIÓN DEL AGRUPADOR
     # ------------------------------------------------------
-    # Regla:
-    # 1) Si el agrupador tiene movimiento en la fecha operativa actual,
-    #    se toma SOLAMENTE ese día.
-    # 2) Si no tiene movimiento hoy, se toma la ventana de las últimas
-    #    72 horas corridas, para cubrir usos que quedaron de la semana anterior.
+    # fecha_operativa está normalizada a 00:00 y NO debe utilizarse
+    # como límite superior, porque eliminaría las tareas del día actual.
     #
-    # Esto evita mezclar reutilizaciones viejas del mismo agrupador.
-    fecha_operativa_dia = fecha_operativa.normalize()
-    fecha_inicio_72h = fecha_operativa_dia - pd.Timedelta(hours=72)
+    # Referencia real = último FechaHora existente en el Informe Tareas.
+    # RETIRA / URGENTES -> últimas 48 h corridas.
+    # Resto              -> últimas 72 h corridas.
+    fecha_referencia = df["FechaHora"].max()
 
-    partes_ultima_utilizacion = []
+    if pd.isna(fecha_referencia):
+        return pd.DataFrame(columns=columnas), []
 
-    for despacho, grupo in df.groupby("Despacho", dropna=False, sort=False):
-        grupo = grupo.copy()
-        fechas_grupo = grupo["FechaHora"].dt.normalize()
+    fecha_inicio_72h = fecha_referencia - pd.Timedelta(hours=72)
+    fecha_inicio_48h = fecha_referencia - pd.Timedelta(hours=48)
 
-        if fechas_grupo.eq(fecha_operativa_dia).any():
-            grupo = grupo.loc[
-                fechas_grupo.eq(fecha_operativa_dia)
-            ].copy()
-        else:
-            grupo = grupo.loc[
-                grupo["FechaHora"].ge(fecha_inicio_72h)
-                & grupo["FechaHora"].le(fecha_operativa)
-            ].copy()
+    despacho_norm = (
+        df["Despacho"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    es_48h = despacho_norm.isin(["RETIRA", "URGENTES"])
 
-        if not grupo.empty:
-            partes_ultima_utilizacion.append(grupo)
-
-    if partes_ultima_utilizacion:
-        df = pd.concat(
-            partes_ultima_utilizacion,
-            ignore_index=True,
+    df = df.loc[
+        (
+            es_48h
+            & df["FechaHora"].ge(fecha_inicio_48h)
+            & df["FechaHora"].le(fecha_referencia)
         )
-    else:
+        | (
+            ~es_48h
+            & df["FechaHora"].ge(fecha_inicio_72h)
+            & df["FechaHora"].le(fecha_referencia)
+        )
+    ].copy()
+
+    if df.empty:
         return pd.DataFrame(columns=columnas), []
 
     if "TipoPreparacion" in df.columns:
@@ -1014,10 +1016,14 @@ def obtener_avance_despachos(tabla):
         .tolist()
     )
 
-    # Se muestran los despachos del universo operativo actual que aún no
-    # terminaron completamente. Los 0% siguen visibles como "sin iniciar"
-    # mediante la lista que consume principal.py.
-    avance = avance.loc[avance["Avance"].lt(100)].copy()
+    # En los donuts se muestran únicamente despachos con avance REAL:
+    # mayor a 0% y menor a 100%.
+    # Los 0% se conservan en despachos_sin_iniciar para el texto informativo,
+    # pero no ocupan un donut.
+    avance = avance.loc[
+        avance["Avance"].gt(0)
+        & avance["Avance"].lt(100)
+    ].copy()
 
     avance = avance.sort_values(
         ["Avance", "Despacho"],

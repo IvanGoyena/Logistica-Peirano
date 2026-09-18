@@ -223,7 +223,7 @@ ZONAS_PLANIFICACION = {
     "03010010": {
         "descripcion": 'TRISTAN SUAREZ',
         "grupo": '1',
-        "planificacion": 'MARTES',
+        "planificacion": 'MIERCOLES',
     },
     "04010001": {
         "descripcion": 'ALTE. BROWN',

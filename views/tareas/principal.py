@@ -154,13 +154,79 @@ def _render_indicadores(
         if avance.empty:
             st.info("No hay despachos con avance iniciado.")
         else:
-            # Los donuts quedan en una sola fila superior siempre que entren.
-            cantidad_columnas = min(len(avance), 5 if perfil == "tv" else 4)
-            cantidad_columnas = max(cantidad_columnas, 1)
-            columnas = st.columns(cantidad_columnas)
-            for indice, (_, fila) in enumerate(avance.iterrows()):
-                with columnas[indice % cantidad_columnas]:
-                    grafico_avance_despacho(fila, perfil=perfil)
+            # Carrusel horizontal: una sola fila, ordenada por mayor avance.
+            avance = avance.copy()
+
+            if "Porcentaje" in avance.columns:
+                avance["_OrdenAvance"] = pd.to_numeric(
+                    avance["Porcentaje"], errors="coerce"
+                ).fillna(0.0)
+            elif {"TareasFinalizadas", "TareasTotales"}.issubset(avance.columns):
+                _fin = pd.to_numeric(avance["TareasFinalizadas"], errors="coerce").fillna(0.0)
+                _tot = pd.to_numeric(avance["TareasTotales"], errors="coerce").fillna(0.0)
+                avance["_OrdenAvance"] = (
+                    _fin.div(_tot.where(_tot.gt(0))).fillna(0.0) * 100.0
+                )
+            else:
+                avance["_OrdenAvance"] = 0.0
+
+            avance["_OrdenOriginal"] = range(len(avance))
+            avance = avance.sort_values(
+                ["_OrdenAvance", "_OrdenOriginal"],
+                ascending=[False, True],
+                kind="stable",
+            ).reset_index(drop=True)
+
+            visibles = 5 if perfil == "tv" else 4
+            visibles = max(1, min(visibles, len(avance)))
+            max_inicio = max(0, len(avance) - visibles)
+
+            clave_inicio = f"avance_despachos_inicio_{perfil}"
+            if clave_inicio not in st.session_state:
+                st.session_state[clave_inicio] = 0
+            st.session_state[clave_inicio] = min(
+                max(int(st.session_state[clave_inicio]), 0), max_inicio
+            )
+
+            if len(avance) > visibles:
+                _, nav_izq, nav_der = st.columns([12, 0.55, 0.55])
+                with nav_izq:
+                    if st.button(
+                        "←",
+                        key=f"avance_despachos_anterior_{perfil}",
+                        help="Ver agrupadores más avanzados",
+                        disabled=st.session_state[clave_inicio] <= 0,
+                        use_container_width=True,
+                    ):
+                        st.session_state[clave_inicio] = max(
+                            0, st.session_state[clave_inicio] - 1
+                        )
+                with nav_der:
+                    if st.button(
+                        "→",
+                        key=f"avance_despachos_siguiente_{perfil}",
+                        help="Ver agrupadores menos avanzados",
+                        disabled=st.session_state[clave_inicio] >= max_inicio,
+                        use_container_width=True,
+                    ):
+                        st.session_state[clave_inicio] = min(
+                            max_inicio, st.session_state[clave_inicio] + 1
+                        )
+
+            inicio = st.session_state[clave_inicio]
+            avance_visible = avance.iloc[inicio:inicio + visibles].copy()
+
+            # Siempre una única fila.
+            columnas = st.columns(len(avance_visible))
+            for columna, (_, fila) in zip(columnas, avance_visible.iterrows()):
+                with columna:
+                    grafico_avance_despacho(
+                        fila.drop(
+                            labels=["_OrdenAvance", "_OrdenOriginal"],
+                            errors="ignore",
+                        ),
+                        perfil=perfil,
+                    )
 
     # 2) Debajo: tabla a la izquierda y gráfico de sectores a la derecha.
     col_criticos, col_sectores = st.columns(
@@ -245,7 +311,7 @@ def _render_indicadores(
                     ):
                         return f"🚧 {numero_carro} ({detalle_area})"
 
-                    return f"⏳ SIN ASIGNAR ({detalle_area})"
+                    return f"⏳ ({detalle_area})"
 
                 control_base["_DetalleControl"] = control_base.apply(
                     _estado_control_fila, axis=1
@@ -294,23 +360,22 @@ def _render_indicadores(
                     )
                 )
 
+                # El agrupador ya se elige arriba: mostramos solo Cliente + Carros.
+                tabla_control_visible = agrupado_control[
+                    ["Cliente", "Carros / Áreas"]
+                ].copy()
+
                 st.dataframe(
-                    agrupado_control[
-                        ["Despacho", "Cliente", "Carros / Áreas"]
-                    ],
+                    tabla_control_visible,
                     width="stretch",
                     hide_index=True,
                     height=430,
                     column_config={
-                        "Despacho": st.column_config.TextColumn(
-                            "Agrupador / Camioneta", width="medium"
-                        ),
                         "Cliente": st.column_config.TextColumn(
                             "Cliente", width="medium"
                         ),
                         "Carros / Áreas": st.column_config.TextColumn(
-                            "Pendiente de control / Áreas controladas / Sin asignar",
-                            width="large",
+                            "Carros", width="large"
                         ),
                     },
                 )
@@ -321,8 +386,8 @@ def _render_indicadores(
                 ].copy()
                 tabla_descarga = tabla_descarga.rename(
                     columns={
-                        "Despacho": "Agrupador / Camioneta",
-                        "Carros / Áreas": "Pendiente de control / Áreas controladas / Sin asignar",
+                        "Despacho": "Agrupador",
+                        "Carros / Áreas": "Carros",
                     }
                 )
 
@@ -367,8 +432,100 @@ def _render_indicadores(
     with col_sectores:
         with st.container(border=True):
             st.markdown("#### 📦 Sectores en preparación")
+
+            # La torta respeta el MISMO filtro Agrupador / Camioneta de la tabla.
+            # Si se selecciona "Todos", conserva el consolidado general del contexto.
+            familias_grafico = contexto["familias_operativas"]
+
+            if filtro_control != "Todos":
+                pedidos_sector = contexto["tabla_pedidos"].copy()
+
+                # Preparaciones visibles después de aplicar el filtro del selectbox.
+                preparaciones_filtro = set(
+                    control_base["Preparacion"]
+                    .dropna()
+                    .astype("string")
+                    .str.strip()
+                    .str.replace(r"\.0+$", "", regex=True)
+                    .loc[lambda x: x.ne("")]
+                    .tolist()
+                )
+
+                # Segunda clave: Pedido ERP. Ayuda con tareas históricas cuyo ID de
+                # preparación puede no coincidir exactamente con Pedidos DIGIP.
+                def _pedido_key_local(valor: object) -> str:
+                    if pd.isna(valor):
+                        return ""
+                    texto = str(valor).strip()
+                    if not texto:
+                        return ""
+                    texto = texto.split("-")[0].strip()
+                    partes = texto.split()
+                    return partes[-1] if partes else texto
+
+                pedidos_filtro = set()
+                if "Pedido" in control_base.columns:
+                    pedidos_filtro = {
+                        clave
+                        for clave in control_base["Pedido"].map(_pedido_key_local).tolist()
+                        if clave
+                    }
+
+                mascara = pd.Series(False, index=pedidos_sector.index)
+
+                if "PreparacionID" in pedidos_sector.columns:
+                    prep_pedidos = (
+                        pedidos_sector["PreparacionID"]
+                        .astype("string")
+                        .str.strip()
+                        .str.replace(r"\.0+$", "", regex=True)
+                    )
+                    mascara = mascara | prep_pedidos.isin(preparaciones_filtro)
+
+                if pedidos_filtro and "Pedido" in pedidos_sector.columns:
+                    mascara = mascara | pedidos_sector["Pedido"].map(
+                        _pedido_key_local
+                    ).isin(pedidos_filtro)
+
+                pedidos_sector = pedidos_sector.loc[mascara].copy()
+
+                # Evitar doble conteo si una fila coincidió por Preparación y Pedido.
+                clave_dedupe = [
+                    c for c in ["Pedido", "PreparacionID"]
+                    if c in pedidos_sector.columns
+                ]
+                if clave_dedupe:
+                    pedidos_sector = pedidos_sector.drop_duplicates(
+                        subset=clave_dedupe, keep="last"
+                    )
+
+                columnas_sector = [
+                    c for c in [
+                        "IMPORTADO", "Importado", "NACIONAL", "Nacional",
+                        "BACHAS", "Bachas", "BLISTER", "Blister",
+                        "SANITARIOS", "Sanitarios", "REPUESTOS", "Repuestos",
+                        "FLEXIBLES", "Flexibles", "ACCESORIOS", "Accesorios",
+                        "VARIOS", "Varios",
+                    ]
+                    if c in pedidos_sector.columns
+                ]
+
+                if columnas_sector and not pedidos_sector.empty:
+                    familias_grafico = (
+                        pedidos_sector[columnas_sector]
+                        .apply(pd.to_numeric, errors="coerce")
+                        .fillna(0)
+                        .sum()
+                        .sort_values(ascending=False)
+                    )
+                    familias_grafico = familias_grafico.loc[
+                        familias_grafico.gt(0)
+                    ]
+                else:
+                    familias_grafico = pd.Series(dtype="float64")
+
             grafico_sectorizaciones(
-                contexto["familias_operativas"],
+                familias_grafico,
                 perfil=perfil,
             )
 
