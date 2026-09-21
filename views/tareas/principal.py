@@ -975,6 +975,291 @@ def _render_fragmento_operativo(perfil: str) -> None:
     _render_indicadores(contexto, perfil=perfil)
     _render_tabla(contexto, perfil=perfil)
 
+    # ======================================================
+    # DATOS CENCOSUD PARA APP DE ETIQUETAS
+    # ======================================================
+    pedidos_cencosud = fuentes["pedidos"].copy()
+
+    def _buscar_columna(df: pd.DataFrame, candidatos: list[str]) -> str | None:
+        mapa = {str(c).strip().lower(): c for c in df.columns}
+        for candidato in candidatos:
+            col = mapa.get(candidato.strip().lower())
+            if col is not None:
+                return col
+        return None
+
+    col_pedido = _buscar_columna(
+        pedidos_cencosud,
+        ["Código pedido", "Codigo pedido", "Código Pedido", "Codigo Pedido",
+         "Número", "Numero", "Pedido", "Nro Pedido", "Nro. Pedido"]
+    )
+    col_observacion = _buscar_columna(
+        pedidos_cencosud, ["Observación", "Observacion", "Observaciones"]
+    )
+    col_despacho = _buscar_columna(
+        pedidos_cencosud, ["Despacho", "Agrupador", "Agrupador / Camioneta"]
+    )
+
+    with st.container(border=True):
+        st.markdown("#### 🏷️ Datos CENCOSUD para etiquetas")
+
+        if not all([col_pedido, col_observacion, col_despacho]):
+            st.warning(
+                "No se encontraron en Pedidos DIGIP las columnas necesarias: "
+                "Pedido, Observación y Despacho."
+            )
+        else:
+            despacho_txt = (
+                pedidos_cencosud[col_despacho]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+
+            # Los agrupadores CENCOSUD se identifican operativamente como EASY + fecha.
+            tabla_cencosud = pedidos_cencosud.loc[
+                despacho_txt.str.match(r"(?i)^EASY(?:\s|$)")
+            , [col_pedido, col_observacion, col_despacho]].copy()
+
+            if tabla_cencosud.empty:
+                st.info("No hay pedidos CENCOSUD / EASY disponibles en Pedidos DIGIP.")
+            else:
+                # Pedido: quitar retransmisiones/sufijos de DIGIP (-1, -2, etc.).
+                tabla_cencosud["Pedido"] = (
+                    tabla_cencosud[col_pedido]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                    # El crudo llega como, por ejemplo, "0001  215188-1".
+                    # Nos quedamos con el número real del pedido y quitamos -1/-2.
+                    .str.extract(r"(\d+(?:-\d+)?)\s*$", expand=False)
+                    .fillna("")
+                    .str.replace(r"-\d+$", "", regex=True)
+                    .str.replace(r"\.0+$", "", regex=True)
+                )
+
+                tabla_cencosud["Orden de Compra"] = (
+                    tabla_cencosud[col_observacion]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                )
+
+                tabla_cencosud["Fecha de entrega"] = (
+                    tabla_cencosud[col_despacho]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                    .str.replace(r"(?i)^EASY\s*", "", regex=True)
+                    .str.strip(" -")
+                )
+
+                # Mostrar únicamente entregas de hoy en adelante.
+                # La fecha viene del agrupador EASY en formato DD-MM.
+                hoy = pd.Timestamp.now().normalize()
+
+                def _fecha_entrega_futura(valor: object) -> pd.Timestamp:
+                    texto = str(valor).strip()
+                    match = re.fullmatch(r"(\d{1,2})[-/](\d{1,2})", texto)
+                    if not match:
+                        return pd.NaT
+
+                    dia, mes = map(int, match.groups())
+                    try:
+                        fecha = pd.Timestamp(year=hoy.year, month=mes, day=dia)
+                    except ValueError:
+                        return pd.NaT
+
+                    # Cambio de año: estando en los últimos meses del año,
+                    # una fecha de enero/febrero corresponde al año siguiente.
+                    if fecha < hoy and (hoy - fecha).days > 180:
+                        try:
+                            fecha = pd.Timestamp(year=hoy.year + 1, month=mes, day=dia)
+                        except ValueError:
+                            return pd.NaT
+
+                    return fecha
+
+                tabla_cencosud["_FechaEntregaOrden"] = (
+                    tabla_cencosud["Fecha de entrega"].map(_fecha_entrega_futura)
+                )
+
+                tabla_cencosud = (
+                    tabla_cencosud
+                    .loc[
+                        tabla_cencosud["Pedido"].ne("")
+                        & tabla_cencosud["_FechaEntregaOrden"].notna()
+                        & tabla_cencosud["_FechaEntregaOrden"].ge(hoy)
+                    ]
+                    .sort_values(["_FechaEntregaOrden", "Pedido"], kind="stable")
+                    [["Pedido", "Orden de Compra", "Fecha de entrega"]]
+                    .drop_duplicates()
+                    .reset_index(drop=True)
+                )
+
+                # ------------------------------------------------------
+                # CARROS ASOCIADOS AL PEDIDO (Informe Tareas)
+                # ------------------------------------------------------
+                # Se deja configurado aunque todavía no existan tareas para
+                # las entregas futuras. Cuando DIGIP genere las tareas/carros,
+                # la asociación aparecerá automáticamente.
+                tareas_cencosud = fuentes["tareas"].copy()
+
+                def _normalizar_pedido(valor: object) -> str:
+                    if pd.isna(valor):
+                        return ""
+                    texto = str(valor).strip()
+                    if not texto:
+                        return ""
+                    # Informe Tareas / DIGIP puede traer prefijos y retransmisiones
+                    # del estilo "0001  215188-1". Conservamos el pedido ERP.
+                    encontrado = re.search(r"(\d+(?:-\d+)?)\s*$", texto)
+                    if encontrado:
+                        texto = encontrado.group(1)
+                    texto = re.sub(r"-\d+$", "", texto)
+                    texto = re.sub(r"\.0+$", "", texto)
+                    return texto.strip()
+
+                col_pedido_tareas = _buscar_columna(
+                    tareas_cencosud,
+                    [
+                        "Pedido", "Código pedido", "Codigo pedido",
+                        "Código Pedido", "Codigo Pedido",
+                        "Número", "Numero", "Nro Pedido", "Nro. Pedido",
+                    ],
+                )
+                col_carro_tareas = _buscar_columna(
+                    tareas_cencosud,
+                    [
+                        "Contenedor", "Carro", "Código contenedor",
+                        "Codigo contenedor", "ContenedorCodigo",
+                        "Contenedor Código", "Contenedor Codigo",
+                    ],
+                )
+
+                tabla_cencosud["Carros"] = ""
+
+                if (
+                    col_pedido_tareas is not None
+                    and col_carro_tareas is not None
+                    and not tareas_cencosud.empty
+                ):
+                    tareas_carros = tareas_cencosud[
+                        [col_pedido_tareas, col_carro_tareas]
+                    ].copy()
+
+                    tareas_carros["_PedidoKey"] = tareas_carros[
+                        col_pedido_tareas
+                    ].map(_normalizar_pedido)
+
+                    tareas_carros["_Carro"] = (
+                        tareas_carros[col_carro_tareas]
+                        .astype("string")
+                        .fillna("")
+                        .str.strip()
+                    )
+
+                    # Para esta columna interesan únicamente los contenedores
+                    # operativos CARROxx. Los contenedores numéricos corresponden
+                    # al control/cierre y no deben reemplazar el número de carro.
+                    tareas_carros = tareas_carros.loc[
+                        tareas_carros["_PedidoKey"].ne("")
+                        & tareas_carros["_Carro"].str.match(
+                            r"(?i)^CARRO\s*\d+", na=False
+                        )
+                    ].copy()
+
+                    tareas_carros["_NumeroCarro"] = (
+                        tareas_carros["_Carro"]
+                        .str.extract(r"(?i)^CARRO\s*(\d+)", expand=False)
+                        .fillna("")
+                    )
+
+                    if not tareas_carros.empty:
+                        carros_por_pedido = (
+                            tareas_carros.loc[
+                                tareas_carros["_NumeroCarro"].ne("")
+                            ]
+                            .groupby("_PedidoKey")["_NumeroCarro"]
+                            .agg(
+                                lambda s: " · ".join(
+                                    sorted(
+                                        set(s.astype(str)),
+                                        key=lambda x: int(x)
+                                        if x.isdigit()
+                                        else 999999,
+                                    )
+                                )
+                            )
+                        )
+
+                        tabla_cencosud["Carros"] = (
+                            tabla_cencosud["Pedido"]
+                            .map(_normalizar_pedido)
+                            .map(carros_por_pedido)
+                            .fillna("")
+                        )
+
+                st.dataframe(
+                    tabla_cencosud,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Pedido": st.column_config.TextColumn("Pedido", width="medium"),
+                        "Orden de Compra": st.column_config.TextColumn(
+                            "Orden de Compra", width="medium"
+                        ),
+                        "Fecha de entrega": st.column_config.TextColumn(
+                            "Fecha de entrega", width="small"
+                        ),
+                        "Carros": st.column_config.TextColumn(
+                            "Carros", width="medium"
+                        ),
+                    },
+                )
+
+                salida_cencosud = BytesIO()
+                with pd.ExcelWriter(salida_cencosud, engine="openpyxl") as writer:
+                    tabla_cencosud.to_excel(
+                        writer, index=False, sheet_name="CENCOSUD"
+                    )
+                    ws = writer.book["CENCOSUD"]
+                    ws.freeze_panes = "A2"
+                    ws.auto_filter.ref = ws.dimensions
+
+                    from openpyxl.styles import Alignment, Font, PatternFill
+
+                    encabezado_fill = PatternFill("solid", fgColor="1F4E78")
+                    encabezado_font = Font(color="FFFFFF", bold=True)
+                    for celda in ws[1]:
+                        celda.fill = encabezado_fill
+                        celda.font = encabezado_font
+                        celda.alignment = Alignment(
+                            horizontal="center", vertical="center"
+                        )
+
+                    for columna, ancho in {"A": 20, "B": 28, "C": 20, "D": 24}.items():
+                        ws.column_dimensions[columna].width = ancho
+
+                    for fila in ws.iter_rows(min_row=2):
+                        for celda in fila:
+                            celda.alignment = Alignment(
+                                vertical="center", wrap_text=True
+                            )
+
+                salida_cencosud.seek(0)
+                st.download_button(
+                    "⬇️ Descargar datos CENCOSUD",
+                    data=salida_cencosud.getvalue(),
+                    file_name="datos_cencosud_etiquetas.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key="descargar_datos_cencosud_etiquetas",
+                    width="stretch",
+                )
+
 
 def render_tareas() -> None:
     with st.sidebar:
