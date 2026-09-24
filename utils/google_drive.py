@@ -1,5 +1,7 @@
 from io import BytesIO
 from pathlib import Path
+import time
+
 
 import pandas as pd
 import streamlit as st
@@ -7,6 +9,8 @@ import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from google.auth.exceptions import RefreshError, TransportError
+from googleapiclient.errors import HttpError
 
 
 # ==========================================================
@@ -48,9 +52,15 @@ def crear_credenciales():
     )
 
 
-@st.cache_resource
+@st.cache_resource(ttl=1800, show_spinner=False)
 def crear_servicio_drive():
+    """
+    Crea el cliente de Google Drive.
 
+    El TTL evita conservar indefinidamente un cliente antiguo. Ante errores
+    recuperables, _ejecutar_drive() limpia esta caché y crea credenciales
+    nuevas automáticamente.
+    """
     return build(
         "drive",
         "v3",
@@ -59,13 +69,76 @@ def crear_servicio_drive():
     )
 
 
+def _es_error_recuperable(error: Exception) -> bool:
+    """Indica si conviene reconstruir el cliente y reintentar una vez."""
+    if isinstance(error, (RefreshError, TransportError, TimeoutError, ConnectionError)):
+        return True
+
+    if isinstance(error, HttpError):
+        status = getattr(getattr(error, "resp", None), "status", None)
+        return status in {401, 403, 408, 429, 500, 502, 503, 504}
+
+    texto = str(error).lower()
+    marcas = (
+        "invalid_grant",
+        "invalid jwt",
+        "token",
+        "timed out",
+        "timeout",
+        "connection",
+        "temporarily unavailable",
+    )
+    return any(marca in texto for marca in marcas)
+
+
+def _reiniciar_servicio_drive() -> None:
+    """Descarta el cliente cacheado para forzar credenciales/servicio nuevos."""
+    try:
+        crear_servicio_drive.clear()
+    except Exception:
+        # No dejamos que una limpieza de caché impida el reintento.
+        pass
+
+
+def _ejecutar_drive(crear_request, *, reintentos: int = 1):
+    """
+    Ejecuta una llamada a Drive con recuperación automática.
+
+    Si falla por autenticación o un problema transitorio:
+    1) descarta el servicio cacheado;
+    2) espera brevemente;
+    3) crea credenciales nuevas;
+    4) reintenta una sola vez.
+    """
+    ultimo_error = None
+
+    for intento in range(reintentos + 1):
+        try:
+            servicio = crear_servicio_drive()
+            return crear_request(servicio).execute()
+        except Exception as error:
+            ultimo_error = error
+
+            if intento >= reintentos or not _es_error_recuperable(error):
+                raise
+
+            print(
+                "Google Drive: error recuperable; "
+                "se regenerará la conexión y se reintentará una vez."
+            )
+            print(f"{type(error).__name__}: {error}")
+
+            _reiniciar_servicio_drive()
+            time.sleep(1)
+
+    raise ultimo_error
+
+
 # ==========================================================
 # BÚSQUEDA
 # ==========================================================
 
 def buscar_archivo(nombre_archivo):
-
-    servicio = crear_servicio_drive()
 
     nombre_seguro = nombre_archivo.replace("'", "\\'")
 
@@ -75,10 +148,12 @@ def buscar_archivo(nombre_archivo):
         "and trashed = false"
     )
 
-    resultado = servicio.files().list(
-        q=consulta,
-        fields="files(id,name,mimeType)",
-    ).execute()
+    resultado = _ejecutar_drive(
+        lambda servicio: servicio.files().list(
+            q=consulta,
+            fields="files(id,name,mimeType)",
+        )
+    )
 
     archivos = resultado.get("files", [])
 
@@ -94,25 +169,25 @@ def listar_archivos_carpeta(
     folder_id: str = FOLDER_ID,
 ) -> list[dict]:
 
-    servicio = crear_servicio_drive()
-
     archivos = []
     token = None
 
     while True:
 
-        respuesta = servicio.files().list(
-            q=(
-                f"'{folder_id}' in parents "
-                "and trashed = false"
-            ),
-            fields=(
-                "nextPageToken,"
-                "files(id,name,mimeType,modifiedTime,size)"
-            ),
-            pageToken=token,
-            pageSize=1000,
-        ).execute()
+        respuesta = _ejecutar_drive(
+            lambda servicio: servicio.files().list(
+                q=(
+                    f"'{folder_id}' in parents "
+                    "and trashed = false"
+                ),
+                fields=(
+                    "nextPageToken,"
+                    "files(id,name,mimeType,modifiedTime,size)"
+                ),
+                pageToken=token,
+                pageSize=1000,
+            )
+        )
 
         archivos.extend(
             respuesta.get("files", [])
@@ -131,28 +206,38 @@ def listar_archivos_carpeta(
 # ==========================================================
 
 def descargar_archivo(file_id):
+    """Descarga un archivo y reconstruye la conexión si falla a mitad de camino."""
+    ultimo_error = None
 
-    servicio = crear_servicio_drive()
+    for intento in range(2):
+        try:
+            servicio = crear_servicio_drive()
+            request = servicio.files().get_media(fileId=file_id)
+            archivo = BytesIO()
+            downloader = MediaIoBaseDownload(archivo, request)
 
-    request = servicio.files().get_media(
-        fileId=file_id
-    )
+            terminado = False
+            while not terminado:
+                _, terminado = downloader.next_chunk()
 
-    archivo = BytesIO()
+            archivo.seek(0)
+            return archivo
 
-    downloader = MediaIoBaseDownload(
-        archivo,
-        request,
-    )
+        except Exception as error:
+            ultimo_error = error
 
-    terminado = False
+            if intento >= 1 or not _es_error_recuperable(error):
+                raise
 
-    while not terminado:
-        _, terminado = downloader.next_chunk()
+            print(
+                "Google Drive: falló una descarga; "
+                "se regenerará la conexión y se reintentará una vez."
+            )
+            print(f"{type(error).__name__}: {error}")
+            _reiniciar_servicio_drive()
+            time.sleep(1)
 
-    archivo.seek(0)
-
-    return archivo
+    raise ultimo_error
 
 
 def descargar_archivo_a_disco(

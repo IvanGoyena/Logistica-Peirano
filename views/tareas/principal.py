@@ -239,6 +239,41 @@ def _render_indicadores(
 
             control_base = contexto["tabla_operativa"].copy()
 
+            # La tabla de Preparaciones / Control debe mostrar solamente
+            # agrupadores que siguen operativamente abiertos (< 100%).
+            # `avance_despachos` ya excluye los despachos al 100%, mientras que
+            # `despachos_sin_iniciar` conserva los que siguen activos al 0%.
+            # De esta forma un agrupador totalmente cerrado (p. ej. CAMION MAR 1)
+            # desaparece aunque sus carros finalizados sigan dentro de la ventana
+            # histórica de `tabla_operativa`.
+            despachos_activos = set()
+            avance_activo = contexto.get("avance_despachos")
+            if isinstance(avance_activo, pd.DataFrame) and not avance_activo.empty:
+                if "Despacho" in avance_activo.columns:
+                    despachos_activos.update(
+                        avance_activo["Despacho"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .loc[lambda x: x.ne("")]
+                        .tolist()
+                    )
+
+            despachos_activos.update(
+                str(x).strip()
+                for x in contexto.get("despachos_sin_iniciar", [])
+                if str(x).strip()
+            )
+
+            if not control_base.empty and "Despacho" in control_base.columns:
+                control_base = control_base.loc[
+                    control_base["Despacho"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .isin(despachos_activos)
+                ].copy()
+
             if control_base.empty:
                 st.info("No hay preparaciones operativas para mostrar.")
             else:
@@ -360,10 +395,21 @@ def _render_indicadores(
                     )
                 )
 
-                # El agrupador ya se elige arriba: mostramos solo Cliente + Carros.
+                # Mantener visible el contexto del agrupador al abrir/expandir la tabla.
+                if filtro_control != "Todos":
+                    st.markdown(f"### 🚚 {filtro_control} — Carros en preparación")
+                else:
+                    st.markdown("### 🚚 Todos los agrupadores — Carros en preparación")
+
+                # IMPORTANTE: el modo Fullscreen de st.dataframe muestra SOLO
+                # el contenido del dataframe. Por eso incorporamos el agrupador
+                # como columna real de la tabla: así sigue visible al expandirla.
                 tabla_control_visible = agrupado_control[
-                    ["Cliente", "Carros / Áreas"]
+                    ["Despacho", "Cliente", "Carros / Áreas"]
                 ].copy()
+                tabla_control_visible = tabla_control_visible.rename(
+                    columns={"Despacho": "Agrupador"}
+                )
 
                 st.dataframe(
                     tabla_control_visible,
@@ -371,6 +417,9 @@ def _render_indicadores(
                     hide_index=True,
                     height=430,
                     column_config={
+                        "Agrupador": st.column_config.TextColumn(
+                            "Agrupador / Camioneta", width="medium"
+                        ),
                         "Cliente": st.column_config.TextColumn(
                             "Cliente", width="medium"
                         ),
@@ -1100,10 +1149,11 @@ def _render_fragmento_operativo(perfil: str) -> None:
                 # ------------------------------------------------------
                 # CARROS ASOCIADOS AL PEDIDO (Informe Tareas)
                 # ------------------------------------------------------
-                # Se deja configurado aunque todavía no existan tareas para
-                # las entregas futuras. Cuando DIGIP genere las tareas/carros,
-                # la asociación aparecerá automáticamente.
-                tareas_cencosud = fuentes["tareas"].copy()
+                # Usamos la tabla normalizada del contexto porque allí Informe
+                # Tareas ya está cruzado con Pedidos DIGIP y cada preparación
+                # conoce su Pedido. Esto evita depender de que el CSV crudo de
+                # tareas traiga directamente una columna Pedido.
+                tareas_cencosud = contexto["tabla_operativa"].copy()
 
                 def _normalizar_pedido(valor: object) -> str:
                     if pd.isna(valor):
@@ -1111,8 +1161,6 @@ def _render_fragmento_operativo(perfil: str) -> None:
                     texto = str(valor).strip()
                     if not texto:
                         return ""
-                    # Informe Tareas / DIGIP puede traer prefijos y retransmisiones
-                    # del estilo "0001  215188-1". Conservamos el pedido ERP.
                     encontrado = re.search(r"(\d+(?:-\d+)?)\s*$", texto)
                     if encontrado:
                         texto = encontrado.group(1)
@@ -1120,85 +1168,127 @@ def _render_fragmento_operativo(perfil: str) -> None:
                     texto = re.sub(r"\.0+$", "", texto)
                     return texto.strip()
 
-                col_pedido_tareas = _buscar_columna(
-                    tareas_cencosud,
-                    [
-                        "Pedido", "Código pedido", "Codigo pedido",
-                        "Código Pedido", "Codigo Pedido",
-                        "Número", "Numero", "Nro Pedido", "Nro. Pedido",
-                    ],
-                )
-                col_carro_tareas = _buscar_columna(
-                    tareas_cencosud,
-                    [
-                        "Contenedor", "Carro", "Código contenedor",
-                        "Codigo contenedor", "ContenedorCodigo",
-                        "Contenedor Código", "Contenedor Codigo",
-                    ],
-                )
-
+                # ------------------------------------------------------
+                # DETALLE OPERATIVO PARA ETIQUETAS
+                # ------------------------------------------------------
+                # Carros = número + sector + unidades.
+                # Si ya pasó a contenedor numérico, mostramos CONTROLADO.
                 tabla_cencosud["Carros"] = ""
+                tabla_cencosud["Estado"] = "SIN INICIAR"
 
                 if (
-                    col_pedido_tareas is not None
-                    and col_carro_tareas is not None
-                    and not tareas_cencosud.empty
+                    not tareas_cencosud.empty
+                    and "Pedido" in tareas_cencosud.columns
+                    and "Carro" in tareas_cencosud.columns
                 ):
-                    tareas_carros = tareas_cencosud[
-                        [col_pedido_tareas, col_carro_tareas]
-                    ].copy()
+                    columnas_detalle = ["Pedido", "Carro"]
+                    for col in ["Area", "Unidades", "Categoria", "FechaHora"]:
+                        if col in tareas_cencosud.columns:
+                            columnas_detalle.append(col)
 
-                    tareas_carros["_PedidoKey"] = tareas_carros[
-                        col_pedido_tareas
-                    ].map(_normalizar_pedido)
-
-                    tareas_carros["_Carro"] = (
-                        tareas_carros[col_carro_tareas]
-                        .astype("string")
-                        .fillna("")
-                        .str.strip()
+                    tareas_detalle = tareas_cencosud[columnas_detalle].copy()
+                    tareas_detalle["_PedidoKey"] = tareas_detalle["Pedido"].map(
+                        _normalizar_pedido
                     )
 
-                    # Para esta columna interesan únicamente los contenedores
-                    # operativos CARROxx. Los contenedores numéricos corresponden
-                    # al control/cierre y no deben reemplazar el número de carro.
-                    tareas_carros = tareas_carros.loc[
-                        tareas_carros["_PedidoKey"].ne("")
-                        & tareas_carros["_Carro"].str.match(
-                            r"(?i)^CARRO\s*\d+", na=False
-                        )
-                    ].copy()
+                    for col in ["Area", "Categoria"]:
+                        if col not in tareas_detalle.columns:
+                            tareas_detalle[col] = ""
+                    if "Unidades" not in tareas_detalle.columns:
+                        tareas_detalle["Unidades"] = 0
 
-                    tareas_carros["_NumeroCarro"] = (
-                        tareas_carros["_Carro"]
-                        .str.extract(r"(?i)^CARRO\s*(\d+)", expand=False)
-                        .fillna("")
+                    tareas_detalle["_Carro"] = (
+                        tareas_detalle["Carro"].astype("string").fillna("")
+                        .str.replace(r"^[^A-Za-z0-9]*", "", regex=True)
+                        .str.strip().str.upper()
+                    )
+                    tareas_detalle["_Area"] = (
+                        tareas_detalle["Area"].astype("string").fillna("")
+                        .str.strip().str.upper()
+                    )
+                    tareas_detalle["_Unidades"] = (
+                        pd.to_numeric(tareas_detalle["Unidades"], errors="coerce")
+                        .fillna(0).round().astype(int)
                     )
 
-                    if not tareas_carros.empty:
-                        carros_por_pedido = (
-                            tareas_carros.loc[
-                                tareas_carros["_NumeroCarro"].ne("")
-                            ]
-                            .groupby("_PedidoKey")["_NumeroCarro"]
-                            .agg(
-                                lambda s: " · ".join(
-                                    sorted(
-                                        set(s.astype(str)),
-                                        key=lambda x: int(x)
-                                        if x.isdigit()
-                                        else 999999,
-                                    )
-                                )
-                            )
-                        )
+                    siglas_area = {
+                        "IMPORTADO": "IMP",
+                        "NACIONAL": "NAC",
+                        "SANITARIOS": "SAN",
+                        "INTERPLANTA": "INT",
+                    }
+                    tareas_detalle["_Sector"] = tareas_detalle["_Area"].map(
+                        lambda x: siglas_area.get(x, x[:3] if x else "S/A")
+                    )
 
-                        tabla_cencosud["Carros"] = (
-                            tabla_cencosud["Pedido"]
-                            .map(_normalizar_pedido)
-                            .map(carros_por_pedido)
-                            .fillna("")
+                    if "FechaHora" in tareas_detalle.columns:
+                        tareas_detalle["FechaHora"] = pd.to_datetime(
+                            tareas_detalle["FechaHora"], errors="coerce"
                         )
+                        tareas_detalle = tareas_detalle.sort_values("FechaHora")
+
+                    def _detalle_cencosud(fila):
+                        carro = str(fila["_Carro"]).strip().upper()
+                        detalle = f'{fila["_Sector"]} - {int(fila["_Unidades"])} u.'
+
+                        match_carro = re.match(r"^CARRO\s*(\d+)", carro)
+                        if match_carro:
+                            return f"🚧 {match_carro.group(1)} ({detalle})"
+
+                        if re.fullmatch(r"\d+", carro):
+                            return f"✅ CONTROLADO ({detalle})"
+
+                        return f"⏳ SIN ASIGNAR ({detalle})"
+
+                    tareas_detalle["_Detalle"] = tareas_detalle.apply(
+                        _detalle_cencosud, axis=1
+                    )
+
+                    tareas_detalle["_Clave"] = (
+                        tareas_detalle["_PedidoKey"] + "|"
+                        + tareas_detalle["_Carro"] + "|"
+                        + tareas_detalle["_Sector"]
+                    )
+                    tareas_detalle = tareas_detalle.drop_duplicates(
+                        subset=["_Clave"], keep="last"
+                    )
+
+                    detalles_por_pedido = (
+                        tareas_detalle.loc[tareas_detalle["_PedidoKey"].ne("")]
+                        .groupby("_PedidoKey")["_Detalle"]
+                        .agg(lambda s: " · ".join(dict.fromkeys(s.astype(str))))
+                    )
+
+                    def _estado_pedido_cencosud(grupo):
+                        carros = grupo["_Carro"].astype(str)
+                        tiene_carro = carros.str.match(r"^CARRO\s*\d+", na=False).any()
+                        tiene_pendiente = (
+                            carros.eq("")
+                            | carros.str.contains("SIN ASIGNAR", case=False, na=False)
+                        ).any()
+                        tiene_controlado = carros.str.fullmatch(r"\d+", na=False).any()
+
+                        if tiene_carro:
+                            return "EN PREPARACIÓN"
+                        if tiene_pendiente:
+                            return "SIN INICIAR"
+                        if tiene_controlado:
+                            return "CONTROLADO"
+                        return "SIN INICIAR"
+
+                    estado_por_pedido = (
+                        tareas_detalle.loc[tareas_detalle["_PedidoKey"].ne("")]
+                        .groupby("_PedidoKey", group_keys=False)
+                        .apply(_estado_pedido_cencosud)
+                    )
+
+                    pedido_key_tabla = tabla_cencosud["Pedido"].map(_normalizar_pedido)
+                    tabla_cencosud["Carros"] = (
+                        pedido_key_tabla.map(detalles_por_pedido).fillna("")
+                    )
+                    tabla_cencosud["Estado"] = (
+                        pedido_key_tabla.map(estado_por_pedido).fillna("SIN INICIAR")
+                    )
 
                 st.dataframe(
                     tabla_cencosud,
@@ -1213,7 +1303,10 @@ def _render_fragmento_operativo(perfil: str) -> None:
                             "Fecha de entrega", width="small"
                         ),
                         "Carros": st.column_config.TextColumn(
-                            "Carros", width="medium"
+                            "Carros", width="large"
+                        ),
+                        "Estado": st.column_config.TextColumn(
+                            "Estado", width="small"
                         ),
                     },
                 )
@@ -1238,7 +1331,7 @@ def _render_fragmento_operativo(perfil: str) -> None:
                             horizontal="center", vertical="center"
                         )
 
-                    for columna, ancho in {"A": 20, "B": 28, "C": 20, "D": 24}.items():
+                    for columna, ancho in {"A": 20, "B": 28, "C": 20, "D": 52, "E": 20}.items():
                         ws.column_dimensions[columna].width = ancho
 
                     for fila in ws.iter_rows(min_row=2):

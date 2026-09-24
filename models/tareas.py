@@ -595,9 +595,15 @@ def obtener_tabla_operativa(tabla):
     fecha_operativa = operativa["FechaHora"].dt.normalize().max()
     fecha_inicio = fecha_operativa - pd.Timedelta(days=DIAS_TABLERO - 1)
 
-    # Solo mostramos tareas pertenecientes a pedidos que siguen ABIERTOS.
-    # Si el pedido ya quedó COMPLETO/CERRADO, desaparece del tablero aunque
-    # DIGIP haya dejado una tarea o un CARRO técnicamente abierto.
+    # Conservamos:
+    # - tareas de pedidos todavía abiertos;
+    # - tareas FINALIZADAS aunque su pedido individual ya haya pasado a
+    #   COMPLETO/CERRADO. Esto es necesario porque dentro de un mismo
+    #   agrupador puede haber pedidos ya controlados mientras el despacho
+    #   completo todavía sigue por debajo del 100%.
+    #
+    # Más abajo las finalizadas siguen limitadas por DIAS_TABLERO, por lo
+    # que no se arrastran históricos indefinidamente.
     estado_pedido = (
         operativa["EstadoPedido"]
         .fillna("")
@@ -605,10 +611,16 @@ def obtener_tabla_operativa(tabla):
         .str.strip()
         .str.upper()
     )
-    pedido_abierto = estado_pedido.isin(["PENDIENTE", "PREPARACION", "SUSPENDIDO", "SUSPENDIDA"])
-    operativa = operativa.loc[pedido_abierto].copy()
+    pedido_abierto = estado_pedido.isin(
+        ["PENDIENTE", "PREPARACION", "SUSPENDIDO", "SUSPENDIDA"]
+    )
+    tarea_finalizada = operativa["Categoria"].eq("Finalizado")
 
-    # Dentro de pedidos abiertos:
+    operativa = operativa.loc[
+        pedido_abierto | tarea_finalizada
+    ].copy()
+
+    # Ventana operativa:
     # - Pendientes / En Curso / Suspendidas: sin límite de fecha.
     # - Finalizadas: solamente dentro de DIAS_TABLERO.
     estado_tarea = operativa["Estado"].fillna("").astype(str).str.strip().str.upper()
@@ -1063,8 +1075,12 @@ def obtener_carros_criticos(
     if avance_despachos is None or avance_despachos.empty:
         return pd.DataFrame(columns=columnas_salida)
 
-    criticos = avance_despachos[
-        avance_despachos["Avance"] >= 25
+    # La tabla debe conservar TODOS los agrupadores que sigan activos.
+    # avance_despachos ya llega limitado a avance > 0 y < 100, por lo que
+    # no aplicamos un umbral adicional (antes >= 25 hacía desaparecer
+    # agrupadores que todavía seguían operativos).
+    criticos = avance_despachos.loc[
+        avance_despachos["Avance"].lt(100)
     ].copy()
 
     if criticos.empty:
@@ -1095,7 +1111,7 @@ def obtener_carros_criticos(
         .str.upper()
     )
     tabla = tabla.loc[
-        tabla["Categoria"].isin(["Pendiente", "En Curso"])
+        tabla["Categoria"].isin(["Pendiente", "En Curso", "Finalizado"])
         | estado_tarea.str.contains("SUSPEND", na=False)
     ].copy()
 
@@ -1300,10 +1316,18 @@ def obtener_carros_criticos(
                     re.sub(r"^[^A-Za-z0-9]*", "", carro).strip().upper(),
                     flags=re.IGNORECASE,
                 )
+                # Contenedor numérico = tarea ya controlada/cerrada.
+                # Se conserva visible mientras el agrupador continúe < 100%.
+                carro_limpio_estado = re.sub(
+                    r"^[^A-Za-z0-9]*", "", carro
+                ).strip().upper()
+                es_controlado = bool(re.fullmatch(r"\d+", carro_limpio_estado))
+                icono = "✅" if es_controlado else "🚧"
+
                 if sector and sector != "---":
-                    carros_sector.append(f"🚧 {carro_visual} ({sector} - {unidades_txt})")
+                    carros_sector.append(f"{icono} {carro_visual} ({sector} - {unidades_txt})")
                 else:
-                    carros_sector.append(f"🚧 {carro_visual} ({unidades_txt})")
+                    carros_sector.append(f"{icono} {carro_visual} ({unidades_txt})")
 
         tiene_sin_asignar = bool(grupo["_SinAsignar"].any())
 

@@ -105,6 +105,7 @@ def render_modulo_pedidos() -> None:
     ].copy()
     df_expresos = datos_operativos["expresos"].copy()
     df_volumetria = datos_operativos["volumetria"].copy()
+    df_personal = datos_operativos.get("personal", pd.DataFrame()).copy()
 
 
     # =====================================================
@@ -854,6 +855,7 @@ def render_modulo_pedidos() -> None:
         "PreparacionID",
         "CodigoDespacho",
         "DespachoDescripcion",
+        "FrecuenciaPreparacion",
         "FrecuenciaEntrega",
         "DiaEntrega",
         "ZonaAgrupadorExpreso",
@@ -951,7 +953,7 @@ def render_modulo_pedidos() -> None:
         "Vista del módulo",
         options=[
             "📊 Dashboard",
-            "🧠 Inteligencia analítica",
+            "🧠 Inteligencia operativa",
             "🚨 Compromisos sin cobertura",
             "📋 Tabla y gestiones",
         ],
@@ -964,9 +966,14 @@ def render_modulo_pedidos() -> None:
     if vista_pedidos == "📊 Dashboard":
         from views.pedidos.dashboard import render_dashboard
         render_dashboard(datos_dashboard, tabla_detalle_dashboard)
-    elif vista_pedidos == "🧠 Inteligencia analítica":
+    elif vista_pedidos == "🧠 Inteligencia operativa":
         from views.pedidos.inteligencia import render_inteligencia
-        render_inteligencia(datos_dashboard, tabla_detalle_dashboard)
+        render_inteligencia(
+            datos_dashboard,
+            tabla_detalle_dashboard,
+            tabla_personal=df_personal,
+            tabla_transmisiones=tabla_transmisiones,
+        )
     elif vista_pedidos == "🚨 Compromisos sin cobertura":
         from views.pedidos.cobertura import render_cobertura
         render_cobertura(

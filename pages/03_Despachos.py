@@ -20,6 +20,9 @@ from views.despachos.dashboard import (
 from views.despachos.planificador import (
     render_planificador_despachos,
 )
+from views.despachos.ubicador import (
+    render_ubicador_despachos,
+)
 
 
 requerir_roles(
@@ -65,6 +68,7 @@ with col_actualizar:
 if actualizar_datos:
     limpiar_cache_despachos()
     limpiar_estado_despachos()
+    st.session_state.pop("_contexto_despachos_ubicador", None)
 
     st.toast(
         "Datos de Despachos actualizados.",
@@ -78,8 +82,29 @@ if actualizar_datos:
 # CONTEXTO OPERATIVO
 # ==========================================================
 
+vista_actual = st.session_state.get(
+    "vista_principal_despachos",
+    "📊 Dashboard",
+)
+
+# En el Ubicador trabajamos con un contexto congelado en memoria.
+# Así cada escaneo puede hacer rerun para refrescar la interfaz SIN
+# reconstruir las tablas pesadas de Despachos.
+usar_contexto_ubicador = (
+    vista_actual == "📍 Ubicador de despacho"
+    and "_contexto_despachos_ubicador" in st.session_state
+)
+
 try:
-    contexto = construir_contexto_despachos()
+    if usar_contexto_ubicador:
+        contexto = st.session_state["_contexto_despachos_ubicador"]
+    else:
+        contexto = construir_contexto_despachos()
+
+        # Guardamos una copia del contexto ya construido para que,
+        # al entrar al Ubicador, los siguientes reruns sean instantáneos.
+        st.session_state["_contexto_despachos_ubicador"] = contexto
+
 except Exception as error:
     st.error(
         "No se pudo construir la base operativa de Despachos."
@@ -88,6 +113,8 @@ except Exception as error:
     st.stop()
 
 df_pedidos = contexto["df_pedidos"]
+df_informe_tareas = contexto["df_informe_tareas"]
+df_filtrar_preparacion = contexto["df_filtrar_preparacion"]
 tabla = contexto["tabla"]
 
 
@@ -95,42 +122,49 @@ tabla = contexto["tabla"]
 # GESTIONES COMERCIALES
 # ==========================================================
 
-try:
-    solicitudes_cerradas = (
-        cerrar_solicitudes_resueltas(
-            df_pedidos
+# Las gestiones comerciales son necesarias para Dashboard/Planificador,
+# pero no para escanear bultos en el Ubicador.
+if vista_actual != "📍 Ubicador de despacho":
+    try:
+        solicitudes_cerradas = (
+            cerrar_solicitudes_resueltas(
+                df_pedidos
+            )
         )
-    )
-except Exception as error:
-    solicitudes_cerradas = 0
-    st.warning(
-        "No se pudo ejecutar el cierre automático de "
-        f"solicitudes comerciales. Detalle: {error}"
-    )
+    except Exception as error:
+        solicitudes_cerradas = 0
+        st.warning(
+            "No se pudo ejecutar el cierre automático de "
+            f"solicitudes comerciales. Detalle: {error}"
+        )
 
-if solicitudes_cerradas:
-    st.toast(
+    if solicitudes_cerradas:
+        st.toast(
+            (
+                f"{solicitudes_cerradas} solicitud(es) "
+                "finalizada(s) automáticamente."
+            ),
+            icon="✅",
+        )
+
+    try:
         (
-            f"{solicitudes_cerradas} solicitud(es) "
-            "finalizada(s) automáticamente."
-        ),
-        icon="✅",
-    )
+            pedidos_bloqueados_gestion,
+            pedidos_por_tipo_gestion,
+        ) = obtener_bloqueos_gestiones()
 
-try:
-    (
-        pedidos_bloqueados_gestion,
-        pedidos_por_tipo_gestion,
-    ) = obtener_bloqueos_gestiones()
+    except Exception as error:
+        pedidos_bloqueados_gestion = set()
+        pedidos_por_tipo_gestion = {}
 
-except Exception as error:
+        st.warning(
+            "No se pudieron consultar los bloqueos comerciales. "
+            f"Detalle: {error}"
+        )
+else:
+    solicitudes_cerradas = 0
     pedidos_bloqueados_gestion = set()
     pedidos_por_tipo_gestion = {}
-
-    st.warning(
-        "No se pudieron consultar los bloqueos comerciales. "
-        f"Detalle: {error}"
-    )
 
 
 # ==========================================================
@@ -170,6 +204,7 @@ vista_despachos = st.segmented_control(
     options=[
         "📊 Dashboard",
         "🚐 Planificador de camionetas",
+        "📍 Ubicador de despacho",
     ],
     default="📊 Dashboard",
     key="vista_principal_despachos",
@@ -181,7 +216,7 @@ if vista_despachos == "📊 Dashboard":
         tabla_disponible_planificacion
     )
 
-else:
+elif vista_despachos == "🚐 Planificador de camionetas":
     render_planificador_despachos(
         tabla=tabla,
         tabla_filtrada=tabla_filtrada,
@@ -197,4 +232,12 @@ else:
         pedidos_por_tipo_gestion=(
             pedidos_por_tipo_gestion
         ),
+    )
+
+
+if vista_despachos == "📍 Ubicador de despacho":
+    render_ubicador_despachos(
+        df_filtrar_preparacion=df_filtrar_preparacion,
+        df_informe_tareas=df_informe_tareas,
+        tabla=tabla,
     )

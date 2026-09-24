@@ -72,6 +72,11 @@ def cargar_datos_base():
             "Maestro Volumetria",
             cache=True,
         ),
+        "personal": leer_archivo(
+            CARPETA_MAESTROS,
+            "Maestro Personal",
+            cache=True,
+        ),
     }
 
 

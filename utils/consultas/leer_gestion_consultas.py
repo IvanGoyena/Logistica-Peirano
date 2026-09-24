@@ -26,7 +26,7 @@ from utils.google_sheets import (
 _ULTIMA_LECTURA_GOOGLE: dict[str, pd.DataFrame] = {}
 
 # Reintentos ante errores de red transitorios.
-_INTENTOS_LECTURA_GOOGLE = 3
+_INTENTOS_LECTURA_GOOGLE = 1
 _ESPERA_REINTENTO_SEGUNDOS = 1.5
 
 
@@ -152,9 +152,10 @@ def leer_tabla_google(
     columna_fecha: str | None = None,
 ) -> pd.DataFrame:
     """
-    Lee una hoja de Google Sheets con reintentos ante cortes de red.
+    Lee una hoja de Google Sheets. Los reintentos de transporte se realizan
+    en utils.google_sheets; aquí se conserva el último resultado válido.
 
-    Si Google falla después de los reintentos y existe una lectura correcta
+    Si Google falla después de los reintentos de transporte y existe una lectura correcta
     previa de esa misma hoja en memoria, devuelve esa copia como respaldo.
     Si todavía no hubo ninguna lectura correcta, mantiene el error visible
     para no ocultar un problema real de conexión o configuración.

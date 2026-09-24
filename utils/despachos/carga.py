@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -18,6 +20,93 @@ from models.expresos import construir_tabla_expresos
 from models.despachos.base_operativa import (
     construir_tabla_operativa_despachos,
 )
+
+
+# ==========================================================
+# HISTORICO FILTRAR PREPARACION
+# ==========================================================
+
+@st.cache_data(
+    ttl=270,
+    show_spinner=False,
+)
+def _leer_historico_preparaciones() -> pd.DataFrame:
+    """
+    Consolida los archivos mensuales de Filtrar Preparacion
+    disponibles dentro de Data_WMS.
+
+    Replica la lógica ya utilizada por el módulo Tareas para
+    no depender de un nombre fijo por mes.
+    """
+
+    carpeta = Path(CARPETA_WMS)
+
+    if not carpeta.exists():
+        return pd.DataFrame()
+
+    rutas = sorted(
+        {
+            ruta.resolve()
+            for patron in (
+                "Filtrar Preparacion*.csv",
+                "Filtrar Preparación*.csv",
+                "Filtrar Preparacion*.xlsx",
+                "Filtrar Preparación*.xlsx",
+            )
+            for ruta in carpeta.glob(patron)
+            if ruta.is_file()
+        }
+    )
+
+    tablas: list[pd.DataFrame] = []
+
+    for ruta in rutas:
+        try:
+            if ruta.suffix.lower() == ".csv":
+                tabla = pd.read_csv(
+                    ruta,
+                    sep=None,
+                    engine="python",
+                    encoding="utf-8-sig",
+                )
+            else:
+                tabla = pd.read_excel(ruta)
+
+            if tabla is not None and not tabla.empty:
+                tabla = tabla.copy()
+                tabla["ArchivoOrigenPreparacion"] = ruta.name
+                tablas.append(tabla)
+
+        except Exception:
+            continue
+
+    if not tablas:
+        return pd.DataFrame()
+
+    total = pd.concat(
+        tablas,
+        ignore_index=True,
+        sort=False,
+    )
+
+    claves = [
+        columna
+        for columna in (
+            "Id",
+            "ContenedorDetalleId",
+            "TareaId",
+            "ControlContenedorId",
+        )
+        if columna in total.columns
+    ]
+
+    if claves:
+        total = total.drop_duplicates(
+            subset=claves,
+            keep="last",
+        )
+
+    return total.reset_index(drop=True)
 
 
 @st.cache_data(
@@ -85,6 +174,12 @@ def cargar_fuentes_despachos() -> dict[str, pd.DataFrame]:
             "Maestro Volumetria",
             cache=True,
         ),
+        "informe_tareas": leer_archivo(
+            CARPETA_WMS,
+            "Informe Tareas",
+            cache=False,
+        ),
+        "filtrar_preparacion": _leer_historico_preparaciones(),
     }
 
 
@@ -110,6 +205,8 @@ def construir_contexto_despachos() -> dict:
     df_transmisiones = datos["transmisiones"].copy()
     df_expresos = datos["expresos"].copy()
     df_volumetria = datos["volumetria"].copy()
+    df_informe_tareas = datos["informe_tareas"].copy()
+    df_filtrar_preparacion = datos["filtrar_preparacion"].copy()
 
     tabla_pedidos = construir_tabla_pedidos(
         df_pedidos,
@@ -152,6 +249,8 @@ def construir_contexto_despachos() -> dict:
         "df_transmisiones": df_transmisiones,
         "df_expresos": df_expresos,
         "df_volumetria": df_volumetria,
+        "df_informe_tareas": df_informe_tareas,
+        "df_filtrar_preparacion": df_filtrar_preparacion,
         "tabla": tabla_operativa,
     }
 
@@ -164,3 +263,4 @@ def limpiar_cache_despachos() -> None:
 
     cargar_fuentes_despachos.clear()
     construir_contexto_despachos.clear()
+    _leer_historico_preparaciones.clear()

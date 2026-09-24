@@ -244,31 +244,92 @@ def _leer_historico_control() -> pd.DataFrame:
 
 @st.cache_data(ttl=270, show_spinner=False)
 def _leer_historico_preparaciones() -> pd.DataFrame:
+    """
+    Lee UNA única fuente consolidada de Filtrar Preparaciones.
+
+    El descargador consulta DIGIP por una ventana corta y mantiene:
+        Data_WMS/Historico Filtrar Preparaciones.csv
+
+    No se deben concatenar:
+        - Filtrar Preparacion Ultimos 7 Dias.csv
+        - Filtrar Preparacion <Mes> <Año>.csv
+
+    porque son copias parciales/snapshots del mismo origen y provocarían
+    reprocesamiento y riesgo de mezclar versiones de una misma fila.
+    """
     carpeta = Path(CARPETA_WMS)
+
     if not carpeta.exists():
         return pd.DataFrame()
-    rutas = sorted({r.resolve() for patron in (
-        "Filtrar Preparacion*.csv", "Filtrar Preparación*.csv",
-        "Filtrar Preparacion*.xlsx", "Filtrar Preparación*.xlsx",
-    ) for r in carpeta.glob(patron) if r.is_file()})
-    tablas = []
-    for ruta in rutas:
-        try:
-            if ruta.suffix.lower() == ".csv":
-                t = pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8-sig")
-            else:
-                t = pd.read_excel(ruta)
-            if not t.empty:
-                t = t.copy(); t["ArchivoOrigenPreparacion"] = ruta.name; tablas.append(t)
-        except Exception:
-            continue
-    if not tablas:
+
+    candidatos = [
+        carpeta / "Historico Filtrar Preparaciones.csv",
+        carpeta / "Historico Filtrar Preparaciones.xlsx",
+        carpeta / "Histórico Filtrar Preparaciones.csv",
+        carpeta / "Histórico Filtrar Preparaciones.xlsx",
+    ]
+
+    ruta = next(
+        (r for r in candidatos if r.exists() and r.is_file()),
+        None,
+    )
+
+    if ruta is None:
         return pd.DataFrame()
-    total = pd.concat(tablas, ignore_index=True, sort=False)
-    claves = [c for c in ["Id", "ContenedorDetalleId", "TareaId", "ControlContenedorId"] if c in total.columns]
-    if claves:
-        total = total.drop_duplicates(subset=claves, keep="last")
-    return total.reset_index(drop=True)
+
+    try:
+        if ruta.suffix.lower() == ".csv":
+            tabla = pd.read_csv(
+                ruta,
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+            )
+        else:
+            tabla = pd.read_excel(ruta)
+    except Exception:
+        return pd.DataFrame()
+
+    if tabla is None or tabla.empty:
+        return pd.DataFrame()
+
+    tabla = tabla.copy()
+    tabla["ArchivoOrigenPreparacion"] = ruta.name
+
+    # El histórico generado por el descargador ya viene consolidado.
+    # Dejamos una protección extra por ContenedorDetalleId.
+    if "ContenedorDetalleId" in tabla.columns:
+        clave = (
+            tabla["ContenedorDetalleId"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.replace(r"\\.0+$", "", regex=True)
+        )
+
+        con_clave = tabla.loc[clave.ne("")].copy()
+        sin_clave = tabla.loc[clave.eq("")].copy()
+
+        if not con_clave.empty:
+            con_clave["_ClaveHistorica"] = (
+                con_clave["ContenedorDetalleId"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+                .str.replace(r"\\.0+$", "", regex=True)
+            )
+            con_clave = con_clave.drop_duplicates(
+                subset=["_ClaveHistorica"],
+                keep="last",
+            ).drop(columns=["_ClaveHistorica"])
+
+        tabla = pd.concat(
+            [con_clave, sin_clave],
+            ignore_index=True,
+            sort=False,
+        )
+
+    return tabla.reset_index(drop=True)
 
 
 

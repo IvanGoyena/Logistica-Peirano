@@ -13,7 +13,7 @@ from views.stock import (
 from utils.stock.estado_sesion import limpiar_estado_temporal_stock
 
 
-requerir_roles("admin", "gerencia")
+requerir_roles("admin", "gerencia","supervisor")
 st.set_page_config(page_title="Stock", page_icon="📊", layout="wide")
 
 st.title("📊 Gestión de Stock")

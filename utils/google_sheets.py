@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import time
+import socket
+import ssl
+import http.client
 
 import pandas as pd
 import streamlit as st
 
 from google.oauth2 import service_account
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 # ==========================================================
@@ -365,12 +371,9 @@ def crear_credenciales():
     )
 
 
-@st.cache_resource
+@st.cache_resource(ttl=1800)
 def crear_servicio_sheets():
-    """
-    Crea el servicio de Google Sheets.
-    """
-
+    """Crea y reutiliza el servicio de Google Sheets."""
     return build(
         "sheets",
         "v4",
@@ -379,7 +382,87 @@ def crear_servicio_sheets():
     )
 
 
-@st.cache_resource
+# Reintentos de transporte. Si una conexión HTTP queda cortada, se descarta
+# el servicio cacheado antes del siguiente intento para forzar una conexión nueva.
+_INTENTOS_RED_GOOGLE = 3
+_ESPERAS_RED_GOOGLE = (1.5, 3.0)
+
+
+def _es_error_autenticacion_google(error: Exception) -> bool:
+    if isinstance(error, RefreshError):
+        return True
+    if isinstance(error, HttpError):
+        try:
+            if int(error.resp.status) in (401, 403):
+                return True
+        except Exception:
+            pass
+    texto = f"{type(error).__name__}: {error}".lower()
+    return any(m in texto for m in (
+        "invalid_grant", "invalid jwt", "token must be a short-lived token",
+        "check your iat and exp", "invalid credentials", "unauthorized"
+    ))
+
+
+def _es_error_transitorio_red(error: Exception) -> bool:
+    if isinstance(error, (ConnectionResetError, ConnectionAbortedError, ConnectionError,
+                          TimeoutError, socket.timeout, ssl.SSLError, http.client.HTTPException)):
+        return True
+    if isinstance(error, HttpError):
+        try:
+            if int(error.resp.status) in (429, 500, 502, 503, 504):
+                return True
+        except Exception:
+            pass
+    texto = f"{type(error).__name__}: {error}".lower()
+    return any(m in texto for m in (
+        "winerror 10053", "winerror 10054", "winerror 10060", "connection reset", "connection aborted",
+        "remotedisconnected", "timed out", "timeout", "temporarily unavailable",
+        "service unavailable", "rate limit"
+    ))
+
+def _reiniciar_servicio_sheets() -> None:
+    """Descarta el cliente HTTP actual para que el próximo intento reconecte."""
+    try:
+        crear_servicio_sheets.clear()
+    except Exception:
+        pass
+
+
+def _ejecutar_sheets_con_reintentos(crear_peticion):
+    """Lecturas/idempotentes: recupera token/JWT, red, 429 y 5xx."""
+    ultimo_error: Exception | None = None
+    for intento in range(1, _INTENTOS_RED_GOOGLE + 1):
+        try:
+            servicio = crear_servicio_sheets()
+            return crear_peticion(servicio).execute()
+        except Exception as error:
+            ultimo_error = error
+            if not (_es_error_autenticacion_google(error) or _es_error_transitorio_red(error)):
+                raise
+            print(f"Google Sheets: error recuperable (intento {intento}/{_INTENTOS_RED_GOOGLE}): {type(error).__name__}: {error}")
+            _reiniciar_servicio_sheets()
+            if intento < _INTENTOS_RED_GOOGLE:
+                time.sleep(_ESPERAS_RED_GOOGLE[min(intento - 1, len(_ESPERAS_RED_GOOGLE) - 1)])
+    assert ultimo_error is not None
+    raise ultimo_error
+
+
+def _ejecutar_escritura_sheets_segura(crear_peticion):
+    """Escrituras: reintenta sólo fallos claros de autenticación, evitando duplicados por cortes ambiguos."""
+    try:
+        servicio = crear_servicio_sheets()
+        return crear_peticion(servicio).execute()
+    except Exception as error:
+        if not _es_error_autenticacion_google(error):
+            raise
+        print("Google Sheets: token/JWT rechazado en escritura; recreando servicio y reintentando una vez.")
+        _reiniciar_servicio_sheets()
+        servicio = crear_servicio_sheets()
+        return crear_peticion(servicio).execute()
+
+
+@st.cache_resource(ttl=1800)
 def crear_servicio_drive_escritura():
     """
     Crea el servicio de Google Drive con permisos de escritura.
@@ -446,16 +529,11 @@ def obtener_nombres_hojas() -> list[str]:
     Devuelve las pestañas existentes en la planilla.
     """
 
-    servicio = crear_servicio_sheets()
-
-    planilla = (
-        servicio
-        .spreadsheets()
-        .get(
+    planilla = _ejecutar_sheets_con_reintentos(
+        lambda servicio: servicio.spreadsheets().get(
             spreadsheetId=SPREADSHEET_ID,
             fields="sheets.properties.title",
         )
-        .execute()
     )
 
     return [
@@ -493,17 +571,11 @@ def leer_encabezados(nombre_hoja: str) -> list[str]:
     Lee la primera fila de una hoja.
     """
 
-    servicio = crear_servicio_sheets()
-
-    resultado = (
-        servicio
-        .spreadsheets()
-        .values()
-        .get(
+    resultado = _ejecutar_sheets_con_reintentos(
+        lambda servicio: servicio.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
             range=nombre_rango(nombre_hoja, "1:1"),
         )
-        .execute()
     )
 
     valores = resultado.get("values", [])
@@ -525,16 +597,14 @@ def escribir_encabezados(
     Escribe los encabezados en la primera fila.
     """
 
-    servicio = crear_servicio_sheets()
-
-    servicio.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango(nombre_hoja, "A1"),
-        valueInputOption="RAW",
-        body={
-            "values": [columnas],
-        },
-    ).execute()
+    _ejecutar_escritura_sheets_segura(
+        lambda servicio: servicio.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja, "A1"),
+            valueInputOption="RAW",
+            body={"values": [columnas]},
+        )
+    )
     limpiar_cache_google_sheets(metadata=True)
 
 
@@ -674,17 +744,16 @@ def _leer_hoja_sin_cache(
         else ESTRUCTURA_HOJAS[nombre_hoja]
     )
 
-    servicio = crear_servicio_sheets()
-
-    resultado = (
-        servicio
-        .spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(nombre_hoja),
+    resultado = _ejecutar_sheets_con_reintentos(
+        lambda servicio: (
+            servicio
+            .spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=nombre_rango(nombre_hoja),
+            )
         )
-        .execute()
     )
 
     valores = resultado.get("values", [])
@@ -761,14 +830,15 @@ def agregar_registro(
         for columna in columnas
     ]
 
-    servicio = crear_servicio_sheets()
-    servicio.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango(nombre_hoja, "A1"),
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [fila]},
-    ).execute()
+    _ejecutar_escritura_sheets_segura(
+        lambda servicio: servicio.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja, "A1"),
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [fila]},
+        )
+    )
 
     limpiar_cache_google_sheets()
 
@@ -796,14 +866,15 @@ def agregar_registros(
         for registro in registros
     ]
 
-    servicio = crear_servicio_sheets()
-    servicio.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango(nombre_hoja, "A1"),
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": filas},
-    ).execute()
+    _ejecutar_escritura_sheets_segura(
+        lambda servicio: servicio.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja, "A1"),
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": filas},
+        )
+    )
 
     limpiar_cache_google_sheets()
 
