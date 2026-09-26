@@ -13,19 +13,18 @@ DIAS_TABLERO = 3
 
 def _filtrar_ciclo_actual_despachos(tabla):
     """
-    Mantiene solamente despachos vigentes y evita mezclar reutilizaciones
-    distintas de un mismo nombre de agrupador.
+    Mantiene el ciclo operativo ACTUAL de cada agrupador sin cortar un viaje
+    por cambio de día.
 
     Reglas:
     - RETIRA / URGENTES: últimas 48 horas corridas.
-    - Resto: primero se limita a la ventana vigente del tablero
-      (DIAS_TABLERO días operativos, incluido el día de referencia).
-    - Dentro de esa ventana, si un mismo nombre fue reutilizado en días
-      distintos, se conserva únicamente su fecha operativa más reciente.
-
-    Así un agrupador histórico no reaparece solo por ser la última vez que
-    existió ese nombre, y tampoco se mezclan dos viajes distintos con el
-    mismo nombre.
+    - Resto: se usa DIAS_TABLERO como histórico de reconstrucción.
+    - Un agrupador puede comenzar un día y terminar al siguiente: mientras
+      exista alguna tarea abierta, se conserva TODO el bloque continuo de ese
+      ciclo, incluyendo tareas ya controladas/cerradas.
+    - Un nuevo ciclo del mismo nombre solo se separa cuando, antes de él, hubo
+      un cierre real del agrupador (todas las tareas conocidas del bloque
+      estaban cerradas).
     """
     if (
         tabla is None
@@ -44,50 +43,65 @@ def _filtrar_ciclo_actual_despachos(tabla):
     df["_DespachoNorm"] = (
         df["Despacho"].fillna("").astype(str).str.strip().str.upper()
     )
-    df["_FechaOperativa"] = df["FechaHora"].dt.normalize()
 
     fecha_referencia = df["FechaHora"].max()
-    dia_referencia = fecha_referencia.normalize()
-    inicio_tablero = dia_referencia - pd.Timedelta(days=DIAS_TABLERO - 1)
+    inicio_tablero = fecha_referencia.normalize() - pd.Timedelta(days=DIAS_TABLERO - 1)
     limite_48h = fecha_referencia - pd.Timedelta(hours=48)
 
     especiales = df["_DespachoNorm"].isin(["RETIRA", "URGENTES"])
+    especiales_df = df.loc[especiales & df["FechaHora"].ge(limite_48h)].copy()
+    normales = df.loc[~especiales & df["FechaHora"].ge(inicio_tablero)].copy()
 
-    # 1) Descartar primero históricos. Esto evita que EASY 18-09,
-    # INTERPLANTA u otro nombre antiguo revivan por ser su "último ciclo".
-    vigentes = (
-        (especiales & df["FechaHora"].ge(limite_48h))
-        |
-        (~especiales & df["_FechaOperativa"].ge(inicio_tablero))
-    )
-    df = df.loc[vigentes].copy()
-    if df.empty:
-        return df.drop(
-            columns=["_DespachoNorm", "_FechaOperativa"],
-            errors="ignore",
+    if normales.empty:
+        resultado = especiales_df
+    else:
+        # Estado operativo real de cada fila. Un contenedor numérico representa
+        # una tarea controlada/cerrada; CARRO, vacío o SIN ASIGNAR sigue abierto.
+        carro = (
+            normales.get("Carro", pd.Series("", index=normales.index))
+            .astype("string").fillna("").str.strip().str.upper()
+            .str.replace(r"^[^A-Z0-9]*", "", regex=True).str.strip()
         )
+        normales["_Cerrada"] = carro.str.fullmatch(r"\d+", na=False)
 
-    especiales = df["_DespachoNorm"].isin(["RETIRA", "URGENTES"])
+        # Clave de tarea estable para evaluar el cierre del agrupador.
+        prep = normales.get("Preparacion", pd.Series("", index=normales.index)).astype("string").fillna("").str.strip()
+        area = normales.get("Area", pd.Series("", index=normales.index)).astype("string").fillna("").str.strip().str.upper()
+        normales["_TareaCiclo"] = prep + "|" + area
 
-    # 2) Ya dentro de la ventana vigente, separar reutilizaciones:
-    # para cada nombre normal se conserva solamente el día de uso más reciente.
-    normales = df.loc[~especiales].copy()
-    if not normales.empty:
-        ultima_fecha = (
-            normales.groupby("_DespachoNorm")["_FechaOperativa"]
-            .transform("max")
-        )
-        normales = normales.loc[
-            normales["_FechaOperativa"].eq(ultima_fecha)
-        ].copy()
+        partes = []
+        for _, g in normales.groupby("_DespachoNorm", sort=False):
+            g = g.sort_values("FechaHora").copy()
 
-    especiales_df = df.loc[especiales].copy()
-    resultado = pd.concat([especiales_df, normales], ignore_index=False)
+            # Tomamos el último estado conocido por tarea. Si todavía queda una
+            # tarea abierta, TODO lo visible pertenece al mismo ciclo activo,
+            # aunque haya comenzado ayer.
+            ult = g.drop_duplicates("_TareaCiclo", keep="last")
+            ciclo_abierto = (~ult["_Cerrada"]).any()
+
+            if ciclo_abierto:
+                partes.append(g)
+                continue
+
+            # Si todo el nombre está cerrado dentro de la ventana, conservamos
+            # únicamente su bloque cerrado más reciente para no revivir viajes
+            # anteriores con el mismo nombre. Los bloques se separan por una
+            # pausa operativa de 12 h; esto solo afecta ciclos YA cerrados.
+            saltos = g["FechaHora"].diff().gt(pd.Timedelta(hours=12))
+            g["_BloqueCiclo"] = saltos.cumsum()
+            ultimo_bloque = g["_BloqueCiclo"].max()
+            partes.append(g.loc[g["_BloqueCiclo"].eq(ultimo_bloque)].copy())
+
+        normales = pd.concat(partes, ignore_index=False) if partes else normales.iloc[0:0].copy()
+        resultado = pd.concat([especiales_df, normales], ignore_index=False)
 
     return (
         resultado
         .sort_index()
-        .drop(columns=["_DespachoNorm", "_FechaOperativa"], errors="ignore")
+        .drop(
+            columns=["_DespachoNorm", "_Cerrada", "_TareaCiclo", "_BloqueCiclo"],
+            errors="ignore",
+        )
         .copy()
     )
 
