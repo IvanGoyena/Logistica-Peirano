@@ -301,7 +301,28 @@ COLUMNAS_INVENTARIO_HISTORIAL = [
 ]
 
 
+# ==========================================================
+# PLANNING OPERATIVO / COORDINACIÓN
+# ==========================================================
+
+COLUMNAS_PLANNING_COORDINACION = [
+    "CoordinacionID", "Tipo", "Referencia", "FechaEntrega",
+    "FechaSugerida", "FechaCoordinada", "Lineas", "Unidades",
+    "Estado", "Usuario", "FechaRegistro", "FechaActualizacion", "Observacion",
+]
+
+COLUMNAS_PLANNING_HISTORIAL = [
+    "HistorialID", "CoordinacionID", "Tipo", "Referencia",
+    "FechaEntrega", "FechaSugerida", "FechaAnterior", "FechaNueva",
+    "Lineas", "Unidades", "Accion", "Usuario", "Fecha", "Observacion",
+]
+
+
 ESTRUCTURA_HOJAS = {
+
+    "PlanningCoordinacion": COLUMNAS_PLANNING_COORDINACION,
+
+    "PlanningHistorial": COLUMNAS_PLANNING_HISTORIAL,
 
     "Solicitudes": COLUMNAS_SOLICITUDES,
 
@@ -336,6 +357,8 @@ ESTRUCTURA_HOJAS = {
     "InventarioHistorial": COLUMNAS_INVENTARIO_HISTORIAL,
 
 }
+
+
 
 
 # ==========================================================
@@ -628,17 +651,24 @@ def asegurar_hoja(nombre_hoja: str) -> None:
         return
 
     if encabezados != columnas:
-        # Migración segura: si la hoja conserva el mismo orden y sólo le
-        # faltan columnas nuevas al final, se amplían los encabezados sin
-        # tocar los registros existentes.
+        # Compatibilidad hacia atrás: hojas históricas de otros módulos pueden
+        # tener columnas adicionales o un esquema evolucionado. Si contienen
+        # todas las columnas mínimas requeridas, no se reescriben ni bloquean.
+        if all(col in encabezados for col in columnas):
+            return
+
+        # Migración segura: si sólo faltan columnas nuevas al final, se amplía
+        # el encabezado sin tocar los registros existentes.
         if columnas[:len(encabezados)] == encabezados:
             escribir_encabezados(nombre_hoja, columnas)
             return
 
+        faltantes = [col for col in columnas if col not in encabezados]
         raise ValueError(
-            f"La hoja '{nombre_hoja}' tiene encabezados diferentes "
-            "a los esperados."
+            f"La hoja '{nombre_hoja}' no contiene las columnas mínimas esperadas. "
+            f"Faltan: {faltantes}"
         )
+
 
 
 def inicializar_planilla() -> dict[str, Any]:
@@ -1108,3 +1138,85 @@ def numero_a_columna_excel(numero: int) -> str:
         resultado = chr(65 + resto) + resultado
 
     return resultado
+
+
+# ==========================================================
+# API DE PLANNING OPERATIVO
+# ==========================================================
+
+def leer_planning_coordinacion() -> pd.DataFrame:
+    """Lee las decisiones persistidas del planning. Crea la hoja si hace falta."""
+    asegurar_hoja("PlanningCoordinacion")
+    return leer_hoja("PlanningCoordinacion")
+
+
+def guardar_planning_coordinacion(registro: dict[str, Any]) -> None:
+    """Upsert de una coordinación y alta de su historial de cambios."""
+    from datetime import datetime
+    asegurar_hoja("PlanningCoordinacion")
+    asegurar_hoja("PlanningHistorial")
+
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tipo = limpiar_valor(registro.get("Tipo", "")).upper()
+    referencia = limpiar_valor(registro.get("Referencia", ""))
+    if not tipo or not referencia:
+        raise ValueError("Tipo y Referencia son obligatorios para guardar el planning.")
+
+    coordinacion_id = limpiar_valor(registro.get("CoordinacionID")) or f"{tipo}|{referencia}"
+    actuales = leer_hoja("PlanningCoordinacion")
+    anterior = ""
+    fecha_registro = ahora
+    existe = False
+    if not actuales.empty and "CoordinacionID" in actuales.columns:
+        m = actuales["CoordinacionID"].fillna("").astype(str).str.strip().eq(coordinacion_id)
+        if m.any():
+            existe = True
+            fila = actuales.loc[m].iloc[0]
+            anterior = limpiar_valor(fila.get("FechaCoordinada", ""))
+            fecha_registro = limpiar_valor(fila.get("FechaRegistro", "")) or ahora
+
+    nuevo = {
+        "CoordinacionID": coordinacion_id,
+        "Tipo": tipo,
+        "Referencia": referencia,
+        "FechaEntrega": limpiar_valor(registro.get("FechaEntrega", "")),
+        "FechaSugerida": limpiar_valor(registro.get("FechaSugerida", "")),
+        "FechaCoordinada": limpiar_valor(registro.get("FechaCoordinada", "")),
+        "Lineas": limpiar_valor(registro.get("Lineas", "")),
+        "Unidades": limpiar_valor(registro.get("Unidades", "")),
+        "Estado": limpiar_valor(registro.get("Estado", "PLANIFICADO")) or "PLANIFICADO",
+        "Usuario": limpiar_valor(registro.get("Usuario", "")),
+        "FechaRegistro": fecha_registro,
+        "FechaActualizacion": ahora,
+        "Observacion": limpiar_valor(registro.get("Observacion", "")),
+    }
+
+    if existe:
+        actualizar_registro("PlanningCoordinacion", "CoordinacionID", coordinacion_id, nuevo)
+        accion = "REPROGRAMADO" if anterior != nuevo["FechaCoordinada"] else "ACTUALIZADO"
+    else:
+        agregar_registro("PlanningCoordinacion", nuevo)
+        accion = "PLANIFICADO"
+
+    hist = {
+        "HistorialID": f"{coordinacion_id}|{ahora}",
+        "CoordinacionID": coordinacion_id,
+        "Tipo": tipo,
+        "Referencia": referencia,
+        "FechaEntrega": nuevo["FechaEntrega"],
+        "FechaSugerida": nuevo["FechaSugerida"],
+        "FechaAnterior": anterior,
+        "FechaNueva": nuevo["FechaCoordinada"],
+        "Lineas": nuevo["Lineas"],
+        "Unidades": nuevo["Unidades"],
+        "Accion": accion,
+        "Usuario": nuevo["Usuario"],
+        "Fecha": ahora,
+        "Observacion": nuevo["Observacion"],
+    }
+    agregar_registro("PlanningHistorial", hist)
+
+
+def leer_planning_historial() -> pd.DataFrame:
+    asegurar_hoja("PlanningHistorial")
+    return leer_hoja("PlanningHistorial")

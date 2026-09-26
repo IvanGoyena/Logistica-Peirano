@@ -376,7 +376,7 @@ def _detalle_export(detalle, pedidos_sel, categoria="", subcategoria="", solo_sa
     return d
 
 
-def construir_inteligencia_operativa(pedidos, detalle, personal=None, transmisiones=None, hoy=None, easy_activo=True):
+def construir_inteligencia_operativa(pedidos, detalle, personal=None, transmisiones=None, hoy=None, easy_activo=True, coordinaciones=None):
     hoy = hoy or date.today()
     pedidos, detalle = _preparar_pedidos(pedidos, detalle, transmisiones=transmisiones)
     if pedidos.empty:
@@ -464,13 +464,13 @@ def construir_inteligencia_operativa(pedidos, detalle, personal=None, transmisio
     }
 
     simulador = construir_pool_simulador(pedidos, hoy=hoy, easy_activo=easy_activo)
-    calendario_semanal = construir_calendario_semanal(pedidos, detalle=detalle, hoy=hoy) if "construir_calendario_semanal" in globals() else {}
+    calendario_semanal = construir_calendario_semanal(pedidos, detalle=detalle, hoy=hoy, coordinaciones=coordinaciones) if "construir_calendario_semanal" in globals() else {}
 
     return {
         "vacio": False, "dotacion": dot, "personas_control": personas,
         "capacidad_lineas": cap["lineas"], "capacidad_unidades": cap["unidades"],
         "carga_lineas": total_lineas, "carga_unidades": int(pedidos["TotalUnidades"].sum()),
-        "carga_m3": float(pedidos["TotalM3"].sum()), "zonas": zonas, "flexibles": flexibles,
+        "carga_m3": float(pedidos["TotalM3"].sum()), "dias_pendientes": round(total_lineas / OBJETIVO_CONTROL_DIARIO, 2) if OBJETIVO_CONTROL_DIARIO else 0, "zonas": zonas, "flexibles": flexibles,
         "sanitarios": sanitarios, "easy": easy_df, "easy_activo": easy_activo,
         "lineas_hoy": lineas_hoy, "margen_hoy": margen, "accion": accion,
         "exports": exports, "simulador": simulador, "calendario_semanal": calendario_semanal,
@@ -717,7 +717,7 @@ def _ventana_easy(fecha_entrega):
     return sorted(prev)
 
 
-def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None, hoy=None):
+def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None, hoy=None, coordinaciones=None):
     """Planning semanal operativo.
 
     - Zona ocupa su jornada fija.
@@ -740,17 +740,17 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
     entrega_por_prep = {prep: entrega for entrega, prep in PREPARACION_POR_ENTREGA.items()}
     cal["Entrega Zona"] = cal["Día"].map(entrega_por_prep).fillna("—")
     cal["Entregas EASY"] = "—"
-    for c in ["Zona", "EASY", "Expresos", "RETIRA"]:
+    for c in ["Zona", "EASY", "Expresos", "RETIRA", "Prioritarios"]:
         cal[c] = 0.0
     # Segunda dimensión de carga: las líneas siguen gobernando el objetivo,
     # pero las unidades permiten detectar jornadas pesadas (especialmente EASY).
-    for c in ["Zona Unid.", "EASY Unid.", "Expresos Unid.", "RETIRA Unid."]:
+    for c in ["Zona Unid.", "EASY Unid.", "Expresos Unid.", "RETIRA Unid.", "Prioritarios Unid."]:
         cal[c] = 0.0
 
     p = pedidos_preparados.copy()
     if p.empty:
         cal["Total"] = 0; cal["Capacidad"] = cal["Día"].map(lambda d: OBJETIVO_CONTROL_SABADO if d == "SABADO" else OBJETIVO_CONTROL_DIARIO); cal["Margen"] = cal["Capacidad"]
-        return {"calendario": cal, "expresos_agrupados": pd.DataFrame(), "retira_agrupados": pd.DataFrame()}
+        return {"calendario": cal, "expresos_agrupados": pd.DataFrame(), "retira_agrupados": pd.DataFrame(), "easy_agrupados": pd.DataFrame()}
 
     estado = p.get("Estado", pd.Series("PENDIENTE", index=p.index)).fillna("").astype(str).map(_norm)
     ep = p.get("PreparacionEstado", pd.Series("", index=p.index)).fillna("").astype(str).map(_norm)
@@ -770,6 +770,8 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
                 col = "EASY"
             elif "RETIRA" in texto:
                 col = "RETIRA"
+            elif ("URGENTE" in texto) or ("DIARI" in texto):
+                col = "Prioritarios"
             elif "EXPRES" in texto:
                 col = "Expresos"
             else:
@@ -781,6 +783,9 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
     # Identificar RETIRA y pedidos Full Loza para no mezclarlos con Zona.
     texto_act = activos.apply(lambda r: " | ".join(_norm(r.get(c,"")) for c in ["Planificacion","FrecuenciaEntrega","FrecuenciaPreparacion","DespachoDescripcion"]), axis=1)
     mask_retira = texto_act.str.contains("RETIRA", na=False)
+    # Carga prioritaria diaria: DIARIOS + URGENTE + URGENTES 2.
+    # Se resuelve HOY, igual que RETIRA normal, y no debe contaminar Zona ni proyectarse a fechas futuras.
+    mask_prioritarios = texto_act.str.contains(r"DIARI|URGENTE", regex=True, na=False) & ~mask_retira & ~activos["EsEasy"]
     _, ids_full_loza = _detalle_full_loza_calificado(detalle if detalle is not None else pd.DataFrame())
     ids_full_loza = {str(x) for x in ids_full_loza}
     mask_loza = activos["Pedido"].astype(str).isin(ids_full_loza)
@@ -799,7 +804,7 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
     # MARTES disponible ahora queda en mañana. El viernes de la semana próxima
     # queda vacío; sólo se llenará con pedidos cuya transmisión ya no alcance el
     # corte de mañana.
-    zona = activos[(activos["TipoFlexible"] == "") & (~activos["EsEasy"]) & (~mask_retira)].copy()
+    zona = activos[(activos["TipoFlexible"] == "") & (~activos["EsEasy"]) & (~mask_retira) & (~mask_prioritarios)].copy()
 
     CORTE_ZONA_HORA = 10
 
@@ -846,15 +851,30 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
                 cal.loc[mask_f, "Zona"] += float(rz["ZonaLineas"] or 0)
                 cal.loc[mask_f, "Zona Unid."] += float(rz["ZonaUnidades"] or 0)
 
-    # EASY: la fecha del agrupador (EASY DD-MM) manda. Se prepara lo antes posible:
-    # 100% de la carga en el PRIMER día de las dos jornadas operativas previas.
-    # El segundo día es respaldo para una eventual parcialización, pero no se reserva por defecto.
+    # EASY: la fecha del agrupador manda y genera una fecha sugerida (primer día de sus 48 h).
+    # Si existe una coordinación persistida, FechaCoordinada tiene prioridad sobre la regla automática.
     easy = activos[activos["EsEasy"]].copy()
+    coord_map = {}
+    if coordinaciones is not None and not coordinaciones.empty:
+        cc = coordinaciones.copy()
+        if all(c in cc.columns for c in ["Tipo", "Referencia", "FechaCoordinada"]):
+            cc = cc[cc["Tipo"].fillna("").astype(str).map(_norm).eq("EASY")].copy()
+            cc = cc[~cc.get("Estado", pd.Series("PLANIFICADO", index=cc.index)).fillna("").astype(str).map(_norm).eq("CANCELADO")]
+            for _, cr in cc.iterrows():
+                fc = pd.to_datetime(cr.get("FechaCoordinada", ""), errors="coerce", dayfirst=True)
+                if pd.notna(fc):
+                    coord_map[_norm(cr.get("Referencia", ""))] = pd.Timestamp(fc).normalize()
+
+    easy_plan_rows = []
     for _, r in easy.iterrows():
         f = _fecha_easy_desde_fila(r, hoy)
         ventana = _ventana_easy(f)
-        if not ventana: continue
-        d = ventana[0]
+        if not ventana:
+            continue
+        sugerida = ventana[0]
+        referencia = _texto(r.get("DespachoDescripcion", "")) or _texto(r.get("Planificacion", "")) or f"EASY {pd.Timestamp(f).strftime('%d-%m')}"
+        coordinada = coord_map.get(_norm(referencia), sugerida)
+        d = coordinada
         carga = float(pd.to_numeric(pd.Series([r.get("Lineas", 0)]), errors="coerce").fillna(0).iloc[0])
         unidades = float(pd.to_numeric(pd.Series([r.get("TotalUnidades", 0)]), errors="coerce").fillna(0).iloc[0])
         cal.loc[cal["Fecha"].eq(d), "EASY"] += carga
@@ -866,6 +886,20 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
             valores = [] if actual in ["—", "", "nan"] else actual.split(", ")
             if etiqueta not in valores: valores.append(etiqueta)
             cal.loc[mask_d, "Entregas EASY"] = ", ".join(valores)
+        easy_plan_rows.append({
+            "Referencia": referencia, "FechaEntrega": pd.Timestamp(f).normalize(),
+            "FechaSugerida": pd.Timestamp(sugerida).normalize(), "FechaCoordinada": pd.Timestamp(d).normalize(),
+            "Pedido": _texto(r.get("Pedido", "")), "Líneas": carga, "Unidades": unidades,
+            "EsManual": _norm(referencia) in coord_map,
+        })
+
+    if easy_plan_rows:
+        easy_plan = pd.DataFrame(easy_plan_rows)
+        easy_agrupados = (easy_plan.groupby(["Referencia","FechaEntrega","FechaSugerida","FechaCoordinada","EsManual"], as_index=False)
+            .agg(Pedidos=("Pedido","nunique"), Líneas=("Líneas","sum"), Unidades=("Unidades","sum"))
+            .sort_values(["FechaEntrega","Referencia"]).reset_index(drop=True))
+    else:
+        easy_agrupados = pd.DataFrame(columns=["Referencia","FechaEntrega","FechaSugerida","FechaCoordinada","EsManual","Pedidos","Líneas","Unidades"])
 
     # RETIRA normal: es demanda del día y ocupa HOY automáticamente.
     # Si el pedido califica como Full Loza, no se fuerza a hoy: queda para elegir jornada.
@@ -874,30 +908,91 @@ def construir_calendario_semanal(pedidos_preparados: pd.DataFrame, detalle=None,
         cal.loc[cal["Fecha"].eq(hoy), "RETIRA"] += float(pd.to_numeric(retira_normal["Lineas"], errors="coerce").fillna(0).sum())
         cal.loc[cal["Fecha"].eq(hoy), "RETIRA Unid."] += float(pd.to_numeric(retira_normal["TotalUnidades"], errors="coerce").fillna(0).sum())
 
-    # Agrupados pendientes Expresos: asignables. RETIRA sólo es asignable si es Full Loza.
+    # DIARIOS + URGENTE + URGENTES 2: demanda prioritaria del día.
+    # Todo pedido activo/no iniciado de estos canales consume HOY automáticamente.
+    prioritarios_hoy = activos[mask_prioritarios].copy()
+    if not prioritarios_hoy.empty and (cal["Fecha"].eq(hoy)).any():
+        mask_hoy = cal["Fecha"].eq(hoy)
+        cal.loc[mask_hoy, "Prioritarios"] += float(pd.to_numeric(prioritarios_hoy["Lineas"], errors="coerce").fillna(0).sum())
+        cal.loc[mask_hoy, "Prioritarios Unid."] += float(pd.to_numeric(prioritarios_hoy["TotalUnidades"], errors="coerce").fillna(0).sum())
+
+    # Agrupados pendientes Expresos: coordinables y persistentes.
     comp = activos[(estado.eq("PREPARACION")) & ep.eq("PENDIENTE")].copy()
     agrup = comp.get("DespachoDescripcion", pd.Series("", index=comp.index)).fillna("").astype(str).str.strip()
     comp["AgrupadorReal"] = agrup
     txt = comp.apply(lambda r: " | ".join(_norm(r.get(c,"")) for c in ["Planificacion","FrecuenciaEntrega","FrecuenciaPreparacion","DespachoDescripcion"]), axis=1)
     exp = comp[txt.str.contains("EXPRES", na=False)].copy()
 
-    # RETIRA Full Loza, agrupado o todavía libre, queda movible. Se etiqueta si no tiene agrupador.
+    # RETIRA Full Loza queda coordinable. RETIRA normal ya consume HOY.
     ret = activos[mask_retira & mask_loza].copy()
     if not ret.empty:
         ret["AgrupadorReal"] = ret.get("DespachoDescripcion", pd.Series("", index=ret.index)).fillna("").astype(str).str.strip()
         ret.loc[ret["AgrupadorReal"].eq(""), "AgrupadorReal"] = "RETIRA LOZA · SIN AGRUPAR"
 
-    def resumir(df):
-        if df.empty: return pd.DataFrame(columns=["AgrupadorReal","Pedidos","Clientes","Líneas","Unidades","m³"])
-        return (df.groupby("AgrupadorReal", as_index=False).agg(Pedidos=("Pedido","nunique"), Clientes=("ClienteCodigo","nunique"),
+    def _coord_por_tipo(tipo):
+        out = {}
+        if coordinaciones is None or coordinaciones.empty:
+            return out
+        cc = coordinaciones.copy()
+        if not all(c in cc.columns for c in ["Tipo","Referencia","FechaCoordinada"]):
+            return out
+        cc = cc[cc["Tipo"].fillna("").astype(str).map(_norm).eq(_norm(tipo))].copy()
+        if "Estado" in cc.columns:
+            cc = cc[~cc["Estado"].fillna("").astype(str).map(_norm).eq("CANCELADO")]
+        for _, cr in cc.iterrows():
+            fc = pd.to_datetime(cr.get("FechaCoordinada", ""), errors="coerce", dayfirst=True)
+            if pd.notna(fc):
+                out[_norm(cr.get("Referencia", ""))] = pd.Timestamp(fc).normalize()
+        return out
+
+    coord_exp = _coord_por_tipo("EXPRESOS")
+    coord_ret = _coord_por_tipo("RETIRA")
+
+    def resumir(df, tipo_coord=""):
+        cols=["AgrupadorReal","Pedidos","Clientes","Líneas","Unidades","m³","FechaCoordinada","EsManual"]
+        if df.empty: return pd.DataFrame(columns=cols)
+        z=(df.groupby("AgrupadorReal", as_index=False).agg(Pedidos=("Pedido","nunique"), Clientes=("ClienteCodigo","nunique"),
             Líneas=("Lineas","sum"), Unidades=("TotalUnidades","sum"), **{"m³":("TotalM3","sum")})
             .sort_values("Líneas", ascending=False).reset_index(drop=True))
+        cmap = coord_exp if tipo_coord == "EXPRESOS" else coord_ret if tipo_coord == "RETIRA" else {}
+        z["FechaCoordinada"] = z["AgrupadorReal"].map(lambda x: cmap.get(_norm(x), pd.NaT))
+        z["EsManual"] = z["FechaCoordinada"].notna()
+        return z
 
-    cal[["Zona","EASY","Expresos","RETIRA"]] = cal[["Zona","EASY","Expresos","RETIRA"]].round(1)
-    cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid."]] = cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid."]].round(0)
-    cal["Total"] = cal[["Zona","EASY","Expresos","RETIRA"]].sum(axis=1).round(1)
-    cal["Total Unid."] = cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid."]].sum(axis=1).round(0)
+    exp_res = resumir(exp, "EXPRESOS")
+    ret_res = resumir(ret, "RETIRA")
+
+    # Las coordinaciones persistidas ya consumen capacidad en su fecha.
+    for _, rr in exp_res[exp_res["FechaCoordinada"].notna()].iterrows():
+        mf = cal["Fecha"].eq(pd.Timestamp(rr["FechaCoordinada"]).normalize())
+        cal.loc[mf, "Expresos"] += float(rr.get("Líneas",0) or 0)
+        cal.loc[mf, "Expresos Unid."] += float(rr.get("Unidades",0) or 0)
+    for _, rr in ret_res[ret_res["FechaCoordinada"].notna()].iterrows():
+        mf = cal["Fecha"].eq(pd.Timestamp(rr["FechaCoordinada"]).normalize())
+        cal.loc[mf, "RETIRA"] += float(rr.get("Líneas",0) or 0)
+        cal.loc[mf, "RETIRA Unid."] += float(rr.get("Unidades",0) or 0)
+
+    # Mundo todavía SIN AGRUPAR: visibilidad, pero no se fuerza a una fecha futura.
+    libres = activos[estado.eq("PENDIENTE")].copy()
+    txt_lib = libres.apply(lambda r: " | ".join(_norm(r.get(c,"")) for c in ["Planificacion","FrecuenciaEntrega","FrecuenciaPreparacion","DespachoDescripcion"]), axis=1)
+    ret_lib = txt_lib.str.contains("RETIRA", na=False)
+    backlog_exp = libres[libres["TipoFlexible"].eq("EXPRESOS") & ~ret_lib & ~libres["EsEasy"]].copy()
+    backlog_dia = libres[libres["TipoFlexible"].eq("DIARIOS") & ~ret_lib & ~libres["EsEasy"]].copy()
+
+    def _backlog_row(df, tipo):
+        if df.empty:
+            return {"Tipo":tipo,"Pedidos":0,"Líneas":0,"Unidades":0,"m³":0.0,"Antig. máx.":0}
+        edades=(hoy-pd.to_datetime(df.get("FechaTransmisionERP",df.get("Fecha")),errors="coerce").dt.normalize()).dt.days.clip(lower=0).dropna()
+        return {"Tipo":tipo,"Pedidos":int(df["Pedido"].nunique()),"Líneas":int(pd.to_numeric(df["Lineas"],errors="coerce").fillna(0).sum()),
+                "Unidades":int(pd.to_numeric(df["TotalUnidades"],errors="coerce").fillna(0).sum()),"m³":round(float(pd.to_numeric(df["TotalM3"],errors="coerce").fillna(0).sum()),2),
+                "Antig. máx.":int(edades.max()) if not edades.empty else 0}
+    backlog = pd.DataFrame([_backlog_row(backlog_exp,"EXPRESOS sin agrupar"), _backlog_row(backlog_dia,"DIARIOS sin agrupar")])
+
+    cal[["Zona","EASY","Expresos","RETIRA","Prioritarios"]] = cal[["Zona","EASY","Expresos","RETIRA","Prioritarios"]].round(1)
+    cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid.","Prioritarios Unid."]] = cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid.","Prioritarios Unid."]].round(0)
+    cal["Total"] = cal[["Zona","EASY","Expresos","RETIRA","Prioritarios"]].sum(axis=1).round(1)
+    cal["Total Unid."] = cal[["Zona Unid.","EASY Unid.","Expresos Unid.","RETIRA Unid.","Prioritarios Unid."]].sum(axis=1).round(0)
     cal["Capacidad"] = cal["Día"].map(lambda d: OBJETIVO_CONTROL_SABADO if d == "SABADO" else OBJETIVO_CONTROL_DIARIO)
     cal["Margen"] = (cal["Capacidad"] - cal["Total"]).round(1)
     cal["Ocupación %"] = (cal["Total"] / cal["Capacidad"].replace(0, pd.NA) * 100).fillna(0).round(1)
-    return {"calendario": cal, "expresos_agrupados": resumir(exp), "retira_agrupados": resumir(ret)}
+    return {"calendario": cal, "expresos_agrupados": exp_res, "retira_agrupados": ret_res, "easy_agrupados": easy_agrupados, "backlog_sin_agrupar": backlog}

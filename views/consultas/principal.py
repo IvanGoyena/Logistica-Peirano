@@ -214,12 +214,12 @@ def render() -> None:
         if modo_accion == "Editar":
 
             tipos_solicitud = [
-                "Solicitud de prioridad",
-                "Retiro en Depósito",
-                "Revisión de Stock",
+                "Consulta de estado",
+                "Cambio de prioridad",
+                "Coordinación de entrega",
                 "Postergar Entrega",
-                "Cancelación",
-                "Otros",
+                "Documentación",
+                "Otro",
             ]
 
             prioridades = [
@@ -2265,6 +2265,193 @@ def render() -> None:
     # CENTRO DE GESTIÓN DEL PEDIDO
     # ==========================================================
 
+    @st.dialog("📚 Gestión múltiple", width="large")
+    def abrir_gestion_multiple(seleccionados: pd.DataFrame) -> None:
+        tabla_lote = seleccionados.copy().reset_index(drop=True)
+        cantidad = len(tabla_lote)
+        clientes_lote = sorted(
+            tabla_lote["Cliente"].fillna("").astype(str).str.strip().loc[lambda x: x.ne("")].unique().tolist()
+        )
+        pedidos_lote = tabla_lote["Pedido"].astype(str).tolist()
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pedidos", cantidad)
+        c2.metric("Clientes", len(clientes_lote))
+        c3.metric("Unidades", int(pd.to_numeric(tabla_lote.get("Unidades", 0), errors="coerce").fillna(0).sum()))
+        st.caption("Pedidos: " + " · ".join(pedidos_lote))
+
+        tipo_lote = st.radio(
+            "Gestión a generar",
+            ["Urgencia", "Solicitud"],
+            horizontal=True,
+            key="gestion_multiple_tipo",
+        )
+
+        usuario = (
+            st.session_state.get("usuario")
+            or st.session_state.get("nombre_usuario")
+            or ""
+        )
+
+        if tipo_lote == "Urgencia":
+            with st.form("form_urgencia_multiple", clear_on_submit=False):
+                motivo = st.selectbox(
+                    "Motivo de la urgencia",
+                    [
+                        "Compromiso con cliente", "Reclamo del cliente",
+                        "Entrega coordinada", "Retiro coordinado",
+                        "Obra o instalación", "Pedido atrasado",
+                        "Error interno", "Otro",
+                    ],
+                )
+                prioridad = st.selectbox("Prioridad", ["Alta", "Crítica"])
+                fecha = st.date_input("Fecha requerida", value=None)
+                observacion = st.text_area(
+                    "Observación",
+                    placeholder="Detalle común para todos los pedidos seleccionados...",
+                    height=100,
+                )
+                confirmar = st.form_submit_button(
+                    f"🚨 Generar gestión para {cantidad} pedidos",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if confirmar:
+                if fecha is None or not observacion.strip() or not usuario:
+                    st.error(
+                        "No se puede registrar la gestión: todos los campos son obligatorios."
+                    )
+                    return
+
+                creadas, duplicadas, convertidas, errores = [], [], [], []
+                for _, fila_lote in tabla_lote.iterrows():
+                    pedido = str(fila_lote.get("Pedido", "")).strip()
+                    cliente = str(fila_lote.get("Cliente", "")).strip()
+                    if not pedido or not cliente:
+                        errores.append(f"{pedido or 'Sin pedido'}: faltan datos del pedido/cliente")
+                        continue
+                    try:
+                        volumen = float(fila_lote.get("M3", 0) or 0)
+                        if volumen > 2.0:
+                            descripcion = (
+                                "Solicitud convertida automáticamente desde URGENCIA por superar "
+                                "el límite operativo de 2.00 m³.\n"
+                                f"Volumen del pedido: {volumen:.3f} m³.\n"
+                                f"Motivo informado: {motivo}.\n"
+                                f"Prioridad: {prioridad}.\n"
+                                f"Fecha requerida: {fecha:%Y-%m-%d}.\n"
+                                f"Observación: {observacion.strip()}"
+                            )
+                            r = guardar_solicitud(
+                                pedido=pedido, cliente=cliente,
+                                tipo_solicitud="Cambio de prioridad",
+                                descripcion=descripcion, usuario_solicitante=usuario,
+                                prioridad="Alta",
+                            )
+                            (duplicadas if r.get("duplicado") else convertidas).append(pedido)
+                        else:
+                            r = guardar_urgencia(
+                                pedido=pedido, cliente=cliente, motivo=motivo,
+                                usuario_solicitante=usuario, prioridad=prioridad,
+                                fecha_requerida=fecha.strftime("%Y-%m-%d"),
+                                observacion=observacion.strip(),
+                            )
+                            (duplicadas if r.get("duplicado") else creadas).append(pedido)
+                    except Exception as error:
+                        errores.append(f"{pedido}: {error}")
+
+                invalidar_cache_gestion()
+                if creadas:
+                    st.success(f"Urgencias creadas: {len(creadas)} · " + ", ".join(creadas))
+                if convertidas:
+                    st.info(
+                        f"Convertidas a solicitud por superar 2 m³: {len(convertidas)} · "
+                        + ", ".join(convertidas)
+                    )
+                if duplicadas:
+                    st.warning(f"Ya tenían una gestión equivalente: {len(duplicadas)} · " + ", ".join(duplicadas))
+                if errores:
+                    st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
+                if not errores:
+                    st.toast("Gestión múltiple registrada.", icon="✅")
+
+        else:
+            tipo_solicitud = st.selectbox(
+                "Tipo de solicitud",
+                [
+                    "Consulta de estado", "Cambio de prioridad",
+                    "Coordinación de entrega", "Postergar Entrega",
+                    "Documentación", "Otro",
+                ],
+                key="tipo_solicitud_multiple",
+            )
+            with st.form("form_solicitud_multiple", clear_on_submit=False):
+                prioridad = st.selectbox("Prioridad", ["Normal", "Alta", "Baja"])
+                fecha_habilitacion = None
+                if tipo_solicitud == "Postergar Entrega":
+                    fecha_habilitacion = st.date_input(
+                        "Habilitar pedidos desde",
+                        value=None,
+                        help=(
+                            "Los pedidos quedan bloqueados hasta el día anterior y "
+                            "se liberan automáticamente desde esta fecha."
+                        ),
+                    )
+                descripcion = st.text_area(
+                    "Descripción",
+                    placeholder="Detalle común para todos los pedidos seleccionados...",
+                    height=110,
+                )
+                confirmar = st.form_submit_button(
+                    f"📩 Generar solicitud para {cantidad} pedidos",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if confirmar:
+                if not descripcion.strip() or not usuario:
+                    st.error(
+                        "No se puede registrar la gestión: todos los campos son obligatorios."
+                    )
+                    return
+                if tipo_solicitud == "Postergar Entrega" and fecha_habilitacion is None:
+                    st.error("La fecha de habilitación es obligatoria para Postergar Entrega.")
+                    return
+
+                creadas, duplicadas, errores = [], [], []
+                for _, fila_lote in tabla_lote.iterrows():
+                    pedido = str(fila_lote.get("Pedido", "")).strip()
+                    cliente = str(fila_lote.get("Cliente", "")).strip()
+                    if not pedido or not cliente:
+                        errores.append(f"{pedido or 'Sin pedido'}: faltan datos del pedido/cliente")
+                        continue
+                    try:
+                        r = guardar_solicitud(
+                            pedido=pedido, cliente=cliente,
+                            tipo_solicitud=tipo_solicitud,
+                            descripcion=descripcion.strip(),
+                            usuario_solicitante=usuario, prioridad=prioridad,
+                            fecha_habilitacion=(
+                                fecha_habilitacion.strftime("%Y-%m-%d")
+                                if fecha_habilitacion is not None else ""
+                            ),
+                        )
+                        (duplicadas if r.get("duplicado") else creadas).append(pedido)
+                    except Exception as error:
+                        errores.append(f"{pedido}: {error}")
+
+                invalidar_cache_gestion()
+                if creadas:
+                    st.success(f"Solicitudes creadas: {len(creadas)} · " + ", ".join(creadas))
+                if duplicadas:
+                    st.warning(f"Ya tenían una solicitud equivalente: {len(duplicadas)} · " + ", ".join(duplicadas))
+                if errores:
+                    st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
+                if not errores:
+                    st.toast("Gestión múltiple registrada.", icon="✅")
+
+
     @st.dialog(
         "📦 Centro de gestión del pedido",
         width="large",
@@ -2430,12 +2617,20 @@ def render() -> None:
                         motivo_urgencia = st.selectbox(
                             "Motivo de la urgencia",
                             options=[
-                                "Entrega comprometida",
-                                "Cliente prioritario",
-                                "Pedido demorado",
+                                "Compromiso con cliente",
+                                "Reclamo del cliente",
+                                "Entrega coordinada",
                                 "Retiro coordinado",
+                                "Obra o instalación",
+                                "Pedido atrasado",
+                                "Error interno",
                                 "Otro",
                             ],
+                        )
+
+                        prioridad_urgencia = st.selectbox(
+                            "Prioridad",
+                            options=["Alta", "Crítica"],
                         )
 
                         fecha_requerida = st.date_input(
@@ -2464,6 +2659,16 @@ def render() -> None:
                         )
 
                     if confirmar_urgencia:
+                        if (
+                            fecha_requerida is None
+                            or not str(observacion_urgencia).strip()
+                        ):
+                            st.error(
+                                "Completá todos los campos de la urgencia: "
+                                "motivo, prioridad, fecha requerida y observación."
+                            )
+                            st.stop()
+
                         usuario_solicitante = (
                             st.session_state.get("usuario")
                             or st.session_state.get("nombre_usuario")
@@ -2492,7 +2697,7 @@ def render() -> None:
                                 resultado_solicitud = guardar_solicitud(
                                     pedido=fila["Pedido"],
                                     cliente=fila["Cliente"],
-                                    tipo_solicitud="Solicitud de prioridad",
+                                    tipo_solicitud="Cambio de prioridad",
                                     descripcion=descripcion_convertida,
                                     usuario_solicitante=usuario_solicitante,
                                     prioridad="Alta",
@@ -2515,6 +2720,7 @@ def render() -> None:
                                     cliente=fila["Cliente"],
                                     motivo=motivo_urgencia,
                                     usuario_solicitante=usuario_solicitante,
+                                    prioridad=prioridad_urgencia,
                                     fecha_requerida=(
                                         fecha_requerida.strftime("%Y-%m-%d")
                                         if fecha_requerida is not None
@@ -2547,22 +2753,23 @@ def render() -> None:
                     "desde la tabla superior «Solicitudes pendientes»."
                 )
 
+                tipo_solicitud = st.selectbox(
+                    "Tipo de solicitud",
+                    options=[
+                        "Consulta de estado",
+                        "Cambio de prioridad",
+                        "Coordinación de entrega",
+                        "Postergar Entrega",
+                        "Documentación",
+                        "Otro",
+                    ],
+                    key=f"tipo_solicitud_nueva_{fila['Pedido']}",
+                )
+
                 with st.form(
                     f"form_solicitud_{fila['Pedido']}",
                     clear_on_submit=True,
                 ):
-                    tipo_solicitud = st.selectbox(
-                        "Tipo de solicitud",
-                        options=[
-                            "Solicitud de prioridad",
-                            "Retiro en Depósito",
-                            "Revisión de Stock",
-                            "Postergar Entrega",
-                            "Cancelación",
-                            "Otros",
-                        ],
-                    )
-
                     prioridad_solicitud = st.selectbox(
                         "Prioridad",
                         options=[
@@ -2571,6 +2778,17 @@ def render() -> None:
                             "Baja",
                         ],
                     )
+
+                    fecha_habilitacion = None
+                    if tipo_solicitud == "Postergar Entrega":
+                        fecha_habilitacion = st.date_input(
+                            "Habilitar pedido desde",
+                            value=None,
+                            help=(
+                                "Hasta el día anterior el pedido queda bloqueado. "
+                                "Desde esta fecha vuelve automáticamente a planificación."
+                            ),
+                        )
 
                     descripcion_solicitud = st.text_area(
                         "Descripción",
@@ -2587,6 +2805,19 @@ def render() -> None:
                     )
 
                 if confirmar_solicitud:
+                    if not str(descripcion_solicitud).strip():
+                        st.error("La descripción es obligatoria.")
+                        st.stop()
+
+                    if (
+                        tipo_solicitud == "Postergar Entrega"
+                        and fecha_habilitacion is None
+                    ):
+                        st.error(
+                            "Indicá la fecha desde la que el pedido vuelve a quedar habilitado."
+                        )
+                        st.stop()
+
                     usuario_solicitante = (
                         st.session_state.get("usuario")
                         or st.session_state.get("nombre_usuario")
@@ -2601,6 +2832,11 @@ def render() -> None:
                             descripcion=descripcion_solicitud,
                             usuario_solicitante=usuario_solicitante,
                             prioridad=prioridad_solicitud,
+                            fecha_habilitacion=(
+                                fecha_habilitacion.strftime("%Y-%m-%d")
+                                if fecha_habilitacion is not None
+                                else ""
+                            ),
                         )
 
                         st.success(
@@ -2828,13 +3064,6 @@ def render() -> None:
         ).replace(",", ".")
     )
 
-    pedido_seleccionado_guardado = str(
-        st.session_state.get(
-            "consulta_pedido_seleccionado",
-            "",
-        )
-    ).strip()
-
     evento_tabla_pedidos = st.dataframe(
         tabla_visible_pedidos,
         width="stretch",
@@ -2842,85 +3071,55 @@ def render() -> None:
         height=500,
         column_config=COLUMN_CONFIG,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="multi-row",
         key="tabla_general_consultas",
     )
 
-    filas_pedido_seleccionadas = (
-        evento_tabla_pedidos.selection.rows
+    indices_seleccionados = (
+        list(evento_tabla_pedidos.selection.rows)
         if evento_tabla_pedidos is not None
         else []
     )
+    indices_seleccionados = [
+        i for i in indices_seleccionados
+        if 0 <= i < len(tabla_visible_pedidos)
+    ]
+    seleccionados = tabla_visible_pedidos.iloc[indices_seleccionados].copy()
 
-    # La fila seleccionada se procesa en el mismo rerun generado por la tabla.
-    # Ya no se fuerza un segundo st.rerun solamente para habilitar el botón.
-    if filas_pedido_seleccionadas:
-        indice_seleccionado = filas_pedido_seleccionadas[0]
-
-        if 0 <= indice_seleccionado < len(tabla_visible_pedidos):
-            pedido_seleccionado = tabla_visible_pedidos.iloc[
-                indice_seleccionado
-            ]
-
-            pedido_seleccionado_guardado = str(
-                pedido_seleccionado["Pedido"]
-            ).strip()
-
-            st.session_state[
-                "consulta_pedido_seleccionado"
-            ] = pedido_seleccionado_guardado
-
-    # Si el pedido guardado dejó de estar visible por un filtro,
-    # se limpia sin provocar una nueva ejecución de la página.
-    coincidencia_seleccionada = pd.DataFrame()
-
-    if pedido_seleccionado_guardado:
-        coincidencia_seleccionada = tabla_visible_pedidos[
-            tabla_visible_pedidos["Pedido"]
-            .astype(str)
-            .eq(pedido_seleccionado_guardado)
-        ]
-
-        if coincidencia_seleccionada.empty:
-            pedido_seleccionado_guardado = ""
-            st.session_state["consulta_pedido_seleccionado"] = ""
-
-    cabecera_tabla_1, cabecera_tabla_2 = st.columns(
-        [5, 1],
-        vertical_alignment="center",
-    )
-
-    with cabecera_tabla_1:
-        if (
-            pedido_seleccionado_guardado
-            and not coincidencia_seleccionada.empty
-        ):
-            fila_seleccionada_guardada = (
-                coincidencia_seleccionada.iloc[0]
-            )
-
-            st.caption(
-                f"Seleccionado: pedido "
-                f"**{fila_seleccionada_guardada['Pedido']}** · "
-                f"{fila_seleccionada_guardada['Cliente']}"
-            )
-        else:
-            st.caption(
-                "Seleccioná un pedido de la tabla para abrir "
-                "su centro de gestión."
-            )
-
-    with cabecera_tabla_2:
-        abrir_detalle = st.button(
-            "👁 Ver detalle",
-            type="primary",
-            width="stretch",
-            disabled=not bool(pedido_seleccionado_guardado),
-            key="btn_detalle_tabla_consultas",
+    cantidad_seleccionada = len(seleccionados)
+    if cantidad_seleccionada == 0:
+        st.caption(
+            "Seleccioná uno o varios pedidos. Con uno podés abrir el detalle; "
+            "con varios podés generar una misma urgencia o solicitud en lote."
         )
-
-    if abrir_detalle and pedido_seleccionado_guardado:
-        abrir_detalle_pedido(
-            pedido_seleccionado_guardado
-        )
-
+    elif cantidad_seleccionada == 1:
+        fila_sel = seleccionados.iloc[0]
+        c_info, c_accion = st.columns([5, 1], vertical_alignment="center")
+        with c_info:
+            st.caption(
+                f"Seleccionado: pedido **{fila_sel['Pedido']}** · {fila_sel['Cliente']}"
+            )
+        with c_accion:
+            abrir_detalle = st.button(
+                "👁 Ver detalle", type="primary", width="stretch",
+                key="btn_detalle_tabla_consultas",
+            )
+        if abrir_detalle:
+            abrir_detalle_pedido(str(fila_sel["Pedido"]).strip())
+    else:
+        clientes = seleccionados["Cliente"].fillna("").astype(str).str.strip().nunique()
+        unidades = int(pd.to_numeric(seleccionados["Unidades"], errors="coerce").fillna(0).sum())
+        c_info, c_accion = st.columns([4, 1.4], vertical_alignment="center")
+        with c_info:
+            st.caption(
+                f"**{cantidad_seleccionada} pedidos seleccionados** · "
+                f"{clientes} cliente{'s' if clientes != 1 else ''} · "
+                f"{unidades} unidades"
+            )
+        with c_accion:
+            gestionar_lote = st.button(
+                "📚 Gestionar selección", type="primary", width="stretch",
+                key="btn_gestion_multiple_consultas",
+            )
+        if gestionar_lote:
+            abrir_gestion_multiple(seleccionados)

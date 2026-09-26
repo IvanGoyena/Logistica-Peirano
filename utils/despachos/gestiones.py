@@ -44,6 +44,62 @@ def normalizar_pedido_wms_desde_codigo(valor: object) -> str:
     return texto.split("-")[0].strip()
 
 
+
+def filtrar_solicitudes_bloqueantes(
+    solicitudes: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Mantiene como bloqueantes todas las solicitudes abiertas excepto
+    Postergar Entrega cuando su FechaHabilitacion ya llegó.
+
+    Seguridad:
+    - Si una postergación vieja no tiene fecha, continúa bloqueando.
+    - Si la fecha es inválida, continúa bloqueando.
+    - La solicitud NO se finaliza: sólo deja de bloquear planificación.
+    """
+
+    if solicitudes is None or solicitudes.empty:
+        return pd.DataFrame() if solicitudes is None else solicitudes.copy()
+
+    resultado = solicitudes.copy()
+
+    if "TipoSolicitud" not in resultado.columns:
+        return resultado
+
+    tipo = (
+        resultado["TipoSolicitud"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    es_postergacion = tipo.eq("POSTERGAR ENTREGA")
+
+    if not es_postergacion.any():
+        return resultado
+
+    # Compatibilidad con registros históricos anteriores a FechaHabilitacion.
+    if "FechaHabilitacion" not in resultado.columns:
+        return resultado
+
+    fecha_habilitacion = pd.to_datetime(
+        resultado["FechaHabilitacion"],
+        errors="coerce",
+    ).dt.normalize()
+
+    hoy = pd.Timestamp.now().normalize()
+
+    postergacion_ya_habilitada = (
+        es_postergacion
+        & fecha_habilitacion.notna()
+        & fecha_habilitacion.le(hoy)
+    )
+
+    return resultado.loc[
+        ~postergacion_ya_habilitada
+    ].copy()
+
 def obtener_bloqueos_gestiones() -> tuple[
     set[str],
     dict[str, set[str]],
@@ -59,7 +115,9 @@ def obtener_bloqueos_gestiones() -> tuple[
         reclamos_abiertos = pd.DataFrame()
 
     gestiones = {
-        "Solicitud": obtener_solicitudes_abiertas(),
+        "Solicitud": filtrar_solicitudes_bloqueantes(
+            obtener_solicitudes_abiertas()
+        ),
         "Urgencia": obtener_urgencias_activas(),
         "AnulaciÃ³n": obtener_anulaciones_pendientes(),
         "Reclamo": reclamos_abiertos,

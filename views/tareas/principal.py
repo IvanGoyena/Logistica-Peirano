@@ -196,7 +196,7 @@ def _render_indicadores(
                         key=f"avance_despachos_anterior_{perfil}",
                         help="Ver agrupadores más avanzados",
                         disabled=st.session_state[clave_inicio] <= 0,
-                        use_container_width=True,
+                        use_container_width="Screth",
                     ):
                         st.session_state[clave_inicio] = max(
                             0, st.session_state[clave_inicio] - 1
@@ -207,7 +207,7 @@ def _render_indicadores(
                         key=f"avance_despachos_siguiente_{perfil}",
                         help="Ver agrupadores menos avanzados",
                         disabled=st.session_state[clave_inicio] >= max_inicio,
-                        use_container_width=True,
+                        use_container_width="Screth",
                     ):
                         st.session_state[clave_inicio] = min(
                             max_inicio, st.session_state[clave_inicio] + 1

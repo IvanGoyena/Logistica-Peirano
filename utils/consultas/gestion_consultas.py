@@ -276,6 +276,7 @@ def guardar_solicitud(
     descripcion: str,
     usuario_solicitante: str,
     prioridad: str = "Normal",
+    fecha_habilitacion: str = "",
 ) -> dict[str, Any]:
     """
     Registra una solicitud comercial.
@@ -293,21 +294,46 @@ def guardar_solicitud(
         descripcion
     )
 
-    prioridad = (
-        limpiar_texto(prioridad)
-        or "Normal"
-    )
+    prioridad = limpiar_texto(prioridad)
+    cliente = limpiar_texto(cliente)
+    usuario_solicitante = limpiar_texto(usuario_solicitante)
+    fecha_habilitacion = limpiar_texto(fecha_habilitacion)
 
     if not tipo_solicitud:
         raise ValueError(
             "El tipo de solicitud es obligatorio."
         )
 
+    if not prioridad:
+        raise ValueError("La prioridad es obligatoria.")
+
     if not descripcion:
         raise ValueError(
-            "La descripción de la solicitud "
-            "es obligatoria."
+            "La descripción de la solicitud es obligatoria."
         )
+
+    if not cliente:
+        raise ValueError("El cliente es obligatorio.")
+
+    if not usuario_solicitante:
+        raise ValueError("El usuario solicitante es obligatorio.")
+
+    es_postergacion = tipo_solicitud.strip().upper() == "POSTERGAR ENTREGA"
+    if es_postergacion and not fecha_habilitacion:
+        raise ValueError(
+            "La fecha de habilitación es obligatoria para Postergar Entrega."
+        )
+
+    if es_postergacion:
+        try:
+            fecha_obj = datetime.strptime(fecha_habilitacion, "%Y-%m-%d").date()
+        except ValueError as error:
+            raise ValueError("La fecha de habilitación no es válida.") from error
+
+        if fecha_obj < datetime.now(ZONA_HORARIA).date():
+            raise ValueError(
+                "La fecha de habilitación no puede ser anterior a hoy."
+            )
 
     existente = existe_gestion_abierta(
         nombre_hoja="Solicitudes",
@@ -338,11 +364,10 @@ def guardar_solicitud(
         "TipoSolicitud": tipo_solicitud,
         "Prioridad": prioridad,
         "Descripcion": descripcion,
-        "UsuarioSolicitante": limpiar_texto(
-            usuario_solicitante
-        ),
+        "FechaHabilitacion": fecha_habilitacion if es_postergacion else "",
+        "UsuarioSolicitante": usuario_solicitante,
         "FechaSolicitud": obtener_fecha_hora(),
-        "EstadoSolicitud": "Pendiente",
+        "EstadoSolicitud": "Programada" if es_postergacion else "Pendiente",
         "Responsable": "",
         "Respuesta": "",
         "FechaResolucion": "",
@@ -470,6 +495,7 @@ def editar_solicitud(
     tipo_solicitud: str,
     prioridad: str,
     descripcion: str,
+    fecha_habilitacion: str = "",
 ) -> dict[str, Any]:
     """
     Edita una solicitud que todavía no fue finalizada.
@@ -488,9 +514,8 @@ def editar_solicitud(
         or "Normal"
     )
 
-    descripcion = limpiar_texto(
-        descripcion
-    )
+    descripcion = limpiar_texto(descripcion)
+    fecha_habilitacion = limpiar_texto(fecha_habilitacion)
 
     if not solicitud_id:
         raise ValueError(
@@ -503,11 +528,15 @@ def editar_solicitud(
             "El tipo de solicitud es obligatorio."
         )
 
+    if not prioridad:
+        raise ValueError("La prioridad es obligatoria.")
+
     if not descripcion:
         raise ValueError(
-            "La descripción de la solicitud "
-            "es obligatoria."
+            "La descripción de la solicitud es obligatoria."
         )
+
+    es_postergacion = tipo_solicitud.strip().upper() == "POSTERGAR ENTREGA"
 
     registro = obtener_registro_por_id(
         nombre_hoja="Solicitudes",
@@ -519,6 +548,15 @@ def editar_solicitud(
         raise ValueError(
             f"No se encontró la solicitud "
             f"{solicitud_id}."
+        )
+
+    if es_postergacion and not fecha_habilitacion:
+        fecha_habilitacion = limpiar_texto(
+            registro.get("FechaHabilitacion", "")
+        )
+    if es_postergacion and not fecha_habilitacion:
+        raise ValueError(
+            "La fecha de habilitación es obligatoria para Postergar Entrega."
         )
 
     estado_actual = limpiar_texto(
@@ -547,6 +585,8 @@ def editar_solicitud(
             "TipoSolicitud": tipo_solicitud,
             "Prioridad": prioridad,
             "Descripcion": descripcion,
+            "FechaHabilitacion": fecha_habilitacion if es_postergacion else "",
+            "EstadoSolicitud": "Programada" if es_postergacion else "Pendiente",
         },
     )
 
@@ -641,8 +681,9 @@ def guardar_urgencia(
     cliente: str,
     motivo: str,
     usuario_solicitante: str,
-    fecha_requerida: str = "",
-    observacion: str = "",
+    prioridad: str,
+    fecha_requerida: str,
+    observacion: str,
 ) -> dict[str, Any]:
     """
     Registra una urgencia para procesarla posteriormente
@@ -653,15 +694,34 @@ def guardar_urgencia(
         pedido
     )
 
-    motivo = limpiar_texto(
-        motivo
-    )
+    motivo = limpiar_texto(motivo)
+    prioridad = limpiar_texto(prioridad)
+    fecha_requerida = limpiar_texto(fecha_requerida)
+    observacion = limpiar_texto(observacion)
+    cliente = limpiar_texto(cliente)
+    usuario_solicitante = limpiar_texto(usuario_solicitante)
 
     if not motivo:
         raise ValueError(
             "El motivo de la urgencia "
             "es obligatorio."
         )
+
+    if not prioridad:
+        raise ValueError("La prioridad de la urgencia es obligatoria.")
+    if not fecha_requerida:
+        raise ValueError("La fecha requerida es obligatoria.")
+    if not observacion:
+        raise ValueError("La observación de la urgencia es obligatoria.")
+    if not cliente:
+        raise ValueError("El cliente es obligatorio.")
+    if not usuario_solicitante:
+        raise ValueError("El usuario solicitante es obligatorio.")
+
+    try:
+        datetime.strptime(fecha_requerida, "%Y-%m-%d")
+    except ValueError as error:
+        raise ValueError("La fecha requerida no es válida.") from error
 
     existente = existe_gestion_abierta(
         nombre_hoja="Urgencias",
@@ -686,17 +746,12 @@ def guardar_urgencia(
     registro = {
         "UrgenciaID": generar_id("URG"),
         "Pedido": pedido_normalizado,
-        "Cliente": limpiar_texto(cliente),
+        "Cliente": cliente,
         "Motivo": motivo,
-        "FechaRequerida": limpiar_texto(
-            fecha_requerida
-        ),
-        "Observacion": limpiar_texto(
-            observacion
-        ),
-        "UsuarioSolicitante": limpiar_texto(
-            usuario_solicitante
-        ),
+        "Prioridad": prioridad,
+        "FechaRequerida": fecha_requerida,
+        "Observacion": observacion,
+        "UsuarioSolicitante": usuario_solicitante,
         "FechaSolicitud": obtener_fecha_hora(),
         "EstadoUrgencia": "Pendiente",
         "AgrupadorDestino": "URGENTES",

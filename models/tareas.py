@@ -9,6 +9,88 @@ import pandas as pd
 
 DIAS_TABLERO = 3
 
+
+
+def _filtrar_ciclo_actual_despachos(tabla):
+    """
+    Mantiene solamente despachos vigentes y evita mezclar reutilizaciones
+    distintas de un mismo nombre de agrupador.
+
+    Reglas:
+    - RETIRA / URGENTES: últimas 48 horas corridas.
+    - Resto: primero se limita a la ventana vigente del tablero
+      (DIAS_TABLERO días operativos, incluido el día de referencia).
+    - Dentro de esa ventana, si un mismo nombre fue reutilizado en días
+      distintos, se conserva únicamente su fecha operativa más reciente.
+
+    Así un agrupador histórico no reaparece solo por ser la última vez que
+    existió ese nombre, y tampoco se mezclan dos viajes distintos con el
+    mismo nombre.
+    """
+    if (
+        tabla is None
+        or tabla.empty
+        or "Despacho" not in tabla.columns
+        or "FechaHora" not in tabla.columns
+    ):
+        return tabla.copy() if tabla is not None else tabla
+
+    df = tabla.copy()
+    df["FechaHora"] = pd.to_datetime(df["FechaHora"], errors="coerce")
+    df = df.loc[df["FechaHora"].notna()].copy()
+    if df.empty:
+        return df
+
+    df["_DespachoNorm"] = (
+        df["Despacho"].fillna("").astype(str).str.strip().str.upper()
+    )
+    df["_FechaOperativa"] = df["FechaHora"].dt.normalize()
+
+    fecha_referencia = df["FechaHora"].max()
+    dia_referencia = fecha_referencia.normalize()
+    inicio_tablero = dia_referencia - pd.Timedelta(days=DIAS_TABLERO - 1)
+    limite_48h = fecha_referencia - pd.Timedelta(hours=48)
+
+    especiales = df["_DespachoNorm"].isin(["RETIRA", "URGENTES"])
+
+    # 1) Descartar primero históricos. Esto evita que EASY 18-09,
+    # INTERPLANTA u otro nombre antiguo revivan por ser su "último ciclo".
+    vigentes = (
+        (especiales & df["FechaHora"].ge(limite_48h))
+        |
+        (~especiales & df["_FechaOperativa"].ge(inicio_tablero))
+    )
+    df = df.loc[vigentes].copy()
+    if df.empty:
+        return df.drop(
+            columns=["_DespachoNorm", "_FechaOperativa"],
+            errors="ignore",
+        )
+
+    especiales = df["_DespachoNorm"].isin(["RETIRA", "URGENTES"])
+
+    # 2) Ya dentro de la ventana vigente, separar reutilizaciones:
+    # para cada nombre normal se conserva solamente el día de uso más reciente.
+    normales = df.loc[~especiales].copy()
+    if not normales.empty:
+        ultima_fecha = (
+            normales.groupby("_DespachoNorm")["_FechaOperativa"]
+            .transform("max")
+        )
+        normales = normales.loc[
+            normales["_FechaOperativa"].eq(ultima_fecha)
+        ].copy()
+
+    especiales_df = df.loc[especiales].copy()
+    resultado = pd.concat([especiales_df, normales], ignore_index=False)
+
+    return (
+        resultado
+        .sort_index()
+        .drop(columns=["_DespachoNorm", "_FechaOperativa"], errors="ignore")
+        .copy()
+    )
+
 # ==========================================================
 # TABLA OPERATIVA
 # ==========================================================
@@ -739,7 +821,10 @@ def obtener_tabla_operativa(tabla):
 
     )
     operativa = operativa.drop(columns="Orden")
-    
+
+    # No mezclar ciclos distintos cuando se reutiliza el mismo nombre de agrupador.
+    operativa = _filtrar_ciclo_actual_despachos(operativa)
+
     return operativa
 
 
@@ -794,41 +879,10 @@ def obtener_avance_despachos(tabla):
     # ------------------------------------------------------
     # ÚLTIMA UTILIZACIÓN DEL AGRUPADOR
     # ------------------------------------------------------
-    # fecha_operativa está normalizada a 00:00 y NO debe utilizarse
-    # como límite superior, porque eliminaría las tareas del día actual.
-    #
-    # Referencia real = último FechaHora existente en el Informe Tareas.
-    # RETIRA / URGENTES -> últimas 48 h corridas.
-    # Resto              -> últimas 72 h corridas.
-    fecha_referencia = df["FechaHora"].max()
-
-    if pd.isna(fecha_referencia):
-        return pd.DataFrame(columns=columnas), []
-
-    fecha_inicio_72h = fecha_referencia - pd.Timedelta(hours=72)
-    fecha_inicio_48h = fecha_referencia - pd.Timedelta(hours=48)
-
-    despacho_norm = (
-        df["Despacho"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-    es_48h = despacho_norm.isin(["RETIRA", "URGENTES"])
-
-    df = df.loc[
-        (
-            es_48h
-            & df["FechaHora"].ge(fecha_inicio_48h)
-            & df["FechaHora"].le(fecha_referencia)
-        )
-        | (
-            ~es_48h
-            & df["FechaHora"].ge(fecha_inicio_72h)
-            & df["FechaHora"].le(fecha_referencia)
-        )
-    ].copy()
+    # Centralizamos la regla para que donuts y tabla inferior trabajen
+    # sobre el mismo ciclo operativo. RETIRA/URGENTES conservan 48 h;
+    # los demás nombres reutilizados conservan solo su uso más reciente.
+    df = _filtrar_ciclo_actual_despachos(df)
 
     if df.empty:
         return pd.DataFrame(columns=columnas), []

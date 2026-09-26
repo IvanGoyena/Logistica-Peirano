@@ -235,10 +235,8 @@ def leer_tabla_google(
 # ==========================================================
 
 def leer_solicitudes() -> pd.DataFrame:
-    """
-    Lee todas las solicitudes comerciales.
-    """
-
+    """Lee todas las solicitudes comerciales."""
+    asegurar_hoja("Solicitudes")
     return leer_tabla_google(
         nombre_hoja="Solicitudes",
         columnas=COLUMNAS_SOLICITUDES,
@@ -247,10 +245,8 @@ def leer_solicitudes() -> pd.DataFrame:
 
 
 def leer_urgencias() -> pd.DataFrame:
-    """
-    Lee todas las urgencias comerciales.
-    """
-
+    """Lee todas las urgencias comerciales."""
+    asegurar_hoja("Urgencias")
     return leer_tabla_google(
         nombre_hoja="Urgencias",
         columnas=COLUMNAS_URGENCIAS,

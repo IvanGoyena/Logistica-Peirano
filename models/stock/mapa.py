@@ -561,7 +561,7 @@ def _mostrar_vista_completa_sector(mapa: pd.DataFrame) -> None:
                 figura = construir_mapa_sector_3d(base, sector)
             st.plotly_chart(
                 figura,
-                use_container_width=True,
+                use_container_width="screth",
                 config={
                     "displaylogo": False,
                     "scrollZoom": True,
@@ -593,7 +593,7 @@ def _mostrar_vista_completa_sector(mapa: pd.DataFrame) -> None:
                         )
                         st.altair_chart(
                             grafico,
-                            use_container_width=True,
+                            use_container_width="screth",
                             key=f"mapa_completo_{sector}_{pasillo}",
                         )
 
@@ -949,7 +949,7 @@ def mostrar_mapa_visual_deposito(
                 ],
             ).properties(height=245)
         )
-        st.altair_chart(grafico_pasillos, use_container_width=True,
+        st.altair_chart(grafico_pasillos, use_container_width="Screth",
                         key="mapa_resumen_pasillos_compacto")
 
     _mostrar_vista_completa_sector(mapa)
@@ -1050,7 +1050,7 @@ def mostrar_mapa_visual_deposito(
                     legend=dict(orientation="h", y=1.0, x=0.01),
                 )
                 st.plotly_chart(
-                    figura_3d, use_container_width=True,
+                    figura_3d, use_container_width="Screth",
                     config={"displaylogo": False, "scrollZoom": True, "responsive": True},
                     key="mapa_detalle_ubicaciones_3d",
                 )
