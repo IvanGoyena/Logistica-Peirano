@@ -9,22 +9,23 @@ import pandas as pd
 
 DIAS_TABLERO = 3
 
+# Agrupadores/gestiones que no deben visualizarse en el tablero operativo.
+DESPACHOS_EXCLUIDOS = {"INTERPLANTA"}
+
 
 
 def _filtrar_ciclo_actual_despachos(tabla):
     """
-    Mantiene el ciclo operativo ACTUAL de cada agrupador sin cortar un viaje
-    por cambio de día.
+    Mantiene únicamente el CICLO REAL más reciente de cada agrupador.
 
-    Reglas:
-    - RETIRA / URGENTES: últimas 48 horas corridas.
-    - Resto: se usa DIAS_TABLERO como histórico de reconstrucción.
-    - Un agrupador puede comenzar un día y terminar al siguiente: mientras
-      exista alguna tarea abierta, se conserva TODO el bloque continuo de ese
-      ciclo, incluyendo tareas ya controladas/cerradas.
-    - Un nuevo ciclo del mismo nombre solo se separa cuando, antes de él, hubo
-      un cierre real del agrupador (todas las tareas conocidas del bloque
-      estaban cerradas).
+    Regla principal:
+    - Para despachos normales, DespachoId identifica el viaje/ciclo real.
+      Un mismo DespachoId puede empezar un día y terminar al siguiente.
+      Si el nombre se reutiliza (ej. CAMIONETA EXP 3), el nuevo DespachoId
+      NO se mezcla con el anterior.
+    - RETIRA / URGENTES mantienen la ventana de 48 horas.
+    - Si por algún motivo DespachoId no está disponible, se usa un fallback
+      temporal conservador para no romper la vista.
     """
     if (
         tabla is None
@@ -44,6 +45,13 @@ def _filtrar_ciclo_actual_despachos(tabla):
         df["Despacho"].fillna("").astype(str).str.strip().str.upper()
     )
 
+    # Excluir gestiones que no forman parte del tablero operativo.
+    # Se hace antes de calcular la fecha de referencia y el ciclo actual para
+    # que tampoco afecten ventanas, avances, "sin iniciar" ni tablas de carros.
+    df = df.loc[~df["_DespachoNorm"].isin(DESPACHOS_EXCLUIDOS)].copy()
+    if df.empty:
+        return df.drop(columns=["_DespachoNorm"], errors="ignore")
+
     fecha_referencia = df["FechaHora"].max()
     inicio_tablero = fecha_referencia.normalize() - pd.Timedelta(days=DIAS_TABLERO - 1)
     limite_48h = fecha_referencia - pd.Timedelta(hours=48)
@@ -55,42 +63,32 @@ def _filtrar_ciclo_actual_despachos(tabla):
     if normales.empty:
         resultado = especiales_df
     else:
-        # Estado operativo real de cada fila. Un contenedor numérico representa
-        # una tarea controlada/cerrada; CARRO, vacío o SIN ASIGNAR sigue abierto.
-        carro = (
-            normales.get("Carro", pd.Series("", index=normales.index))
-            .astype("string").fillna("").str.strip().str.upper()
-            .str.replace(r"^[^A-Z0-9]*", "", regex=True).str.strip()
-        )
-        normales["_Cerrada"] = carro.str.fullmatch(r"\d+", na=False)
-
-        # Clave de tarea estable para evaluar el cierre del agrupador.
-        prep = normales.get("Preparacion", pd.Series("", index=normales.index)).astype("string").fillna("").str.strip()
-        area = normales.get("Area", pd.Series("", index=normales.index)).astype("string").fillna("").str.strip().str.upper()
-        normales["_TareaCiclo"] = prep + "|" + area
-
         partes = []
+        tiene_id = "DespachoId" in normales.columns
+
         for _, g in normales.groupby("_DespachoNorm", sort=False):
             g = g.sort_values("FechaHora").copy()
 
-            # Tomamos el último estado conocido por tarea. Si todavía queda una
-            # tarea abierta, TODO lo visible pertenece al mismo ciclo activo,
-            # aunque haya comenzado ayer.
-            ult = g.drop_duplicates("_TareaCiclo", keep="last")
-            ciclo_abierto = (~ult["_Cerrada"]).any()
+            # La clave correcta del ciclo es DespachoId, no la fecha.
+            # Elegimos el DespachoId cuya actividad más reciente sea la última
+            # para ese nombre de agrupador.
+            if tiene_id:
+                ids = g["DespachoId"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
+                ids = ids.where(ids.notna() & ids.ne("") & ids.ne("<NA>"), pd.NA)
+                g["_DespachoIdNorm"] = ids
+                con_id = g.loc[g["_DespachoIdNorm"].notna()].copy()
 
-            if ciclo_abierto:
-                partes.append(g)
-                continue
+                if not con_id.empty:
+                    ultima_por_id = con_id.groupby("_DespachoIdNorm")["FechaHora"].max()
+                    id_actual = ultima_por_id.idxmax()
+                    partes.append(g.loc[g["_DespachoIdNorm"].eq(id_actual)].copy())
+                    continue
 
-            # Si todo el nombre está cerrado dentro de la ventana, conservamos
-            # únicamente su bloque cerrado más reciente para no revivir viajes
-            # anteriores con el mismo nombre. Los bloques se separan por una
-            # pausa operativa de 12 h; esto solo afecta ciclos YA cerrados.
+            # Fallback para fuentes antiguas sin DespachoId: conservar solo el
+            # bloque temporal más reciente. No se usa cuando el ID está presente.
             saltos = g["FechaHora"].diff().gt(pd.Timedelta(hours=12))
             g["_BloqueCiclo"] = saltos.cumsum()
-            ultimo_bloque = g["_BloqueCiclo"].max()
-            partes.append(g.loc[g["_BloqueCiclo"].eq(ultimo_bloque)].copy())
+            partes.append(g.loc[g["_BloqueCiclo"].eq(g["_BloqueCiclo"].max())].copy())
 
         normales = pd.concat(partes, ignore_index=False) if partes else normales.iloc[0:0].copy()
         resultado = pd.concat([especiales_df, normales], ignore_index=False)
@@ -99,7 +97,7 @@ def _filtrar_ciclo_actual_despachos(tabla):
         resultado
         .sort_index()
         .drop(
-            columns=["_DespachoNorm", "_Cerrada", "_TareaCiclo", "_BloqueCiclo"],
+            columns=["_DespachoNorm", "_DespachoIdNorm", "_BloqueCiclo"],
             errors="ignore",
         )
         .copy()
@@ -440,6 +438,7 @@ def construir_tabla_tareas(
         "ClienteDescripcion",
         "AreaDescripcion",
         "DespachoDescripcion",
+        "DespachoId",
         "Hora",
         "ContenedorNumero",
         "Usuario",
@@ -469,6 +468,7 @@ def construir_tabla_tareas(
         "Cliente",
         "Area",
         "Despacho",
+        "DespachoId",
         "Hora",
         "Carro",
         "Usuario",
