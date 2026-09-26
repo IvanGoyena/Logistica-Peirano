@@ -196,7 +196,7 @@ def enriquecer_tareas_con_detalle(
     df_articulos: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Reparte unidades/SKUs/familias a nivel tarea.
+    Reparte unidades RESERVADAS/SKUs/familias a nivel tarea.
 
     Versión optimizada:
     - prepara el detalle ERP una sola vez;
@@ -223,7 +223,7 @@ def enriquecer_tareas_con_detalle(
     detalle = df_detalle.copy()
     maestro = df_articulos.copy()
 
-    requeridas_detalle = {"nro_com", "cod_art", "can_art"}
+    requeridas_detalle = {"nro_com", "cod_art", "can_reserv"}
     if (
         not requeridas_detalle.issubset(detalle.columns)
         or "COD_ART" not in maestro.columns
@@ -243,7 +243,7 @@ def enriquecer_tareas_con_detalle(
         .str.replace(r"\.0+$", "", regex=True)
     )
     detalle["_Cantidad"] = pd.to_numeric(
-        detalle["can_art"], errors="coerce"
+        detalle["can_reserv"], errors="coerce"
     ).fillna(0)
 
     # ------------------------------------------------------
@@ -421,6 +421,41 @@ def enriquecer_tareas_con_detalle(
         for _, r in por_sector.iterrows()
     }
 
+    # Fallback seguro por pedido completo.
+    # Se usa SOLO cuando no hubo match por artículo/sector y podemos demostrar
+    # que la tarea representa todo el pedido (misma cantidad de SKUs) o que
+    # la preparación tiene una única área. Esto evita mostrar 0 u. por una
+    # sectorización faltante/desalineada sin duplicar unidades entre sectores.
+    por_pedido = (
+        detalle.groupby("_PedidoKey", as_index=False, dropna=False)
+        .agg(
+            Unidades=("_Cantidad", "sum"),
+            SKUs=(
+                "_ArticuloKey",
+                lambda x: int(
+                    x[detalle.loc[x.index, "_Cantidad"].ne(0)].nunique()
+                ),
+            ),
+        )
+    )
+    mapa_pedido = {
+        str(r["_PedidoKey"]): (int(r["Unidades"]), int(r["SKUs"]), "")
+        for _, r in por_pedido.iterrows()
+    }
+
+    areas_por_preparacion = (
+        tareas.assign(
+            _PrepKey=tareas["Preparacion"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.replace(r"\.0+$", "", regex=True)
+        )
+        .groupby("_PrepKey")["_AreaKey"]
+        .nunique()
+        .to_dict()
+    )
+
     # ------------------------------------------------------
     # LOOKUPS O(1) POR TAREA
     # ------------------------------------------------------
@@ -469,6 +504,23 @@ def enriquecer_tareas_con_detalle(
             asignacion = mapa_sector.get((pedido, area))
             if asignacion is not None:
                 metodo = "sectorizacion"
+
+        # Último fallback: pedido completo, pero únicamente si es seguro.
+        # Caso típico detectado en RETIRA: Informe Tareas trae una sola tarea
+        # NACIONAL para el pedido, pero el maestro no logra resolver el sector;
+        # el detalle ERP sí tiene las cantidades correctas.
+        if asignacion is None and pedido:
+            total_pedido = mapa_pedido.get(pedido)
+            prep_key = _normalizar_id(preparacion)
+            una_sola_area = areas_por_preparacion.get(prep_key, 0) == 1
+            mismos_skus = (
+                total_pedido is not None
+                and cant_articulos > 0
+                and int(cant_articulos) == int(total_pedido[1])
+            )
+            if total_pedido is not None and (una_sola_area or mismos_skus):
+                asignacion = total_pedido
+                metodo = "pedido_completo_seguro"
 
         if asignacion is None:
             unidades.append(0)
