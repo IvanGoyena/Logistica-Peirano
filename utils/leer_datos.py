@@ -277,19 +277,13 @@ def _leer_fuente_repositorio(
         )
 
     except GitHubReaderError as error:
-        # No ocultamos el problema: queda registrado claramente.
-        # Como respaldo se intenta el checkout local para que la app
-        # no quede inutilizable ante una caída puntual de GitHub.
-        print("")
-        print("=" * 60)
-        print("ERROR LEYENDO VERSION ACTUAL DESDE GITHUB")
-        print(ruta_github)
-        print(error)
+        # Ante rate limit, 404 cacheado o una caída temporal de GitHub,
+        # el deploy continúa usando su copia local. El lector remoto
+        # aplica circuit breaker para no seguir golpeando la API.
         print(
-            "Se intentará el archivo local del deploy "
-            "como fallback."
+            "[GitHub fallback] "
+            f"{ruta_github} | {error}"
         )
-        print("=" * 60)
 
         return _leer_archivo_local(
             carpeta,

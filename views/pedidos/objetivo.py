@@ -204,9 +204,16 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
     por_login, por_nombre = _mapas_personal(personal)
 
     # ---------------------------------------------------------
-    # 1) FILTRAR PREPARACIONES: fuente preferida por fecha
+    # Construimos ambas fuentes completas y elegimos POR FECHA
+    # la que tenga mayor cantidad de líneas de detalle.
+    # Esto evita que un Filtrar parcial (ej. 22/09) reemplace
+    # un Control completo sólo porque la fecha existe.
     # ---------------------------------------------------------
-    fechas_filtrar = set()
+    det_f = pd.DataFrame()
+    act_f = pd.DataFrame()
+    det_c = pd.DataFrame()
+    act_c = pd.DataFrame()
+
     if not filtrar.empty and "ControlContenedorId" in filtrar.columns:
         f = filtrar.copy()
         f["ControlID"] = (f["ControlContenedorId"].astype("string").fillna("")
@@ -218,7 +225,6 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         )
         f = f[f["FechaControlDT"].notna() & f["ControlID"].ne("")].copy()
         f["Fecha"] = f["FechaControlDT"].dt.normalize()
-        fechas_filtrar = set(f["Fecha"].dropna().tolist())
 
         nombre = f.get("ControlContenedorUsuarioCompleto", pd.Series("", index=f.index)).astype("string").fillna("").str.strip()
         if nombre.eq("").all() and {"ControlContenedorUsuarioNombre", "ControlContenedorUsuarioApellido"}.issubset(f.columns):
@@ -238,42 +244,53 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         else:
             det_f = f.drop_duplicates(["ControlID", "CodigoArticulo", "Fecha"], keep="last").copy()
         det_f["Fuente"] = "Filtrar Preparaciones"
-        detalles.append(det_f)
 
         controles_f = f.drop_duplicates(["ControlID", "Fecha"], keep="last").copy()
         act_f = controles_f.groupby(["Fecha", "UsuarioMostrar"], as_index=False).agg(
             PrimerControl=("FechaControlDT", "min"), UltimoControl=("FechaControlDT", "max"), Controles=("ControlID", "nunique")
         )
         act_f["Fuente"] = "Filtrar Preparaciones"
-        actividades.append(act_f)
 
-    # ---------------------------------------------------------
-    # 2) CONTROL: completa únicamente fechas ausentes en Filtrar
-    # ---------------------------------------------------------
     if not control.empty and "ControlContenedorId" in control.columns:
         c = control.copy()
         c["ControlID"] = c["ControlContenedorId"].astype("string").fillna("").str.replace(r"\.0+$", "", regex=True).str.strip()
         c["CodigoArticulo"] = c.get("CodigoArticulo", pd.Series("", index=c.index)).astype("string").fillna("").str.strip()
         c["UsuarioMostrar"] = c.get("Usuario", pd.Series("", index=c.index)).astype("string").fillna("").str.strip()
-        # Control Septiembre viene en formato MM/DD/YYYY.
         c["FechaControlDT"] = _fecha_control(c.get("FechaFin", pd.Series(index=c.index, dtype="object")))
         c = c[c["FechaControlDT"].notna() & c["ControlID"].ne("")].copy()
         c["Fecha"] = c["FechaControlDT"].dt.normalize()
-        if fechas_filtrar:
-            c = c[~c["Fecha"].isin(fechas_filtrar)].copy()
         c["UnidadesNum"] = pd.to_numeric(c.get("Unidades", 0), errors="coerce").fillna(0)
 
-        if not c.empty:
-            det_c = c.drop_duplicates(["ControlID", "CodigoArticulo", "Fecha"], keep="last").copy()
-            det_c["Fuente"] = "Control"
-            detalles.append(det_c)
+        det_c = c.drop_duplicates(["ControlID", "CodigoArticulo", "Fecha"], keep="last").copy()
+        det_c["Fuente"] = "Control"
+        controles_c = c.drop_duplicates(["ControlID", "Fecha"], keep="last").copy()
+        act_c = controles_c.groupby(["Fecha", "UsuarioMostrar"], as_index=False).agg(
+            PrimerControl=("FechaControlDT", "min"), UltimoControl=("FechaControlDT", "max"), Controles=("ControlID", "nunique")
+        )
+        act_c["Fuente"] = "Control"
 
-            controles_c = c.drop_duplicates(["ControlID", "Fecha"], keep="last").copy()
-            act_c = controles_c.groupby(["Fecha", "UsuarioMostrar"], as_index=False).agg(
-                PrimerControl=("FechaControlDT", "min"), UltimoControl=("FechaControlDT", "max"), Controles=("ControlID", "nunique")
-            )
-            act_c["Fuente"] = "Control"
-            actividades.append(act_c)
+    # Elegimos la fuente más completa para cada fecha según cantidad de líneas.
+    fechas = set()
+    if not det_f.empty:
+        fechas.update(det_f["Fecha"].dropna().unique().tolist())
+    if not det_c.empty:
+        fechas.update(det_c["Fecha"].dropna().unique().tolist())
+
+    for fecha in sorted(fechas):
+        df = det_f[det_f["Fecha"].eq(fecha)].copy() if not det_f.empty else pd.DataFrame()
+        dc = det_c[det_c["Fecha"].eq(fecha)].copy() if not det_c.empty else pd.DataFrame()
+
+        # Mayor número de filas de detalle = cierre más completo.
+        # En empate preferimos Filtrar por tener identidad de controlador más rica.
+        usar_filtrar = len(df) >= len(dc) and len(df) > 0
+        if usar_filtrar:
+            detalles.append(df)
+            if not act_f.empty:
+                actividades.append(act_f[act_f["Fecha"].eq(fecha)].copy())
+        elif len(dc) > 0:
+            detalles.append(dc)
+            if not act_c.empty:
+                actividades.append(act_c[act_c["Fecha"].eq(fecha)].copy())
 
     if not detalles:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()

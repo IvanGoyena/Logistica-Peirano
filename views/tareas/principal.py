@@ -333,6 +333,207 @@ def _mapa_controladores_por_preparacion_area(
         for _, r in m.iterrows()
     }
 
+
+def _despachos_id_expirados_por_ultimo_control(
+    contexto: dict[str, object],
+    horas: int = 8,
+) -> set[str]:
+    """DespachoId cerrados en DIGIP cuyo último control real ya superó `horas`.
+
+    Fuentes:
+    - Informe Tareas: define qué PreparacionId pertenecen a cada DespachoId.
+    - Pedidos DIGIP: confirma que TODAS esas preparaciones están cerradas
+      (Estado Completo/Completado o Estado preparación Completa/Completada).
+    - Filtrar Preparaciones: aporta la fecha/hora REAL del último control.
+
+    Nunca se vence por DespachoDescripcion, porque ese nombre se reutiliza.
+    """
+    tareas = contexto.get("_tareas_raw")
+    pedidos = contexto.get("_pedidos_raw")
+    control = contexto.get("_control_historico_raw")
+
+    if (
+        not isinstance(tareas, pd.DataFrame) or tareas.empty
+        or not isinstance(pedidos, pd.DataFrame) or pedidos.empty
+        or not isinstance(control, pd.DataFrame) or control.empty
+    ):
+        return set()
+
+    t = tareas.copy()
+    p = pedidos.copy()
+    c = control.copy()
+
+    t.columns = [str(x).replace("\ufeff", "").strip() for x in t.columns]
+    p.columns = [str(x).replace("\ufeff", "").strip() for x in p.columns]
+    c.columns = [str(x).replace("\ufeff", "").strip() for x in c.columns]
+
+    def _key(serie: pd.Series) -> pd.Series:
+        return (
+            serie.astype("string")
+            .fillna("")
+            .str.strip()
+            .str.replace(r"\.0+$", "", regex=True)
+        )
+
+    # ---------------- Informe Tareas ----------------
+    if not {"DespachoId", "PreparacionId"}.issubset(t.columns):
+        return set()
+
+    t["_DespachoIdKey"] = _key(t["DespachoId"])
+    t["_PrepKey"] = _key(t["PreparacionId"])
+    t = t.loc[
+        t["_DespachoIdKey"].ne("") & t["_PrepKey"].ne(""),
+        ["_DespachoIdKey", "_PrepKey"],
+    ].drop_duplicates()
+
+    if t.empty:
+        return set()
+
+    # ---------------- Pedidos DIGIP ----------------
+    prep_col = next(
+        (
+            x for x in [
+                "Preparación Id",
+                "Preparacion Id",
+                "PreparacionId",
+                "PreparaciónId",
+            ]
+            if x in p.columns
+        ),
+        None,
+    )
+    if not prep_col:
+        return set()
+
+    p["_PrepKey"] = _key(p[prep_col])
+
+    estado_pedido_col = next(
+        (x for x in ["Estado", "Estado pedido", "Estado Pedido"] if x in p.columns),
+        None,
+    )
+    estado_prep_col = next(
+        (
+            x for x in [
+                "Estado preparación",
+                "Estado preparacion",
+                "EstadoPreparacion",
+                "Estado Preparación",
+            ]
+            if x in p.columns
+        ),
+        None,
+    )
+
+    if not estado_pedido_col and not estado_prep_col:
+        return set()
+
+    cerrados = {"COMPLETO", "COMPLETADO", "COMPLETA", "COMPLETADA"}
+
+    estado_pedido = (
+        p[estado_pedido_col]
+        .astype("string").fillna("").str.strip().str.upper()
+        if estado_pedido_col
+        else pd.Series("", index=p.index, dtype="string")
+    )
+    estado_prep = (
+        p[estado_prep_col]
+        .astype("string").fillna("").str.strip().str.upper()
+        if estado_prep_col
+        else pd.Series("", index=p.index, dtype="string")
+    )
+
+    # Cerrada si DIGIP confirma cierre a nivel pedido O preparación.
+    p["_CerradaDIGIP"] = estado_pedido.isin(cerrados) | estado_prep.isin(cerrados)
+
+    # Una preparación puede repetirse en el archivo: si existe una fila no cerrada,
+    # no la damos por cerrada.
+    estado_por_prep = (
+        p.loc[p["_PrepKey"].ne("")]
+        .groupby("_PrepKey")["_CerradaDIGIP"]
+        .all()
+    )
+
+    t["_CerradaDIGIP"] = t["_PrepKey"].map(estado_por_prep).fillna(False)
+
+    resumen_digip = (
+        t.groupby("_DespachoIdKey", as_index=False)
+        .agg(
+            Preparaciones=("_PrepKey", "nunique"),
+            PreparacionesCerradas=("_CerradaDIGIP", "sum"),
+        )
+    )
+
+    ids_cerrados = set(
+        resumen_digip.loc[
+            resumen_digip["Preparaciones"].gt(0)
+            & resumen_digip["PreparacionesCerradas"].eq(
+                resumen_digip["Preparaciones"]
+            ),
+            "_DespachoIdKey",
+        ].tolist()
+    )
+
+    if not ids_cerrados:
+        return set()
+
+    # ---------------- Filtrar Preparaciones ----------------
+    if "Id" not in c.columns:
+        return set()
+
+    fecha_control_col = next(
+        (
+            x for x in [
+                "ControlContenedorFechaHoraEstado",
+                "ControlContenedorFechaHora",
+                "FechaHoraControl",
+            ]
+            if x in c.columns
+        ),
+        None,
+    )
+    if not fecha_control_col:
+        return set()
+
+    c["_PrepKey"] = _key(c["Id"])
+    c["_FechaControl"] = pd.to_datetime(
+        c[fecha_control_col],
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    ultimo_control_prep = (
+        c.loc[
+            c["_PrepKey"].ne("") & c["_FechaControl"].notna(),
+            ["_PrepKey", "_FechaControl"],
+        ]
+        .groupby("_PrepKey")["_FechaControl"]
+        .max()
+    )
+
+    t["_FechaControl"] = t["_PrepKey"].map(ultimo_control_prep)
+
+    # Para cada DespachoId cerrado por DIGIP, la hora de cierre operativo
+    # es el último control real de cualquiera de sus preparaciones.
+    ultimo_por_despacho = (
+        t.loc[t["_DespachoIdKey"].isin(ids_cerrados)]
+        .groupby("_DespachoIdKey")["_FechaControl"]
+        .max()
+        .dropna()
+    )
+
+    if ultimo_por_despacho.empty:
+        return set()
+
+    limite = pd.Timestamp.now() - pd.Timedelta(hours=horas)
+
+    return set(
+        ultimo_por_despacho.loc[
+            ultimo_por_despacho.le(limite)
+        ].index.astype(str).tolist()
+    )
+
+
+
 def _render_indicadores(
     contexto: dict[str, object],
     *,
@@ -408,7 +609,7 @@ def _render_indicadores(
                         key=f"avance_despachos_anterior_{perfil}",
                         help="Ver agrupadores más avanzados",
                         disabled=st.session_state[clave_inicio] <= 0,
-                        use_container_width="Screth",
+                        use_container_width=True,
                     ):
                         st.session_state[clave_inicio] = max(
                             0, st.session_state[clave_inicio] - 1
@@ -419,7 +620,7 @@ def _render_indicadores(
                         key=f"avance_despachos_siguiente_{perfil}",
                         help="Ver agrupadores menos avanzados",
                         disabled=st.session_state[clave_inicio] >= max_inicio,
-                        use_container_width="Screth",
+                        use_container_width=True,
                     ):
                         st.session_state[clave_inicio] = min(
                             max_inicio, st.session_state[clave_inicio] + 1
@@ -460,6 +661,98 @@ def _render_indicadores(
                 ~_despacho_control.eq("INTERPLANTA")
             ].copy()
 
+        # ------------------------------------------------------
+        # INSTANCIA ACTUAL DE CADA AGRUPADOR
+        # ------------------------------------------------------
+        # DespachoDescripcion es reutilizable. Antes de calcular selector/KPIs,
+        # dejamos en la visual solamente el DespachoId más reciente de cada nombre.
+        # La vigencia se resuelve con Informe Tareas crudo, donde DespachoId sí
+        # identifica una instancia concreta del agrupador.
+        _tareas_raw_instancia = contexto.get("_tareas_raw")
+        if (
+            isinstance(_tareas_raw_instancia, pd.DataFrame)
+            and not _tareas_raw_instancia.empty
+            and {"DespachoId", "DespachoDescripcion", "FechaHoraEstado"}.issubset(
+                _tareas_raw_instancia.columns
+            )
+            and "DespachoId" in control_base.columns
+            and "Despacho" in control_base.columns
+        ):
+            _ti = _tareas_raw_instancia[
+                ["DespachoId", "DespachoDescripcion", "FechaHoraEstado"]
+            ].copy()
+
+            _ti["_DespachoIdKey"] = (
+                _ti["DespachoId"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+                .str.replace(r"\.0+$", "", regex=True)
+            )
+            _ti["_DespachoNombreKey"] = (
+                _ti["DespachoDescripcion"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+            _ti["_FechaActividad"] = pd.to_datetime(
+                _ti["FechaHoraEstado"],
+                errors="coerce",
+                dayfirst=True,
+            )
+
+            _ti = _ti.loc[
+                _ti["_DespachoIdKey"].ne("")
+                & _ti["_DespachoNombreKey"].ne("")
+                & _ti["_FechaActividad"].notna()
+            ].copy()
+
+            if not _ti.empty:
+                # Una fila por instancia: última actividad registrada para ese DespachoId.
+                _instancias = (
+                    _ti.groupby(
+                        ["_DespachoNombreKey", "_DespachoIdKey"],
+                        as_index=False,
+                    )["_FechaActividad"]
+                    .max()
+                    .sort_values(
+                        ["_DespachoNombreKey", "_FechaActividad", "_DespachoIdKey"],
+                        kind="stable",
+                    )
+                )
+
+                # Para cada nombre reutilizable, conservar exclusivamente el ID vigente.
+                _vigentes = (
+                    _instancias
+                    .drop_duplicates("_DespachoNombreKey", keep="last")
+                    .set_index("_DespachoNombreKey")["_DespachoIdKey"]
+                    .to_dict()
+                )
+
+                _cb_nombre = (
+                    control_base["Despacho"]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                )
+                _cb_id = (
+                    control_base["DespachoId"]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                    .str.replace(r"\.0+$", "", regex=True)
+                )
+                _id_vigente = _cb_nombre.map(_vigentes)
+
+                # Si conocemos el ID vigente del nombre, exigimos coincidencia exacta.
+                # Si no está en el crudo, no alteramos esa fila por seguridad.
+                _mask_instancia_actual = (
+                    _id_vigente.isna()
+                    | _id_vigente.eq("")
+                    | _cb_id.eq(_id_vigente)
+                )
+                control_base = control_base.loc[_mask_instancia_actual].copy()
+
         # La tabla de Preparaciones / Control debe mostrar solamente
         # agrupadores que siguen operativamente abiertos (< 100%).
         # `avance_despachos` ya excluye los despachos al 100%, mientras que
@@ -494,8 +787,147 @@ def _render_indicadores(
                 control_base["Despacho"].fillna("").astype(str).str.strip()
                 .loc[lambda x: x.ne("")].tolist()
             )
-        despachos_activos.difference_update(_agrupadores_cerrados())
+        # IMPORTANTE:
+        # No excluir por el histórico permanente del botón de cierre.
+        # Los nombres de agrupador se reutilizan (p. ej. CAMIONETA EXP 4,
+        # CAMIONETA DIARIOS 1), por lo que un cierre viejo no puede bloquear
+        # una reutilización nueva del mismo nombre.
+        #
+        # La vigencia se resuelve abajo exclusivamente contra el último
+        # control REAL del agrupador.
 
+        # CIERRE AUTOMÁTICO REAL POR DESPACHOID.
+        #
+        # Dos evidencias válidas de cierre:
+        # 1) DIGIP confirma todas las preparaciones del DespachoId como cerradas.
+        # 2) La MISMA tabla que alimenta esta visual está al 100% para ese DespachoId.
+        #
+        # En ambos casos, las 8 h se cuentan desde el ÚLTIMO CONTROL REAL.
+        despachos_id_expirados = set(
+            _despachos_id_expirados_por_ultimo_control(contexto, horas=8)
+        )
+
+        if not control_base.empty and "DespachoId" in control_base.columns:
+            _cb_cierre = control_base.copy()
+            _cb_cierre["_DespachoIdKey"] = (
+                _cb_cierre["DespachoId"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+                .str.replace(r"\.0+$", "", regex=True)
+            )
+
+            # El avance que ve el usuario se calcula con Categoria.
+            # Por eso el 100% automático debe usar exactamente la misma base.
+            if "Categoria" in _cb_cierre.columns:
+                _cb_cierre["_Finalizado"] = (
+                    _cb_cierre["Categoria"]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                    .str.upper()
+                    .eq("FINALIZADO")
+                )
+
+                _estado_por_id = (
+                    _cb_cierre.loc[_cb_cierre["_DespachoIdKey"].ne("")]
+                    .groupby("_DespachoIdKey")["_Finalizado"]
+                    .agg(["count", "sum"])
+                )
+                _ids_100 = set(
+                    _estado_por_id.loc[
+                        (_estado_por_id["count"] > 0)
+                        & (_estado_por_id["sum"] == _estado_por_id["count"])
+                    ].index.astype(str)
+                )
+
+                if _ids_100:
+                    # Fecha/hora real de control. Primero usamos la que ya resolvió
+                    # tabla_operativa; si faltara, recuperamos el máximo desde
+                    # Filtrar Preparaciones por PreparacionId.
+                    _cb_cierre["_FechaControlReal"] = pd.NaT
+                    if "ControlFechaHora" in _cb_cierre.columns:
+                        _cb_cierre["_FechaControlReal"] = pd.to_datetime(
+                            _cb_cierre["ControlFechaHora"],
+                            errors="coerce",
+                            dayfirst=True,
+                        )
+
+                    if "Preparacion" in _cb_cierre.columns:
+                        _control_raw = contexto.get("_control_historico_raw")
+                        if isinstance(_control_raw, pd.DataFrame) and not _control_raw.empty:
+                            _cr = _control_raw.copy()
+                            _cr.columns = [
+                                str(c).replace("\ufeff", "").strip()
+                                for c in _cr.columns
+                            ]
+                            _fecha_col = next(
+                                (
+                                    c for c in [
+                                        "ControlContenedorFechaHoraEstado",
+                                        "ControlContenedorFechaHora",
+                                        "FechaHoraControl",
+                                    ]
+                                    if c in _cr.columns
+                                ),
+                                None,
+                            )
+                            if "Id" in _cr.columns and _fecha_col:
+                                _cr["_PrepKey"] = (
+                                    _cr["Id"].astype("string").fillna("").str.strip()
+                                    .str.replace(r"\.0+$", "", regex=True)
+                                )
+                                _cr["_FechaControlRaw"] = pd.to_datetime(
+                                    _cr[_fecha_col],
+                                    errors="coerce",
+                                    dayfirst=True,
+                                )
+                                _max_control_prep = (
+                                    _cr.loc[
+                                        _cr["_PrepKey"].ne("")
+                                        & _cr["_FechaControlRaw"].notna()
+                                    ]
+                                    .groupby("_PrepKey")["_FechaControlRaw"]
+                                    .max()
+                                )
+                                _prep_visual = (
+                                    _cb_cierre["Preparacion"]
+                                    .astype("string")
+                                    .fillna("")
+                                    .str.strip()
+                                    .str.replace(r"\.0+$", "", regex=True)
+                                )
+                                _fecha_fallback = _prep_visual.map(_max_control_prep)
+                                _cb_cierre["_FechaControlReal"] = (
+                                    _cb_cierre["_FechaControlReal"]
+                                    .fillna(_fecha_fallback)
+                                )
+
+                    _ultimo_control_id = (
+                        _cb_cierre.loc[
+                            _cb_cierre["_DespachoIdKey"].isin(_ids_100)
+                            & _cb_cierre["_FechaControlReal"].notna()
+                        ]
+                        .groupby("_DespachoIdKey")["_FechaControlReal"]
+                        .max()
+                    )
+
+                    _limite_8h = pd.Timestamp.now() - pd.Timedelta(hours=8)
+                    despachos_id_expirados.update(
+                        _ultimo_control_id.loc[
+                            _ultimo_control_id.le(_limite_8h)
+                        ].index.astype(str).tolist()
+                    )
+
+            if despachos_id_expirados:
+                _id_visual = _cb_cierre["_DespachoIdKey"]
+                control_base = control_base.loc[
+                    ~_id_visual.isin(despachos_id_expirados)
+                ].copy()
+
+        # Después aplicamos el universo de nombres activos.
+        # Como las instancias vencidas ya fueron retiradas por ID, un nombre
+        # reutilizado conserva solamente su DespachoId actual.
         if not control_base.empty and "Despacho" in control_base.columns:
             control_base = control_base.loc[
                 control_base["Despacho"]
@@ -524,6 +956,69 @@ def _render_indicadores(
                 .str.replace(r"\\.0+$", "", regex=True)
             )
             control_base["Area"] = control_base["Area"].str.upper()
+
+            # Mostrar Pedido en lugar del ID interno de Preparación.
+            # El ID de Preparación se conserva internamente para todos los cruces.
+            _pedidos_raw = contexto.get("_pedidos_raw")
+            _mapa_pedido_por_preparacion = {}
+
+            if isinstance(_pedidos_raw, pd.DataFrame) and not _pedidos_raw.empty:
+                _p = _pedidos_raw.copy()
+                _p.columns = [str(c).replace("\ufeff", "").strip() for c in _p.columns]
+
+                _col_prep = next(
+                    (c for c in ["Preparación Id", "Preparacion Id", "PreparacionId", "PreparaciónId"]
+                     if c in _p.columns),
+                    None,
+                )
+                _col_pedido = next(
+                    (c for c in ["Código pedido", "Codigo pedido", "Código Pedido", "Codigo Pedido"]
+                     if c in _p.columns),
+                    None,
+                )
+
+                if _col_prep and _col_pedido:
+                    _p["_PrepKey"] = (
+                        _p[_col_prep].astype("string").fillna("").str.strip()
+                        .str.replace(r"\.0+$", "", regex=True)
+                    )
+
+                    # Ej.: "0001  215889-3" -> "215889"
+                    _pedido_txt = (
+                        _p[_col_pedido].astype("string").fillna("").str.strip()
+                    )
+                    _p["_PedidoVisible"] = (
+                        _pedido_txt
+                        .str.extract(r"(\d+)(?:-\d+)?\s*$", expand=False)
+                        .fillna("")
+                    )
+
+                    _mapa_pedido_por_preparacion = (
+                        _p.loc[
+                            _p["_PrepKey"].ne("") & _p["_PedidoVisible"].ne(""),
+                            ["_PrepKey", "_PedidoVisible"],
+                        ]
+                        .drop_duplicates("_PrepKey", keep="last")
+                        .set_index("_PrepKey")["_PedidoVisible"]
+                        .to_dict()
+                    )
+
+            control_base["_PedidoVisible"] = (
+                control_base["Preparacion"].map(_mapa_pedido_por_preparacion)
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            # Fallback seguro: si por algún motivo no encontramos el pedido,
+            # mostramos la Preparación para no dejar una celda vacía.
+            control_base.loc[
+                control_base["_PedidoVisible"].eq(""),
+                "_PedidoVisible",
+            ] = control_base.loc[
+                control_base["_PedidoVisible"].eq(""),
+                "Preparacion",
+            ]
 
             # La persona ya viene correctamente resuelta en ControlUsuario.
             # Para la hora usamos el histórico crudo como fallback SIN tocar el usuario.
@@ -612,6 +1107,7 @@ def _render_indicadores(
                 numero = re.sub(r"CARRO", "", carro, flags=re.IGNORECASE).strip()
                 m = re.search(r"\d+", numero); numero = m.group(0) if m else ""
                 usuario = _solo_nombre_controlador(fila.get("ControlUsuario", ""))
+                picker = _solo_nombre_controlador(fila.get("Usuario", ""))
                 fecha = fila.get("ControlFechaHora", pd.NaT)
                 if not isinstance(fecha, pd.Timestamp):
                     fecha = pd.to_datetime(fecha, errors="coerce", dayfirst=True)
@@ -619,12 +1115,12 @@ def _render_indicadores(
                 if not hora:
                     hora = str(fila.get("_HoraControlMapa", "") or "").strip()
                 if categoria == "Finalizado":
-                    return f"{area_corta} - {unidades} u.", "finalizado", usuario, hora
+                    return f"{area_corta} - {unidades} u.", "finalizado", usuario, hora, picker
                 if numero and "SIN ASIGNAR" not in carro.upper() and carro.lower() != "nan":
-                    return f"{numero} ({area_corta} - {unidades} u.)", "curso", "", ""
-                return f"{area_corta} - {unidades} u.", "pendiente", "", ""
+                    return f"{numero} ({area_corta} - {unidades} u.)", "curso", "", "", picker
+                return f"{area_corta} - {unidades} u.", "pendiente", "", "", picker
 
-            control_base[["_TituloCarro","_EstadoCarro","_Controlador","_HoraControl"]] = control_base.apply(
+            control_base[["_TituloCarro","_EstadoCarro","_Controlador","_HoraControl","_Picker"]] = control_base.apply(
                 lambda r: pd.Series(_datos_carro(r)), axis=1
             )
             st.caption(f"{control_base['Preparacion'].nunique()} preparación(es) visibles" + (f" · {filtro_control}" if filtro_control != "Todos" else ""))
@@ -636,6 +1132,18 @@ def _render_indicadores(
                 pd.to_numeric(control_base["Unidades"], errors="coerce")
                 .fillna(0).sum()
             )
+
+            # La tabla operativa ya viene enriquecida con la volumetría del módulo.
+            # Informe Tareas normaliza Volumen (mm³) -> VolumenM3 en models/tareas.py.
+            volumen_kpi = float(
+                pd.to_numeric(
+                    control_base["VolumenM3"]
+                    if "VolumenM3" in control_base.columns
+                    else pd.Series(0.0, index=control_base.index),
+                    errors="coerce",
+                ).fillna(0.0).sum()
+            )
+
             controlados_kpi = int(
                 control_base["Categoria"].astype(str).eq("Finalizado").sum()
             )
@@ -644,49 +1152,114 @@ def _render_indicadores(
                 if carros_kpi else 0.0
             )
 
-            k1, k2, k3, k4 = st.columns([1, 1, 1, 1.35], gap="small")
-            with k1:
-                st.metric("📄 Pedidos", pedidos_kpi)
-            with k2:
-                st.metric("📦 Carros", carros_kpi)
-            with k3:
-                st.metric("📦 Unidades", f"{unidades_kpi:,}".replace(",", "."))
-            with k4:
-                st.markdown(
-                    f"""
-                    <div style="
-                        border:1px solid #30363d;
-                        border-radius:8px;
-                        padding:8px 12px;
-                        min-height:86px;
-                        background:#11161d;">
-                      <div style="font-size:.78rem;color:#aab3bf;font-weight:700;">
-                        Avance control
-                      </div>
-                      <div style="font-size:1.65rem;font-weight:800;line-height:1.15;margin:2px 0 5px;">
-                        {avance_kpi:.0f}%
-                      </div>
-                      <div style="height:9px;background:#202938;border-radius:20px;overflow:hidden;">
-                        <div style="
-                            width:{min(max(avance_kpi,0),100):.1f}%;
-                            height:100%;
-                            background:#22c55e;
-                            border-radius:20px;">
-                        </div>
-                      </div>
-                      <div style="font-size:.76rem;color:#aab3bf;margin-top:4px;">
-                        {controlados_kpi} / {carros_kpi} carros
-                      </div>
+            unidades_txt = f"{unidades_kpi:,}".replace(",", ".")
+            volumen_txt = f"{volumen_kpi:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+            # Mismo concepto visual que los KPI-card de los otros módulos:
+            # tarjeta, título pequeño, valor grande y detalle inferior.
+            st.markdown(
+                """
+                <style>
+                .control-kpi-grid{
+                    display:grid;
+                    grid-template-columns:repeat(5,minmax(0,1fr));
+                    gap:10px;
+                    margin:6px 0 14px 0;
+                }
+                .control-kpi-card{
+                    border:1px solid #303b49;
+                    border-radius:12px;
+                    background:#111821;
+                    padding:12px 14px 10px 14px;
+                    min-height:104px;
+                    box-sizing:border-box;
+                }
+                .control-kpi-title{
+                    font-size:.78rem;
+                    font-weight:700;
+                    color:#f1f5f9;
+                    white-space:nowrap;
+                }
+                .control-kpi-value{
+                    margin-top:7px;
+                    font-size:1.72rem;
+                    line-height:1.05;
+                    font-weight:800;
+                    color:#ffffff;
+                }
+                .control-kpi-detail{
+                    margin-top:8px;
+                    font-size:.72rem;
+                    color:#9fb0c3;
+                }
+                .control-kpi-progress{
+                    height:8px;
+                    margin-top:8px;
+                    background:#202c3b;
+                    border-radius:20px;
+                    overflow:hidden;
+                }
+                .control-kpi-progress > div{
+                    height:100%;
+                    background:#22c55e;
+                    border-radius:20px;
+                }
+                @media (max-width: 1000px){
+                    .control-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown(
+                f"""
+                <div class="control-kpi-grid">
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">📄 Pedidos</div>
+                    <div class="control-kpi-value">{pedidos_kpi}</div>
+                    <div class="control-kpi-detail">preparaciones visibles</div>
+                  </div>
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">🛒 Carros</div>
+                    <div class="control-kpi-value">{carros_kpi}</div>
+                    <div class="control-kpi-detail">carros del agrupador</div>
+                  </div>
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">📦 Unidades</div>
+                    <div class="control-kpi-value">{unidades_txt}</div>
+                    <div class="control-kpi-detail">unidades totales</div>
+                  </div>
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">🧊 Volumen</div>
+                    <div class="control-kpi-value">{volumen_txt} m³</div>
+                    <div class="control-kpi-detail">volumen total</div>
+                  </div>
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">📊 Avance control</div>
+                    <div class="control-kpi-value">{avance_kpi:.0f}%</div>
+                    <div class="control-kpi-progress">
+                      <div style="width:{min(max(avance_kpi,0),100):.1f}%"></div>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                    <div class="control-kpi-detail">{controlados_kpi} / {carros_kpi} carros</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
             st.markdown(f"### 🚚 {filtro_control} — Carros en preparación" if filtro_control != "Todos" else "### 🚚 Todos los agrupadores — Carros en preparación")
 
-            # Una fila visual = una PreparacionID/Pedido. El cliente puede repetirse
-            # en varias filas si tiene varias preparaciones dentro del mismo agrupador.
-            # Una tarjeta = una tarea/sector. Nunca consolidamos solo por Cliente.
+            # Una fila visual = una PreparacionID/Pedido.
+            # Orden visual: Cliente A-Z y, dentro de cada cliente, Preparación.
+            # No se consolidan preparaciones distintas del mismo cliente.
+            control_base = control_base.sort_values(
+                ["Cliente", "Preparacion"],
+                ascending=[True, True],
+                kind="stable",
+                na_position="last",
+            ).reset_index(drop=True)
+
             filas_html = []
             claves_fila = ["Preparacion", "Cliente"]
             for (preparacion, cliente), grupo in control_base.groupby(claves_fila, sort=False, dropna=False):
@@ -702,17 +1275,25 @@ def _render_indicadores(
                 for _, r in grupo.iterrows():
                     titulo, estado = html.escape(str(r["_TituloCarro"])), str(r["_EstadoCarro"])
                     usuario = html.escape(str(r["_Controlador"])) if str(r["_Controlador"]).strip() else ""
+                    picker = html.escape(str(r["_Picker"])) if str(r["_Picker"]).strip() else ""
                     hora = html.escape(str(r["_HoraControl"])) if str(r["_HoraControl"]).strip() else ""
                     total_unidades += int(round(float(pd.to_numeric(pd.Series([r.get("Unidades",0)]), errors="coerce").fillna(0).iloc[0])))
+                    detalle_picker = f'<div class="carro-picker">🛒 {picker}</div>' if picker else '<div class="carro-picker sin-dato">🛒 Sin dato</div>'
                     if estado == "finalizado":
-                        detalle = f'<div class="carro-control">👤 {usuario}</div>' if usuario else '<div class="carro-control sin-dato">👤 Sin dato</div>'
+                        detalle = detalle_picker
+                        detalle += f'<div class="carro-control">👤 {usuario}</div>' if usuario else '<div class="carro-control sin-dato">👤 Sin dato</div>'
                         if hora: detalle += f'<div class="carro-hora">🕒 {hora}</div>'
                         tarjetas.append(f'<div class="carro-card finalizado"><div class="carro-titulo">✅ {titulo}</div>{detalle}</div>')
                     else:
                         icono = "🕒" if estado == "curso" else "⏳"
-                        tarjetas.append(f'<div class="carro-card curso"><div class="carro-titulo">{icono} {titulo}</div><div class="carro-control sin-dato">—</div></div>')
+                        tarjetas.append(f'<div class="carro-card curso"><div class="carro-titulo">{icono} {titulo}</div>{detalle_picker}</div>')
 
-                prep_visible = html.escape(str(preparacion)) if str(preparacion).strip() else "—"
+                _pedido_grupo = (
+                    grupo["_PedidoVisible"].iloc[0]
+                    if "_PedidoVisible" in grupo.columns and not grupo.empty
+                    else preparacion
+                )
+                prep_visible = html.escape(str(_pedido_grupo)) if str(_pedido_grupo).strip() else "—"
                 cliente_visible = html.escape(str(cliente))
                 filas_html.append(
                     '<div class="control-row">'
@@ -725,8 +1306,8 @@ def _render_indicadores(
 
             st.markdown("""
 <style>
-.control-grid{border:1px solid #30363d;border-radius:8px;overflow:hidden;margin:.35rem 0 .65rem}.control-head,.control-row{display:grid;grid-template-columns:9% 16% 1fr 7% 8%;align-items:stretch}.control-head{background:#1d222b;font-weight:700;color:#b9c0ca;font-size:.83rem}.control-head>div,.control-row>div{padding:8px 10px;border-right:1px solid #30363d;border-bottom:1px solid #30363d}.control-row:last-child>div{border-bottom:0}.control-head>div:last-child,.control-row>div:last-child{border-right:0}.control-prep,.control-cliente{font-weight:700;display:flex;align-items:center}.control-prep{color:#8fd0ff}.control-carros{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.control-total{display:flex;align-items:center;justify-content:center;font-weight:700}.carro-card{min-width:150px;padding:6px 10px;border-radius:7px;background:#151a21;border:1px solid #39414c;line-height:1.15}.carro-card.finalizado{border-color:#168c4b}.carro-titulo{font-weight:700;font-size:.84rem;white-space:nowrap}.carro-control{font-size:.76rem;margin-top:4px;color:#8fd0ff}.carro-hora{font-size:.74rem;color:#9aa4b2;margin-top:1px}.sin-dato{color:#8b949e}
-</style><div class="control-grid"><div class="control-head"><div>Preparación</div><div>Cliente</div><div>Carros (sector - unidades)</div><div>Total carros</div><div>Total unidades</div></div>""" + "".join(filas_html) + "</div>", unsafe_allow_html=True)
+.control-grid{border:1px solid #30363d;border-radius:8px;overflow:hidden;margin:.35rem 0 .65rem}.control-head,.control-row{display:grid;grid-template-columns:9% 16% 1fr 7% 8%;align-items:stretch}.control-head{background:#1d222b;font-weight:700;color:#b9c0ca;font-size:.83rem}.control-head>div,.control-row>div{padding:8px 10px;border-right:1px solid #30363d;border-bottom:1px solid #30363d}.control-row:last-child>div{border-bottom:0}.control-head>div:last-child,.control-row>div:last-child{border-right:0}.control-prep,.control-cliente{font-weight:700;display:flex;align-items:center}.control-prep{color:#8fd0ff}.control-carros{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.control-total{display:flex;align-items:center;justify-content:center;font-weight:700}.carro-card{min-width:150px;padding:6px 10px;border-radius:7px;background:#151a21;border:1px solid #39414c;line-height:1.15}.carro-card.finalizado{border-color:#168c4b}.carro-titulo{font-weight:700;font-size:.84rem;white-space:nowrap}.carro-picker{font-size:.76rem;margin-top:4px;color:#c9d1d9}.carro-control{font-size:.76rem;margin-top:2px;color:#8fd0ff}.carro-hora{font-size:.74rem;color:#9aa4b2;margin-top:1px}.sin-dato{color:#8b949e}
+</style><div class="control-grid"><div class="control-head"><div>Pedido</div><div>Cliente</div><div>Carros (sector - unidades)</div><div>Total carros</div><div>Total unidades</div></div>""" + "".join(filas_html) + "</div>", unsafe_allow_html=True)
 
             # Descarga agrupada: una fila por preparación, sin IDs visibles.
             detalle_descarga = control_base.copy()
@@ -825,6 +1406,20 @@ def _render_tabla(
     perfil: str,
 ) -> None:
     tabla_base = contexto["tabla_operativa"].copy()
+
+    # INTERPLANTA queda excluido del módulo operativo.
+    if not tabla_base.empty and "Despacho" in tabla_base.columns:
+        _despacho_modulo = (
+            tabla_base["Despacho"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        tabla_base = tabla_base.loc[
+            ~_despacho_modulo.eq("INTERPLANTA")
+        ].copy()
+
     tabla = preparar_tabla_operativa_visual(tabla_base)
 
     # Mostrar explícitamente la división operativa antes de que exista el carro.
@@ -1257,8 +1852,21 @@ def _render_fragmento_operativo(perfil: str) -> None:
             fuentes.get("preparaciones_historico"),
         )
         # Fuentes crudas necesarias para asociar cada control al carro/sector correcto.
-        contexto["_control_historico_raw"] = fuentes.get("control_historico")
+        # Fuente real de Filtrar Preparaciones: contiene fecha/hora de control.
+        # Antes se buscaba "control_historico", clave que no corresponde a la
+        # fuente cargada por carga.py; por eso la limpieza automática de 8 h
+        # no podía determinar el último control en Streamlit.
+        # Para hora/usuario de control priorizamos la ventana reciente DIRECTA.
+        # Evita que una consolidación/deduplicación histórica elimine el registro
+        # que contiene ControlContenedorFechaHoraEstado.
+        _control_reciente = fuentes.get("preparaciones_recientes")
+        if isinstance(_control_reciente, pd.DataFrame) and not _control_reciente.empty:
+            contexto["_control_historico_raw"] = _control_reciente
+        else:
+            contexto["_control_historico_raw"] = fuentes.get("preparaciones_historico")
+
         contexto["_tareas_raw"] = fuentes.get("tareas")
+        contexto["_pedidos_raw"] = fuentes.get("pedidos")
 
     mostrar_info_dataframe("Tabla pedidos", contexto["tabla_pedidos"])
     mostrar_info_dataframe("Tabla tareas", contexto["tabla_tareas"])
@@ -1520,11 +2128,38 @@ def _render_fragmento_operativo(perfil: str) -> None:
                             return "CONTROLADO"
                         return "SIN INICIAR"
 
-                    estado_por_pedido = (
-                        tareas_detalle.loc[tareas_detalle["_PedidoKey"].ne("")]
-                        .groupby("_PedidoKey", group_keys=False)
-                        .apply(_estado_pedido_cencosud)
+                    # Calcular el estado sin DataFrameGroupBy.apply.
+                    # Evita el FutureWarning de pandas manteniendo la misma prioridad.
+                    _estado_base = tareas_detalle.loc[
+                        tareas_detalle["_PedidoKey"].ne(""),
+                        ["_PedidoKey", "_Carro"],
+                    ].copy()
+
+                    _carros_estado = _estado_base["_Carro"].astype("string").fillna("")
+                    _estado_base["_TieneCarro"] = _carros_estado.str.match(
+                        r"^CARRO\s*\d+", na=False
                     )
+                    _estado_base["_TienePendiente"] = (
+                        _carros_estado.eq("")
+                        | _carros_estado.str.contains("SIN ASIGNAR", case=False, na=False)
+                    )
+                    _estado_base["_TieneControlado"] = _carros_estado.str.fullmatch(
+                        r"\d+", na=False
+                    )
+
+                    _estado_resumen = (
+                        _estado_base.groupby("_PedidoKey", sort=False)[
+                            ["_TieneCarro", "_TienePendiente", "_TieneControlado"]
+                        ]
+                        .any()
+                    )
+
+                    estado_por_pedido = pd.Series(
+                        "SIN INICIAR", index=_estado_resumen.index, dtype="object"
+                    )
+                    estado_por_pedido.loc[_estado_resumen["_TieneControlado"]] = "CONTROLADO"
+                    estado_por_pedido.loc[_estado_resumen["_TienePendiente"]] = "SIN INICIAR"
+                    estado_por_pedido.loc[_estado_resumen["_TieneCarro"]] = "EN PREPARACIÓN"
 
                     pedido_key_tabla = tabla_cencosud["Pedido"].map(_normalizar_pedido)
                     tabla_cencosud["Carros"] = (

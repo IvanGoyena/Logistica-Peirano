@@ -414,6 +414,61 @@ def _leer_historico_preparaciones() -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _leer_preparaciones_recientes_directo() -> pd.DataFrame:
+    """Lee DIRECTAMENTE el archivo más nuevo de Filtrar Preparacion Ultimos 7 Dias.
+
+    Esta fuente no se mezcla ni deduplica con históricos. Se usa para obtener
+    usuario y fecha/hora real de los controles recientes.
+    """
+    carpeta = Path(CARPETA_WMS)
+    if not carpeta.exists():
+        return pd.DataFrame()
+
+    candidatos: list[Path] = []
+    patrones = (
+        "Filtrar Preparacion Ultimos 7 Dias*.csv",
+        "Filtrar Preparacion Ultimos 7 Dias*.xlsx",
+        "Filtrar Preparación Ultimos 7 Dias*.csv",
+        "Filtrar Preparación Últimos 7 Días*.csv",
+        "Filtrar Preparación Últimos 7 Días*.xlsx",
+    )
+    for patron in patrones:
+        candidatos.extend(r for r in carpeta.glob(patron) if r.is_file())
+
+    if not candidatos:
+        return pd.DataFrame()
+
+    # El archivo físicamente más reciente es la fuente autoritativa.
+    ruta = max(candidatos, key=lambda r: r.stat().st_mtime)
+
+    try:
+        if ruta.suffix.lower() == ".csv":
+            df = pd.read_csv(
+                ruta,
+                sep=None,
+                engine="python",
+                encoding="utf-8-sig",
+            )
+        else:
+            df = pd.read_excel(ruta)
+    except Exception:
+        return pd.DataFrame()
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df.columns = [str(x).replace("\ufeff", "").strip() for x in df.columns]
+
+    # Sin Id no sirve para cruzar con PreparacionId.
+    if "Id" not in df.columns:
+        return pd.DataFrame()
+
+    df["ArchivoOrigenPreparacionReciente"] = ruta.name
+    return df.reset_index(drop=True)
+
+
 # ==========================================================
 # HISTORICO ANALITICO DE PREPARACION
 # ==========================================================
@@ -621,6 +676,19 @@ def cargar_fuentes_tareas(
     if mensaje_prep and prep.empty:
         mensajes.append(mensaje_prep)
 
+    # Fuente DIRECTA de controles recientes. No pasa por el consolidador histórico.
+    # Es la que usa principal.py para resolver hora/usuario de los últimos controles.
+    try:
+        prep_reciente_directo = _leer_preparaciones_recientes_directo()
+    except Exception as error:
+        prep_reciente_directo = pd.DataFrame()
+        mensajes.append(
+            "Filtrar Preparacion Ultimos 7 Dias directo: "
+            f"{type(error).__name__}."
+        )
+
+    fuentes["preparaciones_recientes"] = prep_reciente_directo
+
     if incluir_estadisticas:
         try:
             analitico_prep_origen = _leer_analitico_preparacion()
@@ -664,5 +732,6 @@ def invalidar_cache_tareas() -> None:
     _leer_maestras.clear()
     _leer_historico_control.clear()
     _leer_historico_preparaciones.clear()
+    _leer_preparaciones_recientes_directo.clear()
     _leer_analitico_preparacion.clear()
     _leer_ubicaciones_score.clear()

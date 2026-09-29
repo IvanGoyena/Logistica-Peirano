@@ -345,6 +345,7 @@ def construir_tabla_tareas(
         "ContenedorId",
         "ClienteDescripcion",
         "AreaDescripcion",
+        "DespachoId",
         "DespachoDescripcion",
         "Hora",
         "ContenedorNumero",
@@ -376,6 +377,7 @@ def construir_tabla_tareas(
     "ContenedorId",
         "Cliente",
         "Area",
+        "DespachoId",
         "Despacho",
         "Hora",
         "Carro",
@@ -853,6 +855,30 @@ def obtener_avance_despachos(tabla):
 
     df["Despacho"] = df["Despacho"].fillna("").astype(str).str.strip()
     df = df.loc[df["Despacho"].ne("")].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=columnas), []
+
+    # ------------------------------------------------------
+    # PREPARACIONES REVERTIDAS / CERRADAS SIN TAREA OPERATIVA
+    # ------------------------------------------------------
+    # Si DIGIP ya cerró el pedido/preparación pero en Informe Tareas quedó
+    # una tarea PENDIENTE o EN CURSO sin llegar a contenedor numérico, esa
+    # fila no debe seguir inflando el denominador del avance del despacho.
+    # Las tareas realmente controladas (Categoria == Finalizado) se conservan.
+    if "EstadoPedido" in df.columns:
+        _estado_pedido = (
+            df["EstadoPedido"]
+            .astype("string")
+            .fillna("")
+            .str.strip()
+            .str.upper()
+        )
+        _pedido_cerrado = _estado_pedido.isin(
+            ["COMPLETO", "COMPLETADO", "COMPLETA", "COMPLETADA", "CERRADO", "CERRADA"]
+        )
+        _sin_cierre_operativo = ~df["Categoria"].eq("Finalizado")
+        df = df.loc[~(_pedido_cerrado & _sin_cierre_operativo)].copy()
 
     if df.empty:
         return pd.DataFrame(columns=columnas), []

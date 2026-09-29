@@ -540,7 +540,18 @@ def validar_maestro_clientes(
     if nuevos.empty:
         return pd.DataFrame()
 
-    nuevos = nuevos.merge(pedidos_digip, on="Pedido", how="left", suffixes=("", "_DIGIP"))
+    # Un cliente nuevo solo aplica si el pedido ya existe realmente en DIGIP/WMS.
+    # ERP aporta los datos comerciales, pero no debe disparar un alta por sí solo:
+    # si el pedido todavía no fue transmitido a DIGIP, se excluye de esta validación.
+    nuevos = nuevos.merge(
+        pedidos_digip,
+        on="Pedido",
+        how="inner",
+        suffixes=("", "_DIGIP"),
+    )
+
+    if nuevos.empty:
+        return pd.DataFrame()
 
     # Conserva un registro por código logístico y prioriza pedidos con despacho.
     nuevos["CodigoDespacho"] = normalizar_codigo(nuevos["CodigoDespacho"])

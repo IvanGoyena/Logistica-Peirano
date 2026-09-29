@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
+import threading
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -21,6 +23,19 @@ GITHUB_BRANCH = "main"
 
 GITHUB_API = "https://api.github.com"
 GITHUB_API_VERSION = "2022-11-28"
+
+# Protección frente a límites/transitorios de GitHub.
+# El caché de Streamlit sigue siendo la primera barrera; esto agrega
+# un circuito de protección para evitar tormentas de requests.
+_CIRCUIT_LOCK = threading.RLock()
+_CIRCUIT_OPEN_UNTIL = 0.0
+_CIRCUIT_REASON = ""
+_CIRCUIT_SECONDS_RATE_LIMIT = 300
+_CIRCUIT_SECONDS_TRANSIENT = 30
+
+# Cachea rutas inexistentes para no repetir 404 en cada rerun/búsqueda.
+_NEGATIVE_CACHE: dict[str, float] = {}
+_NEGATIVE_CACHE_TTL = 900
 
 
 class GitHubReaderError(RuntimeError):
@@ -123,9 +138,33 @@ def _url_blob(
     )
 
 
+def _abrir_circuito(segundos: int, motivo: str) -> None:
+    global _CIRCUIT_OPEN_UNTIL, _CIRCUIT_REASON
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_OPEN_UNTIL = max(
+            _CIRCUIT_OPEN_UNTIL,
+            time.monotonic() + max(1, int(segundos)),
+        )
+        _CIRCUIT_REASON = str(motivo or "").strip()
+
+
+def _verificar_circuito() -> None:
+    with _CIRCUIT_LOCK:
+        restante = _CIRCUIT_OPEN_UNTIL - time.monotonic()
+        motivo = _CIRCUIT_REASON
+
+    if restante > 0:
+        raise GitHubReaderError(
+            "GitHub temporalmente protegido por circuit breaker "
+            f"({int(restante) + 1}s). {motivo}"
+        )
+
+
 def _request_json(
     url: str,
 ) -> dict:
+    _verificar_circuito()
+
     request = Request(
         url=url,
         method="GET",
@@ -135,7 +174,7 @@ def _request_json(
     try:
         with urlopen(
             request,
-            timeout=60,
+            timeout=30,
         ) as response:
             contenido = response.read()
 
@@ -164,15 +203,60 @@ def _request_json(
         except Exception:
             mensaje = contenido
 
+        mensaje_txt = str(mensaje or "")
+        headers = getattr(error, "headers", None)
+        restante = ""
+        reset_epoch = ""
+        retry_after = ""
+
+        if headers is not None:
+            restante = str(headers.get("X-RateLimit-Remaining", "")).strip()
+            reset_epoch = str(headers.get("X-RateLimit-Reset", "")).strip()
+            retry_after = str(headers.get("Retry-After", "")).strip()
+
+        es_rate_limit = (
+            error.code in {403, 429}
+            and (
+                restante == "0"
+                or "rate limit" in mensaje_txt.lower()
+                or "secondary rate limit" in mensaje_txt.lower()
+                or error.code == 429
+            )
+        )
+
+        if es_rate_limit:
+            espera = _CIRCUIT_SECONDS_RATE_LIMIT
+
+            if retry_after.isdigit():
+                espera = max(espera, int(retry_after))
+
+            if reset_epoch.isdigit():
+                espera_reset = int(reset_epoch) - int(time.time()) + 5
+                espera = max(espera, espera_reset)
+
+            _abrir_circuito(
+                espera,
+                f"GitHub API {error.code}: {mensaje_txt}",
+            )
+
+        elif 500 <= error.code <= 599:
+            _abrir_circuito(
+                _CIRCUIT_SECONDS_TRANSIENT,
+                f"GitHub API {error.code}: {mensaje_txt}",
+            )
+
         raise GitHubReaderError(
-            f"GitHub API {error.code}: {mensaje}"
+            f"GitHub API {error.code}: {mensaje_txt}"
         ) from error
 
     except URLError as error:
+        _abrir_circuito(
+            _CIRCUIT_SECONDS_TRANSIENT,
+            f"Error de conexión: {error}",
+        )
         raise GitHubReaderError(
             f"No se pudo conectar con GitHub: {error}"
         ) from error
-
 
 def _decodificar_base64(
     contenido: str,
@@ -203,9 +287,25 @@ def descargar_archivo_github(
         ruta_github
     )
 
-    metadata = _request_json(
-        _url_contenido(ruta_github)
-    )
+    ahora = time.monotonic()
+    vencimiento_404 = _NEGATIVE_CACHE.get(ruta_github, 0.0)
+    if vencimiento_404 > ahora:
+        raise GitHubReaderError(
+            f"GitHub API 404 cacheado: {ruta_github}"
+        )
+    elif vencimiento_404:
+        _NEGATIVE_CACHE.pop(ruta_github, None)
+
+    try:
+        metadata = _request_json(
+            _url_contenido(ruta_github)
+        )
+    except GitHubReaderError as error:
+        if "GitHub API 404:" in str(error):
+            _NEGATIVE_CACHE[ruta_github] = (
+                time.monotonic() + _NEGATIVE_CACHE_TTL
+            )
+        raise
 
     if metadata.get("type") != "file":
         raise GitHubReaderError(
@@ -358,8 +458,8 @@ def _leer_dataframe_github_sin_cache(
 
 
 @st.cache_data(
-    ttl=300,
-    max_entries=32,
+    ttl=270,
+    max_entries=64,
     show_spinner=False,
 )
 def _leer_dataframe_github_cache(
@@ -398,4 +498,12 @@ def leer_archivo_github(
 
 
 def limpiar_cache_github_reader() -> None:
+    """Limpia únicamente el lector GitHub, sin borrar todo st.cache_data."""
+    global _CIRCUIT_OPEN_UNTIL, _CIRCUIT_REASON
+
     _leer_dataframe_github_cache.clear()
+    _NEGATIVE_CACHE.clear()
+
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_OPEN_UNTIL = 0.0
+        _CIRCUIT_REASON = ""
