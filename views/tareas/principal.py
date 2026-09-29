@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 import re
+import html
+from pathlib import Path
+from datetime import datetime
 from io import BytesIO
 import streamlit as st
 
@@ -21,6 +24,16 @@ from utils.tareas.estilo_pantalla import (
 
 def _fmt_entero(valor: object) -> str:
     return f"{int(valor):,}".replace(",", ".")
+
+
+def _solo_nombre_controlador(valor: object) -> str:
+    """Devuelve únicamente el primer nombre visible del controlador."""
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = re.sub(r"\\s+", " ", str(valor)).strip()
+    if not texto or texto.lower() in {"nan", "none", "<na>"}:
+        return ""
+    return texto.split(" ", 1)[0]
 
 
 def _detalle_control_finalizado(contexto: dict[str, object]) -> str:
@@ -120,6 +133,205 @@ def _render_kpis(contexto: dict[str, object]) -> None:
         unsafe_allow_html=True,
     )
 
+
+_ARCHIVO_CIERRES_AGRUPACION = Path(__file__).resolve().parent / "data" / "agrupadores_finalizados.csv"
+
+
+def _leer_agrupadores_finalizados() -> pd.DataFrame:
+    columnas = ["Agrupador", "FechaHoraCierre"]
+    if not _ARCHIVO_CIERRES_AGRUPACION.exists():
+        return pd.DataFrame(columns=columnas)
+    try:
+        df = pd.read_csv(_ARCHIVO_CIERRES_AGRUPACION, dtype=str)
+        for c in columnas:
+            if c not in df.columns:
+                df[c] = ""
+        return df[columnas].copy()
+    except Exception:
+        return pd.DataFrame(columns=columnas)
+
+
+def _estado_cierres_agrupacion(
+    horas_visibilidad: int = 8,
+) -> tuple[set[str], set[str]]:
+    """Devuelve (cerrados_visibles, cerrados_expirados).
+
+    - cerrados_visibles: ya se finalizó manualmente, pero aún no pasaron 8 h.
+    - cerrados_expirados: ya pasaron 8 h y deben ocultarse de la tabla operativa.
+
+    El CSV se conserva como histórico; no se borra ningún cierre.
+    """
+    df = _leer_agrupadores_finalizados()
+    if df.empty:
+        return set(), set()
+
+    df = df.copy()
+    df["Agrupador"] = (
+        df["Agrupador"].fillna("").astype(str).str.strip()
+    )
+    df["FechaHoraCierre_dt"] = pd.to_datetime(
+        df["FechaHoraCierre"],
+        errors="coerce",
+    )
+    df = df.loc[
+        df["Agrupador"].ne("") & df["FechaHoraCierre_dt"].notna()
+    ].copy()
+
+    if df.empty:
+        return set(), set()
+
+    ahora = pd.Timestamp.now()
+    limite = ahora - pd.Timedelta(hours=horas_visibilidad)
+
+    visibles = set(
+        df.loc[df["FechaHoraCierre_dt"].gt(limite), "Agrupador"].tolist()
+    )
+    expirados = set(
+        df.loc[df["FechaHoraCierre_dt"].le(limite), "Agrupador"].tolist()
+    )
+    return visibles, expirados
+
+
+def _agrupadores_cerrados() -> set[str]:
+    """Compatibilidad: sólo devuelve los cierres que ya cumplieron 8 horas."""
+    _, expirados = _estado_cierres_agrupacion(horas_visibilidad=8)
+    return expirados
+
+
+def _agrupador_cerrado_visible(agrupador: str) -> bool:
+    """Indica si fue finalizado manualmente y sigue dentro de sus 8 h visibles."""
+    visibles, _ = _estado_cierres_agrupacion(horas_visibilidad=8)
+    return str(agrupador).strip() in visibles
+
+def _cerrar_agrupador_manual(agrupador: str) -> None:
+    agrupador = str(agrupador).strip()
+    if not agrupador:
+        return
+    _ARCHIVO_CIERRES_AGRUPACION.parent.mkdir(parents=True, exist_ok=True)
+    df = _leer_agrupadores_finalizados()
+    df = df.loc[df["Agrupador"].fillna("").astype(str).str.strip().ne(agrupador)].copy()
+    nuevo = pd.DataFrame([{
+        "Agrupador": agrupador,
+        "FechaHoraCierre": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }])
+    pd.concat([df, nuevo], ignore_index=True).to_csv(
+        _ARCHIVO_CIERRES_AGRUPACION, index=False, encoding="utf-8-sig"
+    )
+
+
+def _mapa_controladores_por_preparacion_area(
+    contexto: dict[str, object],
+) -> dict[tuple[str, str], dict[str, object]]:
+    """(Preparacion, Area) -> usuario + hora del control real.
+
+    Cruce principal: PreparacionId + ContenedorId.
+    Fallback: PreparacionId + TareaId.
+    """
+    control = contexto.get("_control_historico_raw")
+    tareas = contexto.get("_tareas_raw")
+    if not isinstance(control, pd.DataFrame) or control.empty:
+        return {}
+    if not isinstance(tareas, pd.DataFrame) or tareas.empty:
+        return {}
+
+    c = control.copy()
+    t = tareas.copy()
+    c.columns = [str(x).replace("\ufeff", "").strip() for x in c.columns]
+    t.columns = [str(x).replace("\ufeff", "").strip() for x in t.columns]
+
+    if "Id" not in c.columns or "PreparacionId" not in t.columns or "AreaDescripcion" not in t.columns:
+        return {}
+
+    def _key(serie):
+        return (
+            serie.astype("string").fillna("").str.strip()
+            .str.replace(r"\.0+$", "", regex=True)
+        )
+
+    c["_PrepKey"] = _key(c["Id"])
+    t["_PrepKey"] = _key(t["PreparacionId"])
+
+    usuario_col = "ControlContenedorUsuarioCompleto"
+    if usuario_col not in c.columns:
+        return {}
+
+    fecha_cols = [
+        "ControlContenedorFechaHoraEstado",
+        "ControlContenedorFechaHora",
+        "FechaHoraControl",
+        "FechaHoraEstado",
+        "FechaHora",
+    ]
+    fecha_col = next((x for x in fecha_cols if x in c.columns), None)
+
+    c["_Usuario"] = c[usuario_col].astype("string").fillna("").str.strip()
+    c["_FechaControl"] = (
+        pd.to_datetime(c[fecha_col], errors="coerce", dayfirst=True)
+        if fecha_col else pd.NaT
+    )
+
+    cruces = []
+
+    # 1) Principal: Preparación + Contenedor.
+    if "ContenedorId" in c.columns and "ContenedorId" in t.columns:
+        cc = c.copy()
+        tt = t.copy()
+        cc["_ContKey"] = _key(cc["ContenedorId"])
+        tt["_ContKey"] = _key(tt["ContenedorId"])
+        m = cc.loc[
+            cc["_PrepKey"].ne("") & cc["_ContKey"].ne("") & cc["_Usuario"].ne(""),
+            ["_PrepKey", "_ContKey", "_Usuario", "_FechaControl"],
+        ].merge(
+            tt.loc[
+                tt["_PrepKey"].ne("") & tt["_ContKey"].ne(""),
+                ["_PrepKey", "_ContKey", "AreaDescripcion"],
+            ],
+            on=["_PrepKey", "_ContKey"],
+            how="inner",
+        )
+        if not m.empty:
+            cruces.append(m)
+
+    # 2) Fallback: Preparación + Tarea.
+    if "TareaId" in c.columns and "TareaId" in t.columns:
+        cc = c.copy()
+        tt = t.copy()
+        cc["_TareaKey"] = _key(cc["TareaId"])
+        tt["_TareaKey"] = _key(tt["TareaId"])
+        m = cc.loc[
+            cc["_PrepKey"].ne("") & cc["_TareaKey"].ne("") & cc["_Usuario"].ne(""),
+            ["_PrepKey", "_TareaKey", "_Usuario", "_FechaControl"],
+        ].merge(
+            tt.loc[
+                tt["_PrepKey"].ne("") & tt["_TareaKey"].ne(""),
+                ["_PrepKey", "_TareaKey", "AreaDescripcion"],
+            ],
+            on=["_PrepKey", "_TareaKey"],
+            how="inner",
+        )
+        if not m.empty:
+            cruces.append(m)
+
+    if not cruces:
+        return {}
+
+    m = pd.concat(cruces, ignore_index=True, sort=False)
+    m["_Area"] = (
+        m["AreaDescripcion"].astype("string").fillna("").str.strip().str.upper()
+    )
+    m = m.loc[m["_PrepKey"].ne("") & m["_Area"].ne("") & m["_Usuario"].ne("")].copy()
+    m = (
+        m.sort_values("_FechaControl", na_position="first")
+        .drop_duplicates(["_PrepKey", "_Area"], keep="last")
+    )
+
+    return {
+        (r["_PrepKey"], r["_Area"]): {
+            "usuario": str(r["_Usuario"]).strip(),
+            "fecha_hora": r["_FechaControl"],
+        }
+        for _, r in m.iterrows()
+    }
 
 def _render_indicadores(
     contexto: dict[str, object],
@@ -228,354 +440,382 @@ def _render_indicadores(
                         perfil=perfil,
                     )
 
-    # 2) Debajo: tabla a la izquierda y gráfico de sectores a la derecha.
-    col_criticos, col_sectores = st.columns(
-        [1.65, 1.0], vertical_alignment="top"
-    )
+    # 2) Debajo: Estado de Preparaciones / Control a todo el ancho.
+    with st.container(border=True):
+        st.markdown("#### 🚨 Estado de Preparaciones / Control")
 
-    with col_criticos:
-        with st.container(border=True):
-            st.markdown("#### 🚨 Estado de Preparaciones / Control")
+        control_base = contexto["tabla_operativa"].copy()
 
-            control_base = contexto["tabla_operativa"].copy()
-
-            # La tabla de Preparaciones / Control debe mostrar solamente
-            # agrupadores que siguen operativamente abiertos (< 100%).
-            # `avance_despachos` ya excluye los despachos al 100%, mientras que
-            # `despachos_sin_iniciar` conserva los que siguen activos al 0%.
-            # De esta forma un agrupador totalmente cerrado (p. ej. CAMION MAR 1)
-            # desaparece aunque sus carros finalizados sigan dentro de la ventana
-            # histórica de `tabla_operativa`.
-            despachos_activos = set()
-            avance_activo = contexto.get("avance_despachos")
-            if isinstance(avance_activo, pd.DataFrame) and not avance_activo.empty:
-                if "Despacho" in avance_activo.columns:
-                    despachos_activos.update(
-                        avance_activo["Despacho"]
-                        .fillna("")
-                        .astype(str)
-                        .str.strip()
-                        .loc[lambda x: x.ne("")]
-                        .tolist()
-                    )
-
-            despachos_activos.update(
-                str(x).strip()
-                for x in contexto.get("despachos_sin_iniciar", [])
-                if str(x).strip()
+        # INTERPLANTA no forma parte de esta visual operativa.
+        # Se excluye sólo de Estado de Preparaciones / Control.
+        if not control_base.empty and "Despacho" in control_base.columns:
+            _despacho_control = (
+                control_base["Despacho"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
             )
+            control_base = control_base.loc[
+                ~_despacho_control.eq("INTERPLANTA")
+            ].copy()
 
-            if not control_base.empty and "Despacho" in control_base.columns:
-                control_base = control_base.loc[
-                    control_base["Despacho"]
+        # La tabla de Preparaciones / Control debe mostrar solamente
+        # agrupadores que siguen operativamente abiertos (< 100%).
+        # `avance_despachos` ya excluye los despachos al 100%, mientras que
+        # `despachos_sin_iniciar` conserva los que siguen activos al 0%.
+        # De esta forma un agrupador totalmente cerrado (p. ej. CAMION MAR 1)
+        # desaparece aunque sus carros finalizados sigan dentro de la ventana
+        # histórica de `tabla_operativa`.
+        despachos_activos = set()
+        avance_activo = contexto.get("avance_despachos")
+        if isinstance(avance_activo, pd.DataFrame) and not avance_activo.empty:
+            if "Despacho" in avance_activo.columns:
+                despachos_activos.update(
+                    avance_activo["Despacho"]
                     .fillna("")
                     .astype(str)
                     .str.strip()
-                    .isin(despachos_activos)
-                ].copy()
-
-            if control_base.empty:
-                st.info("No hay preparaciones operativas para mostrar.")
-            else:
-                # Normalización visual.
-                for col in ["Despacho", "Cliente", "Preparacion", "Area", "Carro", "Categoria"]:
-                    if col not in control_base.columns:
-                        control_base[col] = ""
-                    control_base[col] = (
-                        control_base[col]
-                        .astype("string")
-                        .fillna("")
-                        .str.strip()
-                    )
-
-                control_base["Preparacion"] = (
-                    control_base["Preparacion"]
-                    .str.replace(r"\\.0+$", "", regex=True)
+                    .loc[lambda x: x.ne("")]
+                    .tolist()
                 )
-                control_base["Area"] = control_base["Area"].str.upper()
 
-                # Filtro propio de esta tabla por Agrupador / Camioneta.
-                opciones_control = sorted(
-                    x for x in control_base["Despacho"].unique().tolist() if x
+        despachos_activos.update(
+            str(x).strip()
+            for x in contexto.get("despachos_sin_iniciar", [])
+            if str(x).strip()
+        )
+
+        # NUEVO: un agrupador al 100% sigue visible hasta que Operaciones lo cierre
+        # manualmente con "Agrupación Finalizada". tabla_operativa conserva la ventana
+        # histórica necesaria para mantenerlo en pantalla.
+        if not control_base.empty and "Despacho" in control_base.columns:
+            despachos_activos.update(
+                control_base["Despacho"].fillna("").astype(str).str.strip()
+                .loc[lambda x: x.ne("")].tolist()
+            )
+        despachos_activos.difference_update(_agrupadores_cerrados())
+
+        if not control_base.empty and "Despacho" in control_base.columns:
+            control_base = control_base.loc[
+                control_base["Despacho"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .isin(despachos_activos)
+            ].copy()
+
+        if control_base.empty:
+            st.info("No hay preparaciones operativas para mostrar.")
+        else:
+            # Normalización visual.
+            for col in ["Despacho", "Cliente", "Preparacion", "Area", "Carro", "Categoria"]:
+                if col not in control_base.columns:
+                    control_base[col] = ""
+                control_base[col] = (
+                    control_base[col]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
                 )
+
+            control_base["Preparacion"] = (
+                control_base["Preparacion"]
+                .str.replace(r"\\.0+$", "", regex=True)
+            )
+            control_base["Area"] = control_base["Area"].str.upper()
+
+            # La persona ya viene correctamente resuelta en ControlUsuario.
+            # Para la hora usamos el histórico crudo como fallback SIN tocar el usuario.
+            mapa_control_hora = _mapa_controladores_por_preparacion_area(contexto)
+
+            def _hora_desde_mapa(fila):
+                clave = (
+                    str(fila.get("Preparacion", "")).strip(),
+                    str(fila.get("Area", "")).strip().upper(),
+                )
+                dato = mapa_control_hora.get(clave)
+                if not dato:
+                    return ""
+
+                # La función puede devolver dict (versión nueva) o texto
+                # "Nombre · dd/mm HH:MM" (versión anterior).
+                if isinstance(dato, dict):
+                    fecha = dato.get("fecha_hora", pd.NaT)
+                    fecha = pd.to_datetime(fecha, errors="coerce", dayfirst=True)
+                    return fecha.strftime("%H:%M") if pd.notna(fecha) else ""
+
+                texto = str(dato)
+                coincidencias = re.findall(r"(?<!\d)([0-2]\d:[0-5]\d)(?!\d)", texto)
+                return coincidencias[-1] if coincidencias else ""
+
+            control_base["_HoraControlMapa"] = control_base.apply(
+                _hora_desde_mapa, axis=1
+            )
+
+
+            # Filtro propio de esta tabla por Agrupador / Camioneta.
+            opciones_control = sorted(
+                x for x in control_base["Despacho"].unique().tolist() if x
+            )
+            col_filtro, col_cierre = st.columns([2.2, 1.0], vertical_alignment="bottom")
+            with col_filtro:
                 filtro_control = st.selectbox(
                     "Agrupador / Camioneta",
                     ["Todos"] + opciones_control,
                     key="control_filtro_agrupador_camioneta",
                 )
-
-                if filtro_control != "Todos":
-                    control_base = control_base.loc[
-                        control_base["Despacho"].eq(filtro_control)
-                    ].copy()
-
-                def _estado_control_fila(fila):
-                    categoria = str(fila.get("Categoria", "")).strip()
-                    area = str(fila.get("Area", "")).strip().upper() or "SIN ÁREA"
-                    carro = str(fila.get("Carro", "")).strip()
-
-                    unidades = pd.to_numeric(
-                        pd.Series([fila.get("Unidades", 0)]), errors="coerce"
-                    ).fillna(0).iloc[0]
-                    unidades = int(round(float(unidades)))
-
-                    # Abreviaturas operativas.
-                    siglas_area = {
-                        "IMPORTADO": "IMP",
-                        "NACIONAL": "NAC",
-                        "SANITARIOS": "SAN",
-                        "INTERPLANTA": "INT",
-                    }
-                    area_corta = siglas_area.get(area, area[:3] if area else "S/A")
-
-                    # Mostrar SOLO símbolo + número: CARRO91 -> 91.
-                    numero_carro = re.sub(r"CARRO", "", carro, flags=re.IGNORECASE).strip()
-                    match_numero = re.search(r"\d+", numero_carro)
-                    if match_numero:
-                        numero_carro = match_numero.group(0)
-
-                    detalle_area = f"{area_corta} - {unidades} u."
-
-                    if categoria == "Finalizado":
-                        return f"✅ {detalle_area}"
-
-                    if (
-                        numero_carro
-                        and "SIN ASIGNAR" not in carro.upper()
-                        and carro.lower() != "nan"
-                    ):
-                        return f"🚧 {numero_carro} ({detalle_area})"
-
-                    return f"⏳ ({detalle_area})"
-
-                control_base["_DetalleControl"] = control_base.apply(
-                    _estado_control_fila, axis=1
+            with col_cierre:
+                ya_finalizado = (
+                    filtro_control != "Todos"
+                    and _agrupador_cerrado_visible(filtro_control)
                 )
+                cerrar_deshabilitado = filtro_control == "Todos" or ya_finalizado
 
-                # Una fila por Cliente + ID Preparación dentro de cada Despacho.
-                # Conservamos todas las áreas: controladas, tomadas y sin asignar.
-                agrupado_control = (
-                    control_base.groupby(
-                        ["Despacho", "Cliente", "Preparacion"],
-                        as_index=False,
-                        dropna=False,
-                    )
-                    .agg(
-                        Estado=(
-                            "_DetalleControl",
-                            lambda s: " · ".join(dict.fromkeys(
-                                x for x in s.astype(str).tolist() if x
-                            )),
+                if st.button(
+                    "✅ Agrupación Finalizada" if ya_finalizado else "🔒 Agrupación Finalizada",
+                    key="control_cerrar_agrupador",
+                    disabled=cerrar_deshabilitado,
+                    width="stretch",
+                    help=(
+                        "Seleccioná un agrupador para cerrarlo."
+                        if filtro_control == "Todos"
+                        else (
+                            "Este agrupador ya fue finalizado. Permanecerá visible "
+                            "hasta completar 8 horas desde el cierre."
+                            if ya_finalizado
+                            else f"Finalizar manualmente {filtro_control}"
                         )
+                    ),
+                ):
+                    _cerrar_agrupador_manual(filtro_control)
+                    st.success(
+                        f"Agrupación finalizada: {filtro_control}. "
+                        "Seguirá visible durante 8 horas."
                     )
-                )
-
-                # Orden: despacho -> cliente -> preparación numérica cuando sea posible.
-                agrupado_control["_PrepOrden"] = pd.to_numeric(
-                    agrupado_control["Preparacion"], errors="coerce"
-                )
-                agrupado_control = agrupado_control.sort_values(
-                    ["Despacho", "Cliente", "_PrepOrden", "Preparacion"],
-                    na_position="last",
-                ).drop(columns=["_PrepOrden"])
-
-                agrupado_control = agrupado_control.rename(
-                    columns={
-                        "Preparacion": "ID Preparación",
-                        "Estado": "Carros / Áreas",
-                    }
-                )
-
-                st.caption(
-                    f"{len(agrupado_control)} preparación(es) visibles"
-                    + (
-                        f" · {filtro_control}"
-                        if filtro_control != "Todos"
-                        else ""
-                    )
-                )
-
-                # Mantener visible el contexto del agrupador al abrir/expandir la tabla.
-                if filtro_control != "Todos":
-                    st.markdown(f"### 🚚 {filtro_control} — Carros en preparación")
-                else:
-                    st.markdown("### 🚚 Todos los agrupadores — Carros en preparación")
-
-                # IMPORTANTE: el modo Fullscreen de st.dataframe muestra SOLO
-                # el contenido del dataframe. Por eso incorporamos el agrupador
-                # como columna real de la tabla: así sigue visible al expandirla.
-                tabla_control_visible = agrupado_control[
-                    ["Despacho", "Cliente", "Carros / Áreas"]
-                ].copy()
-                tabla_control_visible = tabla_control_visible.rename(
-                    columns={"Despacho": "Agrupador"}
-                )
-
-                st.dataframe(
-                    tabla_control_visible,
-                    width="stretch",
-                    hide_index=True,
-                    height=430,
-                    column_config={
-                        "Agrupador": st.column_config.TextColumn(
-                            "Agrupador / Camioneta", width="medium"
-                        ),
-                        "Cliente": st.column_config.TextColumn(
-                            "Cliente", width="medium"
-                        ),
-                        "Carros / Áreas": st.column_config.TextColumn(
-                            "Carros", width="large"
-                        ),
-                    },
-                )
-
-                # Descarga operativa: respeta exactamente el filtro visible.
-                tabla_descarga = agrupado_control[
-                    ["Despacho", "Cliente", "Carros / Áreas"]
-                ].copy()
-                tabla_descarga = tabla_descarga.rename(
-                    columns={
-                        "Despacho": "Agrupador",
-                        "Carros / Áreas": "Carros",
-                    }
-                )
-
-                salida_excel = BytesIO()
-                with pd.ExcelWriter(salida_excel, engine="openpyxl") as writer:
-                    tabla_descarga.to_excel(writer, index=False, sheet_name="Carros")
-                    ws = writer.book["Carros"]
-                    ws.freeze_panes = "A2"
-                    ws.auto_filter.ref = ws.dimensions
-
-                    from openpyxl.styles import Alignment, Font, PatternFill
-
-                    encabezado_fill = PatternFill("solid", fgColor="1F4E78")
-                    encabezado_font = Font(color="FFFFFF", bold=True)
-                    for celda in ws[1]:
-                        celda.fill = encabezado_fill
-                        celda.font = encabezado_font
-                        celda.alignment = Alignment(horizontal="center", vertical="center")
-
-                    anchos = {"A": 28, "B": 38, "C": 85}
-                    for columna, ancho in anchos.items():
-                        ws.column_dimensions[columna].width = ancho
-
-                    for fila in ws.iter_rows(min_row=2):
-                        for celda in fila:
-                            celda.alignment = Alignment(vertical="top", wrap_text=True)
-
-                salida_excel.seek(0)
-                nombre_filtro = (
-                    "TODOS" if filtro_control == "Todos"
-                    else re.sub(r"[^A-Za-z0-9_-]+", "_", filtro_control.strip())
-                )
-                st.download_button(
-                    "⬇️ Descargar carros",
-                    data=salida_excel.getvalue(),
-                    file_name=f"carros_control_{nombre_filtro}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="descargar_carros_control",
-                    width="stretch",
-                )
-
-    with col_sectores:
-        with st.container(border=True):
-            st.markdown("#### 📦 Sectores en preparación")
-
-            # La torta respeta el MISMO filtro Agrupador / Camioneta de la tabla.
-            # Si se selecciona "Todos", conserva el consolidado general del contexto.
-            familias_grafico = contexto["familias_operativas"]
+                    invalidar_cache_tareas()
+                    construir_contexto_tareas.clear()
+                    st.rerun()
 
             if filtro_control != "Todos":
-                pedidos_sector = contexto["tabla_pedidos"].copy()
+                control_base = control_base.loc[
+                    control_base["Despacho"].eq(filtro_control)
+                ].copy()
 
-                # Preparaciones visibles después de aplicar el filtro del selectbox.
-                preparaciones_filtro = set(
-                    control_base["Preparacion"]
-                    .dropna()
-                    .astype("string")
-                    .str.strip()
-                    .str.replace(r"\.0+$", "", regex=True)
-                    .loc[lambda x: x.ne("")]
-                    .tolist()
+            def _datos_carro(fila):
+                categoria = str(fila.get("Categoria", "")).strip()
+                area = str(fila.get("Area", "")).strip().upper() or "SIN ÁREA"
+                carro = str(fila.get("Carro", "")).strip()
+                unidades = int(round(float(pd.to_numeric(pd.Series([fila.get("Unidades", 0)]), errors="coerce").fillna(0).iloc[0])))
+                siglas = {"IMPORTADO":"IMP", "NACIONAL":"NAC", "SANITARIOS":"SAN", "INTERPLANTA":"INT"}
+                area_corta = siglas.get(area, area[:3] if area else "S/A")
+                numero = re.sub(r"CARRO", "", carro, flags=re.IGNORECASE).strip()
+                m = re.search(r"\d+", numero); numero = m.group(0) if m else ""
+                usuario = _solo_nombre_controlador(fila.get("ControlUsuario", ""))
+                fecha = fila.get("ControlFechaHora", pd.NaT)
+                if not isinstance(fecha, pd.Timestamp):
+                    fecha = pd.to_datetime(fecha, errors="coerce", dayfirst=True)
+                hora = fecha.strftime("%H:%M") if pd.notna(fecha) else ""
+                if not hora:
+                    hora = str(fila.get("_HoraControlMapa", "") or "").strip()
+                if categoria == "Finalizado":
+                    return f"{area_corta} - {unidades} u.", "finalizado", usuario, hora
+                if numero and "SIN ASIGNAR" not in carro.upper() and carro.lower() != "nan":
+                    return f"{numero} ({area_corta} - {unidades} u.)", "curso", "", ""
+                return f"{area_corta} - {unidades} u.", "pendiente", "", ""
+
+            control_base[["_TituloCarro","_EstadoCarro","_Controlador","_HoraControl"]] = control_base.apply(
+                lambda r: pd.Series(_datos_carro(r)), axis=1
+            )
+            st.caption(f"{control_base['Preparacion'].nunique()} preparación(es) visibles" + (f" · {filtro_control}" if filtro_control != "Todos" else ""))
+
+            # KPIs del agrupador seleccionado.
+            pedidos_kpi = int(control_base["Preparacion"].nunique())
+            carros_kpi = int(len(control_base))
+            unidades_kpi = int(
+                pd.to_numeric(control_base["Unidades"], errors="coerce")
+                .fillna(0).sum()
+            )
+            controlados_kpi = int(
+                control_base["Categoria"].astype(str).eq("Finalizado").sum()
+            )
+            avance_kpi = (
+                100.0 * controlados_kpi / carros_kpi
+                if carros_kpi else 0.0
+            )
+
+            k1, k2, k3, k4 = st.columns([1, 1, 1, 1.35], gap="small")
+            with k1:
+                st.metric("📄 Pedidos", pedidos_kpi)
+            with k2:
+                st.metric("📦 Carros", carros_kpi)
+            with k3:
+                st.metric("📦 Unidades", f"{unidades_kpi:,}".replace(",", "."))
+            with k4:
+                st.markdown(
+                    f"""
+                    <div style="
+                        border:1px solid #30363d;
+                        border-radius:8px;
+                        padding:8px 12px;
+                        min-height:86px;
+                        background:#11161d;">
+                      <div style="font-size:.78rem;color:#aab3bf;font-weight:700;">
+                        Avance control
+                      </div>
+                      <div style="font-size:1.65rem;font-weight:800;line-height:1.15;margin:2px 0 5px;">
+                        {avance_kpi:.0f}%
+                      </div>
+                      <div style="height:9px;background:#202938;border-radius:20px;overflow:hidden;">
+                        <div style="
+                            width:{min(max(avance_kpi,0),100):.1f}%;
+                            height:100%;
+                            background:#22c55e;
+                            border-radius:20px;">
+                        </div>
+                      </div>
+                      <div style="font-size:.76rem;color:#aab3bf;margin-top:4px;">
+                        {controlados_kpi} / {carros_kpi} carros
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
 
-                # Segunda clave: Pedido ERP. Ayuda con tareas históricas cuyo ID de
-                # preparación puede no coincidir exactamente con Pedidos DIGIP.
-                def _pedido_key_local(valor: object) -> str:
-                    if pd.isna(valor):
-                        return ""
-                    texto = str(valor).strip()
-                    if not texto:
-                        return ""
-                    texto = texto.split("-")[0].strip()
-                    partes = texto.split()
-                    return partes[-1] if partes else texto
+            st.markdown(f"### 🚚 {filtro_control} — Carros en preparación" if filtro_control != "Todos" else "### 🚚 Todos los agrupadores — Carros en preparación")
 
-                pedidos_filtro = set()
-                if "Pedido" in control_base.columns:
-                    pedidos_filtro = {
-                        clave
-                        for clave in control_base["Pedido"].map(_pedido_key_local).tolist()
-                        if clave
-                    }
+            # Una fila visual = una PreparacionID/Pedido. El cliente puede repetirse
+            # en varias filas si tiene varias preparaciones dentro del mismo agrupador.
+            # Una tarjeta = una tarea/sector. Nunca consolidamos solo por Cliente.
+            filas_html = []
+            claves_fila = ["Preparacion", "Cliente"]
+            for (preparacion, cliente), grupo in control_base.groupby(claves_fila, sort=False, dropna=False):
+                # Seguridad: si por cualquier motivo la tabla operativa trae repetida
+                # exactamente la misma tarea, conservar una sola tarjeta.
+                if "TareaId" in grupo.columns:
+                    _tk = grupo["TareaId"].astype("string").fillna("").str.strip()
+                    con_id = grupo.loc[_tk.ne("")].drop_duplicates("TareaId", keep="last")
+                    sin_id = grupo.loc[_tk.eq("")]
+                    grupo = pd.concat([con_id, sin_id], ignore_index=False).sort_index()
 
-                mascara = pd.Series(False, index=pedidos_sector.index)
+                tarjetas, total_unidades = [], 0
+                for _, r in grupo.iterrows():
+                    titulo, estado = html.escape(str(r["_TituloCarro"])), str(r["_EstadoCarro"])
+                    usuario = html.escape(str(r["_Controlador"])) if str(r["_Controlador"]).strip() else ""
+                    hora = html.escape(str(r["_HoraControl"])) if str(r["_HoraControl"]).strip() else ""
+                    total_unidades += int(round(float(pd.to_numeric(pd.Series([r.get("Unidades",0)]), errors="coerce").fillna(0).iloc[0])))
+                    if estado == "finalizado":
+                        detalle = f'<div class="carro-control">👤 {usuario}</div>' if usuario else '<div class="carro-control sin-dato">👤 Sin dato</div>'
+                        if hora: detalle += f'<div class="carro-hora">🕒 {hora}</div>'
+                        tarjetas.append(f'<div class="carro-card finalizado"><div class="carro-titulo">✅ {titulo}</div>{detalle}</div>')
+                    else:
+                        icono = "🕒" if estado == "curso" else "⏳"
+                        tarjetas.append(f'<div class="carro-card curso"><div class="carro-titulo">{icono} {titulo}</div><div class="carro-control sin-dato">—</div></div>')
 
-                if "PreparacionID" in pedidos_sector.columns:
-                    prep_pedidos = (
-                        pedidos_sector["PreparacionID"]
-                        .astype("string")
-                        .str.strip()
-                        .str.replace(r"\.0+$", "", regex=True)
-                    )
-                    mascara = mascara | prep_pedidos.isin(preparaciones_filtro)
+                prep_visible = html.escape(str(preparacion)) if str(preparacion).strip() else "—"
+                cliente_visible = html.escape(str(cliente))
+                filas_html.append(
+                    '<div class="control-row">'
+                    + f'<div class="control-prep">{prep_visible}</div>'
+                    + f'<div class="control-cliente">{cliente_visible}</div>'
+                    + f'<div class="control-carros">{"".join(tarjetas)}</div>'
+                    + f'<div class="control-total">{len(grupo)}</div>'
+                    + f'<div class="control-total">{total_unidades:,}</div></div>'
+                )
 
-                if pedidos_filtro and "Pedido" in pedidos_sector.columns:
-                    mascara = mascara | pedidos_sector["Pedido"].map(
-                        _pedido_key_local
-                    ).isin(pedidos_filtro)
+            st.markdown("""
+<style>
+.control-grid{border:1px solid #30363d;border-radius:8px;overflow:hidden;margin:.35rem 0 .65rem}.control-head,.control-row{display:grid;grid-template-columns:9% 16% 1fr 7% 8%;align-items:stretch}.control-head{background:#1d222b;font-weight:700;color:#b9c0ca;font-size:.83rem}.control-head>div,.control-row>div{padding:8px 10px;border-right:1px solid #30363d;border-bottom:1px solid #30363d}.control-row:last-child>div{border-bottom:0}.control-head>div:last-child,.control-row>div:last-child{border-right:0}.control-prep,.control-cliente{font-weight:700;display:flex;align-items:center}.control-prep{color:#8fd0ff}.control-carros{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.control-total{display:flex;align-items:center;justify-content:center;font-weight:700}.carro-card{min-width:150px;padding:6px 10px;border-radius:7px;background:#151a21;border:1px solid #39414c;line-height:1.15}.carro-card.finalizado{border-color:#168c4b}.carro-titulo{font-weight:700;font-size:.84rem;white-space:nowrap}.carro-control{font-size:.76rem;margin-top:4px;color:#8fd0ff}.carro-hora{font-size:.74rem;color:#9aa4b2;margin-top:1px}.sin-dato{color:#8b949e}
+</style><div class="control-grid"><div class="control-head"><div>Preparación</div><div>Cliente</div><div>Carros (sector - unidades)</div><div>Total carros</div><div>Total unidades</div></div>""" + "".join(filas_html) + "</div>", unsafe_allow_html=True)
 
-                pedidos_sector = pedidos_sector.loc[mascara].copy()
+            # Descarga agrupada: una fila por preparación, sin IDs visibles.
+            detalle_descarga = control_base.copy()
+            detalle_descarga["Agrupador"] = detalle_descarga["Despacho"].astype("string").fillna("").str.strip()
+            detalle_descarga["ID Preparación"] = detalle_descarga["Preparacion"].astype("string").fillna("").str.strip()
+            detalle_descarga["Sector"] = detalle_descarga["Area"].astype("string").fillna("").str.strip().str.upper()
+            detalle_descarga["Unidades"] = pd.to_numeric(detalle_descarga["Unidades"], errors="coerce").fillna(0).round().astype(int)
+            detalle_descarga["Controló"] = detalle_descarga["_Controlador"].map(_solo_nombre_controlador)
+            detalle_descarga["Hora control"] = detalle_descarga["_HoraControl"].astype("string").fillna("").str.strip()
 
-                # Evitar doble conteo si una fila coincidió por Preparación y Pedido.
-                clave_dedupe = [
-                    c for c in ["Pedido", "PreparacionID"]
-                    if c in pedidos_sector.columns
-                ]
-                if clave_dedupe:
-                    pedidos_sector = pedidos_sector.drop_duplicates(
-                        subset=clave_dedupe, keep="last"
-                    )
+            abreviar_sector = {
+                "IMPORTADO": "IMP", "NACIONAL": "NAC",
+                "SANITARIOS": "SAN", "SANITARIO": "SAN",
+                "INTERPLANTA": "INT",
+            }
 
-                columnas_sector = [
-                    c for c in [
-                        "IMPORTADO", "Importado", "NACIONAL", "Nacional",
-                        "BACHAS", "Bachas", "BLISTER", "Blister",
-                        "SANITARIOS", "Sanitarios", "REPUESTOS", "Repuestos",
-                        "FLEXIBLES", "Flexibles", "ACCESORIOS", "Accesorios",
-                        "VARIOS", "Varios",
-                    ]
-                    if c in pedidos_sector.columns
-                ]
+            def _detalle_carro(fila):
+                sector = abreviar_sector.get(
+                    str(fila["Sector"]).strip().upper(),
+                    str(fila["Sector"]).strip().upper()[:3]
+                )
+                usuario = str(fila["Controló"]).strip()
+                hora = str(fila["Hora control"]).strip()
 
-                if columnas_sector and not pedidos_sector.empty:
-                    familias_grafico = (
-                        pedidos_sector[columnas_sector]
-                        .apply(pd.to_numeric, errors="coerce")
-                        .fillna(0)
-                        .sum()
-                        .sort_values(ascending=False)
-                    )
-                    familias_grafico = familias_grafico.loc[
-                        familias_grafico.gt(0)
-                    ]
+                # Replicar en Excel la misma lectura visual de las tarjetas.
+                controlado = bool(usuario)
+                if controlado:
+                    texto = f"✅ {sector} - {int(fila['Unidades'])} u. · 👤 {usuario}"
+                    if hora:
+                        texto += f" · 🕒 {hora}"
                 else:
-                    familias_grafico = pd.Series(dtype="float64")
+                    texto = f"🕒 {sector} - {int(fila['Unidades'])} u. · —"
 
-            grafico_sectorizaciones(
-                familias_grafico,
-                perfil=perfil,
+                return texto
+
+            detalle_descarga["_DetalleCarro"] = detalle_descarga.apply(_detalle_carro, axis=1)
+
+            tabla_descarga = (
+                detalle_descarga
+                .groupby(["Agrupador", "ID Preparación", "Cliente"], as_index=False, sort=False)
+                .agg({
+                    "_DetalleCarro": lambda x: " - ".join(str(v).strip() for v in x if str(v).strip()),
+                    "Unidades": "sum",
+                })
+                .rename(columns={"_DetalleCarro": "Carros / Control", "Unidades": "Total unidades"})
+            )
+
+            # ID Preparación sólo agrupa; no se muestra.
+            tabla_descarga = tabla_descarga[
+                ["Agrupador", "Cliente", "Carros / Control", "Total unidades"]
+            ].copy()
+
+
+            salida_excel = BytesIO()
+            with pd.ExcelWriter(salida_excel, engine="openpyxl") as writer:
+                tabla_descarga.to_excel(writer, index=False, sheet_name="Carros")
+                ws = writer.book["Carros"]
+                ws.freeze_panes = "A2"
+                ws.auto_filter.ref = ws.dimensions
+
+                from openpyxl.styles import Alignment, Font, PatternFill
+
+                encabezado_fill = PatternFill("solid", fgColor="1F4E78")
+                encabezado_font = Font(color="FFFFFF", bold=True)
+                for celda in ws[1]:
+                    celda.fill = encabezado_fill
+                    celda.font = encabezado_font
+                    celda.alignment = Alignment(horizontal="center", vertical="center")
+
+                anchos = {"A": 28, "B": 42, "C": 95, "D": 16}
+                for columna, ancho in anchos.items():
+                    ws.column_dimensions[columna].width = ancho
+
+                for fila in ws.iter_rows(min_row=2):
+                    for celda in fila:
+                        celda.alignment = Alignment(vertical="top", wrap_text=True)
+
+            salida_excel.seek(0)
+            nombre_filtro = (
+                "TODOS" if filtro_control == "Todos"
+                else re.sub(r"[^A-Za-z0-9_-]+", "_", filtro_control.strip())
+            )
+            st.download_button(
+                "⬇️ Descargar carros",
+                data=salida_excel.getvalue(),
+                file_name=f"carros_control_{nombre_filtro}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="descargar_carros_control",
+                width="stretch",
             )
 
 
@@ -1014,7 +1254,11 @@ def _render_fragmento_operativo(perfil: str) -> None:
             fuentes["articulos"],
             fuentes["volumetria"],
             fuentes.get("control_historico"),
+            fuentes.get("preparaciones_historico"),
         )
+        # Fuentes crudas necesarias para asociar cada control al carro/sector correcto.
+        contexto["_control_historico_raw"] = fuentes.get("control_historico")
+        contexto["_tareas_raw"] = fuentes.get("tareas")
 
     mostrar_info_dataframe("Tabla pedidos", contexto["tabla_pedidos"])
     mostrar_info_dataframe("Tabla tareas", contexto["tabla_tareas"])

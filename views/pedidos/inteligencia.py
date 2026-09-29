@@ -6,18 +6,6 @@ import streamlit as st
 import altair as alt
 from models.inteligencia_operativa import construir_inteligencia_operativa, simular_camionetas_clientes, OBJETIVO_CONTROL_DIARIO
 
-try:
-    from utils.google_sheets import (
-        leer_planning_coordinacion, guardar_planning_coordinacion, leer_planning_historial
-    )
-except Exception:
-    try:
-        from google_sheets import (
-            leer_planning_coordinacion, guardar_planning_coordinacion, leer_planning_historial
-        )
-    except Exception:
-        leer_planning_coordinacion = guardar_planning_coordinacion = leer_planning_historial = None
-
 
 def _fmt(n, dec=0):
     try:
@@ -98,7 +86,7 @@ def render_inteligencia(
     tabla_personal: pd.DataFrame | None = None,
     tabla_transmisiones: pd.DataFrame | None = None,
 ) -> None:
-    st.subheader("🧠 Inteligencia operativa")
+    st.subheader("📅 Planificación")
     st.caption("Planning diario + radiografía de demanda: zona obligatoria, camionetas simuladas por cliente completo, zonas semanales, carga flexible, Sanitarios y EASY. La antigüedad y prioridad se calculan desde la fecha de transmisión al WMS, no desde la creación del pedido.")
 
     # EASY independiente. OFF lo excluye de la lectura general, pero su tabla sigue visible.
@@ -112,22 +100,12 @@ def render_inteligencia(
     )
     st.session_state["io_v3_easy_activo"] = easy_activo
 
-    # Decisiones persistidas del planning. Si Google no responde, el tablero sigue con reglas automáticas.
-    coordinaciones = pd.DataFrame()
-    error_coord = None
-    if leer_planning_coordinacion is not None:
-        try:
-            coordinaciones = leer_planning_coordinacion()
-        except Exception as e:
-            error_coord = str(e)
-
     io = construir_inteligencia_operativa(
         datos_dashboard,
         tabla_detalle_dashboard,
         personal=tabla_personal,
         transmisiones=tabla_transmisiones,
         easy_activo=easy_activo,
-        coordinaciones=coordinaciones,
     )
     if io.get("vacio"):
         st.info(io.get("mensaje")); return
@@ -136,13 +114,11 @@ def render_inteligencia(
     # V5 — CALENDARIO SEMANAL DE CAPACIDAD
     # ==========================================================
     st.markdown("## 📅 Planning semanal de capacidad")
-    st.caption("Planning maestro de preparación y entrega: Zona se agenda por cronograma; EASY toma la fecha del agrupador (EASY DD-MM) y reserva el 100% en el primer día de sus 48 h previas; RETIRA normal, DIARIOS, URGENTE y URGENTES 2 ocupan automáticamente el día actual; RETIRA normal, DIARIOS y URGENTES consumen HOY; EASY, Expresos agrupados y RETIRA Full Loza pueden quedar coordinados con fecha persistente. El backlog sin agrupar queda visible aparte. Objetivo: 850 líneas L-V y 567 el sábado.")
+    st.caption("Planning maestro de preparación y entrega: Zona se agenda por cronograma; EASY toma la fecha del agrupador (EASY DD-MM) y reserva el 100% en el primer día de sus 48 h previas; RETIRA normal, DIARIOS, URGENTE y URGENTES 2 ocupan automáticamente el día actual; RETIRA Full Loza y Expresos agrupados quedan movibles. Objetivo: 850 líneas L-V y 567 el sábado.")
     sem = io.get("calendario_semanal", {})
     cal = sem.get("calendario", pd.DataFrame()).copy()
     exp_agr = sem.get("expresos_agrupados", pd.DataFrame()).copy()
     ret_agr = sem.get("retira_agrupados", pd.DataFrame()).copy()
-    easy_agr = sem.get("easy_agrupados", pd.DataFrame()).copy()
-    backlog = sem.get("backlog_sin_agrupar", pd.DataFrame()).copy()
 
     # Asignación virtual por FECHA concreta.
     # No usamos sólo el nombre del día porque el horizonte contiene, por ejemplo,
@@ -160,136 +136,37 @@ def render_inteligencia(
         mapa_fechas = {}
         opciones_fecha = ["Sin asignar"]
 
-    # EASY: regla automática de 48 h + posibilidad de adelantar/reprogramar y persistir la decisión.
-    if error_coord:
-        st.warning("El planning se muestra con reglas automáticas porque no se pudo leer la coordinación guardada en Google Sheets.")
-
-    if not cal.empty and easy_agr is not None and not easy_agr.empty:
-        with st.expander("🏬 Coordinar EASY · fecha sugerida vs. fecha acordada", expanded=True):
-            st.caption("La fecha sugerida sigue siendo el primer día de las 48 h previas. Si coordinás otra fecha, esa decisión queda guardada y manda sobre la regla automática.")
-            for i, r in easy_agr.iterrows():
-                ref = str(r.get("Referencia", f"EASY {i+1}"))
-                f_ent = pd.to_datetime(r.get("FechaEntrega"), errors="coerce")
-                f_sug = pd.to_datetime(r.get("FechaSugerida"), errors="coerce")
-                f_coord = pd.to_datetime(r.get("FechaCoordinada"), errors="coerce")
-                c1,c2,c3,c4 = st.columns([3.6,1.55,1.55,1.0], vertical_alignment="center")
-                ent_txt = f_ent.strftime("%d/%m") if pd.notna(f_ent) else "—"
-                sug_txt = f_sug.strftime("%d/%m") if pd.notna(f_sug) else "—"
-                manual = " · ✍️ coordinado" if bool(r.get("EsManual", False)) else " · automático"
-                c1.markdown(f"**{ref}** · entrega **{ent_txt}** · sugerido **{sug_txt}** · {_fmt(r.get('Líneas',0))} L / {_fmt(r.get('Unidades',0))} U{manual}")
-
-                key_easy = f"io_easy_coord_{i}_{ref}"
-                default_label = "Sin asignar"
-                if pd.notna(f_coord):
-                    for lab, ff in mapa_fechas.items():
-                        if pd.Timestamp(ff).normalize() == pd.Timestamp(f_coord).normalize():
-                            default_label = lab; break
-                idx_default = opciones_fecha.index(default_label) if default_label in opciones_fecha else 0
-                seleccion = c2.selectbox("Preparar", opciones_fecha, index=idx_default, key=key_easy, label_visibility="collapsed")
-                obs = c3.text_input("Observación", key=f"io_easy_obs_{i}_{ref}", placeholder="Opcional", label_visibility="collapsed")
-                if c4.button("💾 Guardar", key=f"io_easy_save_{i}_{ref}", use_container_width=True):
-                    if guardar_planning_coordinacion is None:
-                        st.error("No está disponible el módulo de persistencia de Google Sheets.")
-                    elif seleccion == "Sin asignar":
-                        st.error("Elegí una fecha concreta de preparación antes de guardar.")
-                    else:
-                        try:
-                            usuario = str(st.session_state.get("usuario_nombre") or st.session_state.get("usuario") or st.session_state.get("username") or "Operación")
-                            fecha_obj = mapa_fechas[seleccion]
-                            guardar_planning_coordinacion({
-                                "Tipo": "EASY", "Referencia": ref,
-                                "FechaEntrega": f_ent.strftime("%Y-%m-%d") if pd.notna(f_ent) else "",
-                                "FechaSugerida": f_sug.strftime("%Y-%m-%d") if pd.notna(f_sug) else "",
-                                "FechaCoordinada": pd.Timestamp(fecha_obj).strftime("%Y-%m-%d"),
-                                "Lineas": r.get("Líneas",0), "Unidades": r.get("Unidades",0),
-                                "Estado": "PLANIFICADO", "Usuario": usuario, "Observacion": obs,
-                            })
-                            st.success(f"{ref}: preparación guardada para {pd.Timestamp(fecha_obj).strftime('%d/%m')}.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"No se pudo guardar la coordinación: {e}")
-
-            if leer_planning_historial is not None:
-                with st.popover("🕘 Ver historial de coordinación"):
-                    try:
-                        hist = leer_planning_historial()
-                        if hist.empty:
-                            st.caption("Todavía no hay cambios registrados.")
-                        else:
-                            h = hist[hist.get("Tipo", "").fillna("").astype(str).str.upper().eq("EASY")].copy()
-                            cols_h = [c for c in ["Fecha","Referencia","FechaAnterior","FechaNueva","Accion","Usuario","Observacion"] if c in h.columns]
-                            st.dataframe(h[cols_h].tail(30).iloc[::-1], hide_index=True, width="stretch")
-                    except Exception as e:
-                        st.caption(f"No se pudo leer el historial: {e}")
-
     if not cal.empty and exp_agr is not None and not exp_agr.empty:
-        with st.expander("⚡ Coordinar Expresos ya agrupados", expanded=True):
-            st.caption("Acá aparece lo que ya está agrupado en DIGIP pero todavía no inició. La fecha guardada queda persistida y consume capacidad del planning.")
+        with st.expander("⚡ Ubicar camionetas Expresos ya agrupadas", expanded=True):
             for i, r in exp_agr.iterrows():
                 nombre = str(r.get("AgrupadorReal", f"EXP {i+1}"))
-                f_coord = pd.to_datetime(r.get("FechaCoordinada"), errors="coerce")
-                c1,c2,c3,c4 = st.columns([3.4,1.45,1.55,1.0], vertical_alignment="center")
-                estado_txt = " · ✍️ coordinado" if pd.notna(f_coord) else " · pendiente de coordinar"
-                c1.markdown(f"**{nombre}** · {_fmt(r.get('Pedidos',0))} pedidos · {_fmt(r.get('Líneas',0))} L / {_fmt(r.get('Unidades',0))} U · {_fmt(r.get('m³',0),2)} m³{estado_txt}")
-                default_label = "Sin asignar"
-                if pd.notna(f_coord):
-                    for lab, ff in mapa_fechas.items():
-                        if pd.Timestamp(ff).normalize() == pd.Timestamp(f_coord).normalize(): default_label=lab; break
-                idx = opciones_fecha.index(default_label) if default_label in opciones_fecha else 0
-                fecha_sel = c2.selectbox("Preparar", opciones_fecha, index=idx, key=f"io_v7_exp_fecha_{i}_{nombre}", label_visibility="collapsed")
-                obs = c3.text_input("Observación", key=f"io_v7_exp_obs_{i}_{nombre}", placeholder="Opcional", label_visibility="collapsed")
-                if c4.button("💾 Guardar", key=f"io_v7_exp_save_{i}_{nombre}", use_container_width=True):
-                    if guardar_planning_coordinacion is None: st.error("No está disponible Google Sheets.")
-                    elif fecha_sel == "Sin asignar": st.error("Elegí una fecha concreta.")
-                    else:
-                        try:
-                            usuario=str(st.session_state.get("usuario_nombre") or st.session_state.get("usuario") or st.session_state.get("username") or "Operación")
-                            fo=mapa_fechas[fecha_sel]
-                            guardar_planning_coordinacion({"Tipo":"EXPRESOS","Referencia":nombre,"FechaCoordinada":fo.strftime("%Y-%m-%d"),"Lineas":r.get("Líneas",0),"Unidades":r.get("Unidades",0),"Estado":"PLANIFICADO","Usuario":usuario,"Observacion":obs})
-                            st.success(f"{nombre}: guardado para {fo.strftime('%d/%m')}."); st.rerun()
-                        except Exception as e: st.error(f"No se pudo guardar: {e}")
+                c1,c2,c3 = st.columns([3.4,1.3,1.8], vertical_alignment="center")
+                c1.markdown(f"**{nombre}** · {_fmt(r.get('Pedidos',0))} pedidos · {_fmt(r.get('Líneas',0))} líneas · {_fmt(r.get('m³',0),2)} m³")
+                key = "io_v56_exp_fecha_" + str(i)
+                fecha_sel = c2.selectbox("Preparar", opciones_fecha, key=key, label_visibility="collapsed")
+                c3.caption("No iniciado · movible")
+                if fecha_sel != "Sin asignar":
+                    fecha_obj = mapa_fechas[fecha_sel]
+                    asignaciones[nombre] = fecha_obj.strftime("%Y-%m-%d")
+                    mask_fecha = cal["Fecha"].eq(fecha_obj)
+                    cal.loc[mask_fecha, "Expresos"] += float(r.get("Líneas",0))
+                    if "Expresos Unid." in cal.columns:
+                        cal.loc[mask_fecha, "Expresos Unid."] += float(r.get("Unidades",0))
 
-    # RETIRA normal/DIARIOS/URGENTES consumen HOY automáticamente. Sólo RETIRA Full Loza se coordina.
+    # Sólo RETIRA Full Loza queda movible. El RETIRA normal ya ocupa automáticamente HOY.
     if not cal.empty and ret_agr is not None and not ret_agr.empty:
-        with st.expander("🚽 Coordinar RETIRA Full Loza", expanded=False):
+        with st.expander("🚽 Ubicar RETIRA Full Loza", expanded=False):
             for i, r in ret_agr.iterrows():
                 nombre = str(r.get("AgrupadorReal", f"RETIRA {i+1}"))
-                f_coord = pd.to_datetime(r.get("FechaCoordinada"), errors="coerce")
-                c1,c2,c3,c4 = st.columns([3.4,1.45,1.55,1.0], vertical_alignment="center")
-                c1.markdown(f"**{nombre}** · {_fmt(r.get('Pedidos',0))} pedidos · {_fmt(r.get('Líneas',0))} L / {_fmt(r.get('Unidades',0))} U")
-                default_label="Sin asignar"
-                if pd.notna(f_coord):
-                    for lab,ff in mapa_fechas.items():
-                        if pd.Timestamp(ff).normalize()==pd.Timestamp(f_coord).normalize(): default_label=lab; break
-                idx=opciones_fecha.index(default_label) if default_label in opciones_fecha else 0
-                fecha_sel=c2.selectbox("Preparar",opciones_fecha,index=idx,key=f"io_v7_ret_fecha_{i}_{nombre}",label_visibility="collapsed")
-                obs=c3.text_input("Observación",key=f"io_v7_ret_obs_{i}_{nombre}",placeholder="Opcional",label_visibility="collapsed")
-                if c4.button("💾 Guardar",key=f"io_v7_ret_save_{i}_{nombre}",use_container_width=True):
-                    if guardar_planning_coordinacion is None: st.error("No está disponible Google Sheets.")
-                    elif fecha_sel=="Sin asignar": st.error("Elegí una fecha concreta.")
-                    else:
-                        try:
-                            usuario=str(st.session_state.get("usuario_nombre") or st.session_state.get("usuario") or st.session_state.get("username") or "Operación")
-                            fo=mapa_fechas[fecha_sel]
-                            guardar_planning_coordinacion({"Tipo":"RETIRA","Referencia":nombre,"FechaCoordinada":fo.strftime("%Y-%m-%d"),"Lineas":r.get("Líneas",0),"Unidades":r.get("Unidades",0),"Estado":"PLANIFICADO","Usuario":usuario,"Observacion":obs})
-                            st.success(f"{nombre}: guardado para {fo.strftime('%d/%m')}."); st.rerun()
-                        except Exception as e: st.error(f"No se pudo guardar: {e}")
-
-    # Foto global: TODO el pendiente real, esté o no planificado. Incluye HOY.
-    dias_pend = float(io.get("dias_pendientes", 0) or 0)
-    g1,g2,g3,g4 = st.columns(4)
-    g1.metric("📦 Pendiente total", f"{_fmt(io.get('carga_lineas',0))} líneas")
-    g2.metric("Unidades pendientes", _fmt(io.get("carga_unidades",0)))
-    g3.metric("⏱️ Días equivalentes", f"{_fmt(dias_pend,1)} días", help="Total de líneas pendientes / 850 líneas por jornada. Incluye el día actual y no depende de si la carga ya está planificada.")
-    g4.metric("Objetivo diario", f"{_fmt(OBJETIVO_CONTROL_DIARIO)} líneas")
-
-    if backlog is not None and not backlog.empty:
-        st.markdown("### 📦 Pendiente todavía sin agrupar")
-        st.caption("Visibilidad del mundo que todavía está detrás de DIGIP. No se fuerza a una fecha futura hasta que exista una agrupación/decisión operativa.")
-        b=backlog.copy()
-        total_b={"Tipo":"TOTAL SIN AGRUPAR","Pedidos":int(pd.to_numeric(b.get("Pedidos",0),errors="coerce").fillna(0).sum()),"Líneas":int(pd.to_numeric(b.get("Líneas",0),errors="coerce").fillna(0).sum()),"Unidades":int(pd.to_numeric(b.get("Unidades",0),errors="coerce").fillna(0).sum()),"m³":round(float(pd.to_numeric(b.get("m³",0),errors="coerce").fillna(0).sum()),2),"Antig. máx.":int(pd.to_numeric(b.get("Antig. máx.",0),errors="coerce").fillna(0).max())}
-        b=pd.concat([b,pd.DataFrame([total_b])],ignore_index=True)
-        st.dataframe(b,hide_index=True,width="stretch",column_config={"Pedidos":st.column_config.NumberColumn(format="%d"),"Líneas":st.column_config.NumberColumn(format="%d"),"Unidades":st.column_config.NumberColumn(format="%d"),"m³":st.column_config.NumberColumn(format="%.2f"),"Antig. máx.":st.column_config.NumberColumn(format="%d días")})
+                c1,c2 = st.columns([4.5,1.5], vertical_alignment="center")
+                c1.markdown(f"**{nombre}** · {_fmt(r.get('Pedidos',0))} pedidos · {_fmt(r.get('Líneas',0))} líneas")
+                fecha_sel = c2.selectbox("Preparar", opciones_fecha, key=f"io_v56_ret_fecha_{i}", label_visibility="collapsed")
+                if fecha_sel != "Sin asignar":
+                    fecha_obj = mapa_fechas[fecha_sel]
+                    mask_fecha = cal["Fecha"].eq(fecha_obj)
+                    cal.loc[mask_fecha, "RETIRA"] += float(r.get("Líneas",0))
+                    if "RETIRA Unid." in cal.columns:
+                        cal.loc[mask_fecha, "RETIRA Unid."] += float(r.get("Unidades",0))
 
     if not cal.empty:
         cal["Total"] = cal[[c for c in ["Zona","EASY","Expresos","RETIRA","Prioritarios"] if c in cal.columns]].sum(axis=1).round(1)

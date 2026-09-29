@@ -568,6 +568,134 @@ def enriquecer_tareas_con_detalle(
     return tareas, alertas_df
 
 
+
+def enriquecer_control_por_tarea(
+    tabla_tareas: pd.DataFrame,
+    df_preparaciones: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Asocia el control real a una única tarea/carro.
+
+    Informe Tareas (ya normalizado por construir_tabla_tareas):
+      Preparacion + ContenedorId + TareaId
+
+    Filtrar Preparaciones:
+      Id + ContenedorId + TareaId + usuario/hora de control
+
+    Cruce principal: Preparacion + ContenedorId.
+    Fallback: Preparacion + TareaId.
+    """
+    if tabla_tareas is None or tabla_tareas.empty:
+        return tabla_tareas
+
+    tareas = tabla_tareas.copy()
+    tareas["ControlUsuario"] = ""
+    tareas["ControlFechaHora"] = pd.NaT
+
+    if df_preparaciones is None or df_preparaciones.empty:
+        return tareas
+
+    hist = df_preparaciones.copy()
+    hist.columns = [str(x).replace("\\ufeff", "").strip() for x in hist.columns]
+
+    requeridas = {
+        "Id",
+        "ControlContenedorUsuarioCompleto",
+        "ControlContenedorFechaHoraEstado",
+    }
+    if not requeridas.issubset(hist.columns):
+        return tareas
+    if "Preparacion" not in tareas.columns:
+        return tareas
+
+    def key(s):
+        return (
+            s.astype("string").fillna("").str.strip()
+            .str.replace(r"\\.0+$", "", regex=True)
+        )
+
+    tareas["_PrepControl"] = key(tareas["Preparacion"])
+    hist["_PrepControl"] = key(hist["Id"])
+    hist["_UsuarioControl"] = (
+        hist["ControlContenedorUsuarioCompleto"]
+        .astype("string").fillna("").str.strip()
+    )
+    hist["_FechaControl"] = pd.to_datetime(
+        hist["ControlContenedorFechaHoraEstado"],
+        errors="coerce",
+        dayfirst=True,
+    )
+    hist = hist.loc[
+        hist["_PrepControl"].ne("") &
+        hist["_UsuarioControl"].ne("")
+    ].copy()
+
+    # Principal: preparación + contenedor.
+    if "ContenedorId" in tareas.columns and "ContenedorId" in hist.columns:
+        tareas["_ContControl"] = key(tareas["ContenedorId"])
+        hist["_ContControl"] = key(hist["ContenedorId"])
+
+        ctrl = (
+            hist.loc[
+                hist["_ContControl"].ne(""),
+                ["_PrepControl", "_ContControl", "_UsuarioControl", "_FechaControl"],
+            ]
+            .sort_values("_FechaControl")
+            .drop_duplicates(["_PrepControl", "_ContControl"], keep="last")
+        )
+
+        tareas = tareas.merge(
+            ctrl,
+            on=["_PrepControl", "_ContControl"],
+            how="left",
+            validate="many_to_one",
+        )
+        tareas["ControlUsuario"] = (
+            tareas["_UsuarioControl"].astype("string").fillna("").str.strip()
+        )
+        tareas["ControlFechaHora"] = tareas["_FechaControl"]
+        tareas = tareas.drop(
+            columns=["_UsuarioControl", "_FechaControl"],
+            errors="ignore",
+        )
+
+    # Fallback: preparación + TareaId, sólo donde no encontró contenedor.
+    if "TareaId" in tareas.columns and "TareaId" in hist.columns:
+        tareas["_TareaControl"] = key(tareas["TareaId"])
+        hist["_TareaControl"] = key(hist["TareaId"])
+
+        ctrl_t = (
+            hist.loc[
+                hist["_TareaControl"].ne(""),
+                ["_PrepControl", "_TareaControl", "_UsuarioControl", "_FechaControl"],
+            ]
+            .sort_values("_FechaControl")
+            .drop_duplicates(["_PrepControl", "_TareaControl"], keep="last")
+        )
+
+        falta = tareas["ControlUsuario"].astype("string").fillna("").str.strip().eq("")
+        if falta.any():
+            aux = tareas.loc[
+                falta, ["_PrepControl", "_TareaControl"]
+            ].copy()
+            aux["_idx_original"] = aux.index
+            aux = aux.merge(
+                ctrl_t,
+                on=["_PrepControl", "_TareaControl"],
+                how="left",
+                validate="many_to_one",
+            ).set_index("_idx_original")
+
+            tareas.loc[aux.index, "ControlUsuario"] = (
+                aux["_UsuarioControl"].astype("string").fillna("").str.strip()
+            )
+            tareas.loc[aux.index, "ControlFechaHora"] = aux["_FechaControl"]
+
+    return tareas.drop(
+        columns=["_PrepControl", "_ContControl", "_TareaControl"],
+        errors="ignore",
+    )
+
+
 @st.cache_data(show_spinner="Preparando el centro de control...")
 def construir_contexto_tareas(
     df_tareas: pd.DataFrame,
@@ -577,6 +705,7 @@ def construir_contexto_tareas(
     df_articulos: pd.DataFrame,
     df_volumetria: pd.DataFrame,
     df_control: pd.DataFrame | None = None,
+    df_preparaciones: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     tabla_pedidos = construir_tabla_pedidos_tareas(
         df_pedidos,
@@ -592,6 +721,12 @@ def construir_contexto_tareas(
         df_clientes,
     )
 
+    # Trazabilidad de Control por carro/tarea.
+    tabla_tareas = enriquecer_control_por_tarea(
+        tabla_tareas,
+        df_preparaciones,
+    )
+
     # Enriquecimiento a nivel TAREA: evita repetir TotalUnidades/TotalSKUs
     # del pedido en cada sector/preparación.
     tabla_tareas, alertas_sectorizacion = enriquecer_tareas_con_detalle(
@@ -601,6 +736,13 @@ def construir_contexto_tareas(
     )
 
     tabla_operativa = obtener_tabla_operativa(tabla_tareas)
+
+    # La trazabilidad de control ya fue incorporada a tabla_tareas antes de
+    # construir tabla_operativa. No reagrupar por Preparacion+Area: una misma
+    # preparación puede tener más de una tarea del mismo sector.
+    for _col, _default in [("ControlUsuario", ""), ("ControlFechaHora", pd.NaT)]:
+        if _col not in tabla_operativa.columns:
+            tabla_operativa[_col] = _default
 
     # ------------------------------------------------------
     # COMPATIBILIDAD DEL RESUMEN OPERATIVO
@@ -829,4 +971,8 @@ def construir_contexto_tareas(
         "unidades_carros_finalizados": unidades_carros_finalizados,
         "familias_operativas": familias_operativas,
         "alertas_sectorizacion": alertas_sectorizacion,
+        # Fuentes crudas para trazabilidad visual del control.
+        # No modifican los cálculos del contexto.
+        "_control_historico_raw": df_preparaciones,
+        "_tareas_raw": df_tareas,
     }

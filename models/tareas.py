@@ -9,100 +9,6 @@ import pandas as pd
 
 DIAS_TABLERO = 3
 
-# Agrupadores/gestiones que no deben visualizarse en el tablero operativo.
-DESPACHOS_EXCLUIDOS = {"INTERPLANTA"}
-
-
-
-def _filtrar_ciclo_actual_despachos(tabla):
-    """
-    Mantiene únicamente el CICLO REAL más reciente de cada agrupador.
-
-    Regla principal:
-    - Para despachos normales, DespachoId identifica el viaje/ciclo real.
-      Un mismo DespachoId puede empezar un día y terminar al siguiente.
-      Si el nombre se reutiliza (ej. CAMIONETA EXP 3), el nuevo DespachoId
-      NO se mezcla con el anterior.
-    - RETIRA / URGENTES mantienen la ventana de 48 horas.
-    - Si por algún motivo DespachoId no está disponible, se usa un fallback
-      temporal conservador para no romper la vista.
-    """
-    if (
-        tabla is None
-        or tabla.empty
-        or "Despacho" not in tabla.columns
-        or "FechaHora" not in tabla.columns
-    ):
-        return tabla.copy() if tabla is not None else tabla
-
-    df = tabla.copy()
-    df["FechaHora"] = pd.to_datetime(df["FechaHora"], errors="coerce")
-    df = df.loc[df["FechaHora"].notna()].copy()
-    if df.empty:
-        return df
-
-    df["_DespachoNorm"] = (
-        df["Despacho"].fillna("").astype(str).str.strip().str.upper()
-    )
-
-    # Excluir gestiones que no forman parte del tablero operativo.
-    # Se hace antes de calcular la fecha de referencia y el ciclo actual para
-    # que tampoco afecten ventanas, avances, "sin iniciar" ni tablas de carros.
-    df = df.loc[~df["_DespachoNorm"].isin(DESPACHOS_EXCLUIDOS)].copy()
-    if df.empty:
-        return df.drop(columns=["_DespachoNorm"], errors="ignore")
-
-    fecha_referencia = df["FechaHora"].max()
-    inicio_tablero = fecha_referencia.normalize() - pd.Timedelta(days=DIAS_TABLERO - 1)
-    limite_48h = fecha_referencia - pd.Timedelta(hours=48)
-
-    especiales = df["_DespachoNorm"].isin(["RETIRA", "URGENTES"])
-    especiales_df = df.loc[especiales & df["FechaHora"].ge(limite_48h)].copy()
-    normales = df.loc[~especiales & df["FechaHora"].ge(inicio_tablero)].copy()
-
-    if normales.empty:
-        resultado = especiales_df
-    else:
-        partes = []
-        tiene_id = "DespachoId" in normales.columns
-
-        for _, g in normales.groupby("_DespachoNorm", sort=False):
-            g = g.sort_values("FechaHora").copy()
-
-            # La clave correcta del ciclo es DespachoId, no la fecha.
-            # Elegimos el DespachoId cuya actividad más reciente sea la última
-            # para ese nombre de agrupador.
-            if tiene_id:
-                ids = g["DespachoId"].astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
-                ids = ids.where(ids.notna() & ids.ne("") & ids.ne("<NA>"), pd.NA)
-                g["_DespachoIdNorm"] = ids
-                con_id = g.loc[g["_DespachoIdNorm"].notna()].copy()
-
-                if not con_id.empty:
-                    ultima_por_id = con_id.groupby("_DespachoIdNorm")["FechaHora"].max()
-                    id_actual = ultima_por_id.idxmax()
-                    partes.append(g.loc[g["_DespachoIdNorm"].eq(id_actual)].copy())
-                    continue
-
-            # Fallback para fuentes antiguas sin DespachoId: conservar solo el
-            # bloque temporal más reciente. No se usa cuando el ID está presente.
-            saltos = g["FechaHora"].diff().gt(pd.Timedelta(hours=12))
-            g["_BloqueCiclo"] = saltos.cumsum()
-            partes.append(g.loc[g["_BloqueCiclo"].eq(g["_BloqueCiclo"].max())].copy())
-
-        normales = pd.concat(partes, ignore_index=False) if partes else normales.iloc[0:0].copy()
-        resultado = pd.concat([especiales_df, normales], ignore_index=False)
-
-    return (
-        resultado
-        .sort_index()
-        .drop(
-            columns=["_DespachoNorm", "_DespachoIdNorm", "_BloqueCiclo"],
-            errors="ignore",
-        )
-        .copy()
-    )
-
 # ==========================================================
 # TABLA OPERATIVA
 # ==========================================================
@@ -435,10 +341,11 @@ def construir_tabla_tareas(
         "Articulos",
         "ArticulosDescripcion",
         "PreparacionId",
+        "TareaId",
+        "ContenedorId",
         "ClienteDescripcion",
         "AreaDescripcion",
         "DespachoDescripcion",
-        "DespachoId",
         "Hora",
         "ContenedorNumero",
         "Usuario",
@@ -465,10 +372,11 @@ def construir_tabla_tareas(
         "_ArticulosTarea",
         "_ArticulosDescripcionTarea",
         "Preparacion",
+    "TareaId",
+    "ContenedorId",
         "Cliente",
         "Area",
         "Despacho",
-        "DespachoId",
         "Hora",
         "Carro",
         "Usuario",
@@ -835,10 +743,7 @@ def obtener_tabla_operativa(tabla):
 
     )
     operativa = operativa.drop(columns="Orden")
-
-    # No mezclar ciclos distintos cuando se reutiliza el mismo nombre de agrupador.
-    operativa = _filtrar_ciclo_actual_despachos(operativa)
-
+    
     return operativa
 
 
@@ -893,10 +798,41 @@ def obtener_avance_despachos(tabla):
     # ------------------------------------------------------
     # ÚLTIMA UTILIZACIÓN DEL AGRUPADOR
     # ------------------------------------------------------
-    # Centralizamos la regla para que donuts y tabla inferior trabajen
-    # sobre el mismo ciclo operativo. RETIRA/URGENTES conservan 48 h;
-    # los demás nombres reutilizados conservan solo su uso más reciente.
-    df = _filtrar_ciclo_actual_despachos(df)
+    # fecha_operativa está normalizada a 00:00 y NO debe utilizarse
+    # como límite superior, porque eliminaría las tareas del día actual.
+    #
+    # Referencia real = último FechaHora existente en el Informe Tareas.
+    # RETIRA / URGENTES -> últimas 48 h corridas.
+    # Resto              -> últimas 72 h corridas.
+    fecha_referencia = df["FechaHora"].max()
+
+    if pd.isna(fecha_referencia):
+        return pd.DataFrame(columns=columnas), []
+
+    fecha_inicio_72h = fecha_referencia - pd.Timedelta(hours=72)
+    fecha_inicio_48h = fecha_referencia - pd.Timedelta(hours=48)
+
+    despacho_norm = (
+        df["Despacho"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    es_48h = despacho_norm.isin(["RETIRA", "URGENTES"])
+
+    df = df.loc[
+        (
+            es_48h
+            & df["FechaHora"].ge(fecha_inicio_48h)
+            & df["FechaHora"].le(fecha_referencia)
+        )
+        | (
+            ~es_48h
+            & df["FechaHora"].ge(fecha_inicio_72h)
+            & df["FechaHora"].le(fecha_referencia)
+        )
+    ].copy()
 
     if df.empty:
         return pd.DataFrame(columns=columnas), []
@@ -1143,12 +1079,8 @@ def obtener_carros_criticos(
     if avance_despachos is None or avance_despachos.empty:
         return pd.DataFrame(columns=columnas_salida)
 
-    # La tabla debe conservar TODOS los agrupadores que sigan activos.
-    # avance_despachos ya llega limitado a avance > 0 y < 100, por lo que
-    # no aplicamos un umbral adicional (antes >= 25 hacía desaparecer
-    # agrupadores que todavía seguían operativos).
-    criticos = avance_despachos.loc[
-        avance_despachos["Avance"].lt(100)
+    criticos = avance_despachos[
+        avance_despachos["Avance"] >= 25
     ].copy()
 
     if criticos.empty:

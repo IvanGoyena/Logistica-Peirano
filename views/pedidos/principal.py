@@ -953,7 +953,8 @@ def render_modulo_pedidos() -> None:
         "Vista del módulo",
         options=[
             "📊 Dashboard",
-            "🧠 Inteligencia operativa",
+            "📅 Planificación",
+            "🎯 Objetivo",
             "🚨 Compromisos sin cobertura",
             "📋 Tabla y gestiones",
         ],
@@ -966,7 +967,7 @@ def render_modulo_pedidos() -> None:
     if vista_pedidos == "📊 Dashboard":
         from views.pedidos.dashboard import render_dashboard
         render_dashboard(datos_dashboard, tabla_detalle_dashboard)
-    elif vista_pedidos == "🧠 Inteligencia operativa":
+    elif vista_pedidos == "📅 Planificación":
         from views.pedidos.inteligencia import render_inteligencia
         render_inteligencia(
             datos_dashboard,
@@ -974,6 +975,9 @@ def render_modulo_pedidos() -> None:
             tabla_personal=df_personal,
             tabla_transmisiones=tabla_transmisiones,
         )
+    elif vista_pedidos == "🎯 Objetivo":
+        from views.pedidos.objetivo import render_objetivo
+        render_objetivo()
     elif vista_pedidos == "🚨 Compromisos sin cobertura":
         from views.pedidos.cobertura import render_cobertura
         render_cobertura(

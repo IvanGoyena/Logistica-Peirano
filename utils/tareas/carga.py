@@ -245,92 +245,173 @@ def _leer_historico_control() -> pd.DataFrame:
 @st.cache_data(ttl=270, show_spinner=False)
 def _leer_historico_preparaciones() -> pd.DataFrame:
     """
-    Lee UNA única fuente consolidada de Filtrar Preparaciones.
+    Fuente de control para Operación en vivo.
 
-    El descargador consulta DIGIP por una ventana corta y mantiene:
-        Data_WMS/Historico Filtrar Preparaciones.csv
+    Consolida, en este orden de prioridad:
+      1) histórico consolidado (.csv/.xlsx y también .csv.tmp)
+      2) archivo mensual Filtrar Preparacion
+      3) ventana reciente Ultimos 7 Dias
 
-    No se deben concatenar:
-        - Filtrar Preparacion Ultimos 7 Dias.csv
-        - Filtrar Preparacion <Mes> <Año>.csv
-
-    porque son copias parciales/snapshots del mismo origen y provocarían
-    reprocesamiento y riesgo de mezclar versiones de una misma fila.
+    La fuente más reciente queda última y gana al deduplicar.
     """
     carpeta = Path(CARPETA_WMS)
-
     if not carpeta.exists():
         return pd.DataFrame()
 
-    candidatos = [
-        carpeta / "Historico Filtrar Preparaciones.csv",
-        carpeta / "Historico Filtrar Preparaciones.xlsx",
-        carpeta / "Histórico Filtrar Preparaciones.csv",
-        carpeta / "Histórico Filtrar Preparaciones.xlsx",
-    ]
-
-    ruta = next(
-        (r for r in candidatos if r.exists() and r.is_file()),
-        None,
-    )
-
-    if ruta is None:
+    def _leer(ruta: Path) -> pd.DataFrame:
+        try:
+            nombre = ruta.name.lower()
+            if nombre.endswith(".csv") or nombre.endswith(".csv.tmp") or nombre.endswith(".tmp"):
+                return pd.read_csv(
+                    ruta,
+                    sep=None,
+                    engine="python",
+                    encoding="utf-8-sig",
+                )
+            if ruta.suffix.lower() in {".xlsx", ".xls", ".xlsm"}:
+                return pd.read_excel(ruta)
+        except Exception:
+            return pd.DataFrame()
         return pd.DataFrame()
 
-    try:
-        if ruta.suffix.lower() == ".csv":
-            tabla = pd.read_csv(
-                ruta,
-                sep=None,
-                engine="python",
-                encoding="utf-8-sig",
-            )
-        else:
-            tabla = pd.read_excel(ruta)
-    except Exception:
+    rutas: list[tuple[int, Path]] = []
+
+    # 1. Histórico. Incluye el .tmp que genera el proceso de consolidación.
+    for nombre in (
+        "Historico Filtrar Preparaciones.csv",
+        "Historico Filtrar Preparaciones.csv.tmp",
+        "Historico Filtrar Preparaciones.xlsx",
+        "Histórico Filtrar Preparaciones.csv",
+        "Histórico Filtrar Preparaciones.csv.tmp",
+        "Histórico Filtrar Preparaciones.xlsx",
+    ):
+        r = carpeta / nombre
+        if r.exists() and r.is_file():
+            rutas.append((10, r))
+
+    # 2. Mensuales guardados.
+    for patron in (
+        "Filtrar Preparacion*.csv",
+        "Filtrar Preparacion*.xlsx",
+        "Filtrar Preparación*.csv",
+        "Filtrar Preparación*.xlsx",
+    ):
+        for r in carpeta.glob(patron):
+            nom = r.name.lower()
+            if "ultimos 7 dias" in nom or "últimos 7 días" in nom:
+                continue
+            rutas.append((20, r))
+
+    # 3. Ventana reciente: máxima prioridad.
+    for patron in (
+        "Filtrar Preparacion Ultimos 7 Dias*.csv",
+        "Filtrar Preparacion Ultimos 7 Dias*.xlsx",
+        "Filtrar Preparación Ultimos 7 Dias*.csv",
+        "Filtrar Preparación Últimos 7 Días*.csv",
+    ):
+        for r in carpeta.glob(patron):
+            rutas.append((30, r))
+
+    # Evitar leer dos veces la misma ruta.
+    unicas: dict[str, tuple[int, Path]] = {}
+    for prioridad, ruta in rutas:
+        clave = str(ruta.resolve()).lower()
+        anterior = unicas.get(clave)
+        if anterior is None or prioridad > anterior[0]:
+            unicas[clave] = (prioridad, ruta)
+
+    tablas = []
+    for prioridad, ruta in sorted(
+        unicas.values(),
+        key=lambda x: (x[0], x[1].stat().st_mtime if x[1].exists() else 0),
+    ):
+        df = _leer(ruta)
+        if df is None or df.empty:
+            continue
+
+        df = df.copy()
+        df.columns = [
+            str(c).replace("\ufeff", "").strip()
+            for c in df.columns
+        ]
+
+        # Sólo sirve como fuente de control si identifica la preparación.
+        if "Id" not in df.columns:
+            continue
+
+        df["_PrioridadFuente"] = prioridad
+        df["_MTimeFuente"] = ruta.stat().st_mtime
+        df["ArchivoOrigenPreparacion"] = ruta.name
+        tablas.append(df)
+
+    if not tablas:
         return pd.DataFrame()
 
-    if tabla is None or tabla.empty:
-        return pd.DataFrame()
+    total = pd.concat(tablas, ignore_index=True, sort=False)
 
-    tabla = tabla.copy()
-    tabla["ArchivoOrigenPreparacion"] = ruta.name
-
-    # El histórico generado por el descargador ya viene consolidado.
-    # Dejamos una protección extra por ContenedorDetalleId.
-    if "ContenedorDetalleId" in tabla.columns:
-        clave = (
-            tabla["ContenedorDetalleId"]
-            .astype("string")
+    def _key(serie: pd.Series) -> pd.Series:
+        return (
+            serie.astype("string")
             .fillna("")
             .str.strip()
-            .str.replace(r"\\.0+$", "", regex=True)
+            .str.replace(r"\.0+$", "", regex=True)
         )
 
-        con_clave = tabla.loc[clave.ne("")].copy()
-        sin_clave = tabla.loc[clave.eq("")].copy()
+    # Claves normalizadas para que 123 y 123.0 sean iguales.
+    total["_PrepKey"] = _key(total["Id"])
+    if "ContenedorId" in total.columns:
+        total["_ContKey"] = _key(total["ContenedorId"])
+    else:
+        total["_ContKey"] = ""
 
-        if not con_clave.empty:
-            con_clave["_ClaveHistorica"] = (
-                con_clave["ContenedorDetalleId"]
-                .astype("string")
-                .fillna("")
-                .str.strip()
-                .str.replace(r"\\.0+$", "", regex=True)
-            )
-            con_clave = con_clave.drop_duplicates(
-                subset=["_ClaveHistorica"],
-                keep="last",
-            ).drop(columns=["_ClaveHistorica"])
+    if "TareaId" in total.columns:
+        total["_TareaKey"] = _key(total["TareaId"])
+    else:
+        total["_TareaKey"] = ""
 
-        tabla = pd.concat(
-            [con_clave, sin_clave],
-            ignore_index=True,
-            sort=False,
-        )
+    if "ContenedorDetalleId" in total.columns:
+        total["_DetalleKey"] = _key(total["ContenedorDetalleId"])
+    else:
+        total["_DetalleKey"] = ""
 
-    return tabla.reset_index(drop=True)
+    # Orden: histórico -> mensual -> últimos 7 días; dentro de cada fuente,
+    # el archivo más nuevo gana.
+    total = total.sort_values(
+        ["_PrioridadFuente", "_MTimeFuente"],
+        kind="stable",
+    )
 
+    # Una fila física de detalle no debe duplicarse entre histórico/mensual/reciente.
+    con_detalle = total["_DetalleKey"].ne("")
+    parte_detalle = (
+        total.loc[con_detalle]
+        .drop_duplicates("_DetalleKey", keep="last")
+    )
+
+    # Si no existe ContenedorDetalleId, deduplicamos de forma conservadora
+    # por preparación + contenedor + tarea, conservando la versión más reciente.
+    parte_sin = total.loc[~con_detalle].copy()
+    if not parte_sin.empty:
+        clave_fallback = ["_PrepKey", "_ContKey", "_TareaKey"]
+        parte_sin = parte_sin.drop_duplicates(clave_fallback, keep="last")
+
+    total = pd.concat(
+        [parte_detalle, parte_sin],
+        ignore_index=True,
+        sort=False,
+    )
+
+    return total.drop(
+        columns=[
+            "_PrioridadFuente",
+            "_MTimeFuente",
+            "_PrepKey",
+            "_ContKey",
+            "_TareaKey",
+            "_DetalleKey",
+        ],
+        errors="ignore",
+    ).reset_index(drop=True)
 
 
 # ==========================================================
@@ -519,28 +600,28 @@ def cargar_fuentes_tareas(
     if mensaje_control and control.empty:
         mensajes.append(mensaje_control)
 
-    # Los históricos pesados de Estadísticas NO se leen durante
-    # Operación en vivo. Se cargan solamente al entrar a esa vista.
-    if incluir_estadisticas:
-        try:
-            prep_origen = _leer_historico_preparaciones()
-        except Exception as error:
-            prep_origen = pd.DataFrame()
-            mensajes.append(
-                "Histórico Filtrar Preparacion: "
-                f"{type(error).__name__}."
-            )
-
-        prep, _, mensaje_prep = _recuperar_fuente(
-            "preparaciones_historico",
-            prep_origen,
-            "Histórico Filtrar Preparacion",
+    # Filtrar Preparaciones también es fuente operativa:
+    # aporta quién controló y cuándo.
+    try:
+        prep_origen = _leer_historico_preparaciones()
+    except Exception as error:
+        prep_origen = pd.DataFrame()
+        mensajes.append(
+            "Histórico Filtrar Preparacion: "
+            f"{type(error).__name__}."
         )
-        fuentes["preparaciones_historico"] = prep
 
-        if mensaje_prep and prep.empty:
-            mensajes.append(mensaje_prep)
+    prep, _, mensaje_prep = _recuperar_fuente(
+        "preparaciones_historico",
+        prep_origen,
+        "Histórico Filtrar Preparacion",
+    )
+    fuentes["preparaciones_historico"] = prep
 
+    if mensaje_prep and prep.empty:
+        mensajes.append(mensaje_prep)
+
+    if incluir_estadisticas:
         try:
             analitico_prep_origen = _leer_analitico_preparacion()
         except Exception as error:

@@ -96,7 +96,22 @@ def descubrir_archivos_proceso(carpeta_datos: str | Path) -> list[Path]:
         nombre = _normalizar_texto(ruta.stem).replace("_", " ")
         if any(nombre.startswith(prefijo.replace("_", " ")) for prefijo in PREFIJOS):
             archivos.append(ruta)
-    return sorted(archivos, key=lambda r: (_extraer_periodo(r), r.name))
+    def clave_orden(ruta: Path) -> tuple[int, int, int, str]:
+        """
+        Ordena primero los archivos cuyo período puede identificarse
+        (año/mes) y deja al final los archivos sin período explícito,
+        por ejemplo "Filtrar Preparacion Ultimos 7 Dias".
+
+        Evita comparar None contra int dentro de sorted().
+        """
+        anio, mes = _extraer_periodo(ruta)
+
+        if anio is not None and mes is not None:
+            return (0, anio, mes, ruta.name.upper())
+
+        return (1, 9999, 99, ruta.name.upper())
+
+    return sorted(archivos, key=clave_orden)
 
 
 def firma_archivos_proceso(carpeta_datos: str | Path) -> tuple:
