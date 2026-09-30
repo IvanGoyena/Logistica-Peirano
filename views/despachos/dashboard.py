@@ -1130,6 +1130,128 @@ def render_dashboard_despachos(
                 icon="⚠️",
             )
 
+            detalle_sin_planificacion = base_dashboard.loc[
+                mascara_sin_planificacion_dashboard
+            ].copy()
+
+            def _texto(columna: str) -> pd.Series:
+                if columna not in detalle_sin_planificacion.columns:
+                    return pd.Series(
+                        "",
+                        index=detalle_sin_planificacion.index,
+                        dtype="string",
+                    )
+                return (
+                    detalle_sin_planificacion[columna]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                )
+
+            codigo_despacho_sp = _texto("CodigoDespacho")
+            codigo_expreso_sp = _texto("CodigoExpreso")
+            frecuencia_sp = _texto("FrecuenciaEntrega")
+            zona_sp = _texto("ZonaAgrupadorExpreso")
+            localidad_sp = _texto("LocalidadExpreso")
+
+            def _motivo_sin_planificacion(idx) -> str:
+                codigo_despacho = codigo_despacho_sp.loc[idx]
+                codigo_expreso = codigo_expreso_sp.loc[idx]
+                frecuencia = frecuencia_sp.loc[idx]
+                zona = zona_sp.loc[idx]
+                localidad = localidad_sp.loc[idx]
+
+                codigo_despacho_norm = (
+                    codigo_despacho.replace(".0", "").strip().zfill(8)
+                    if codigo_despacho
+                    else ""
+                )
+                es_expreso = codigo_despacho_norm == "05010001"
+
+                if es_expreso and not codigo_expreso:
+                    return "Expreso sin Código Expreso"
+
+                if es_expreso and codigo_expreso and not zona and not localidad:
+                    return "Código Expreso sin parametrizar en Datos Expresos"
+
+                if es_expreso and (zona or localidad):
+                    return "Expreso sin resolución de planificación"
+
+                if not frecuencia:
+                    return "Cliente/pedido sin FrecuenciaEntrega"
+
+                return "Revisar parametrización de planificación"
+
+            detalle_sin_planificacion["Motivo"] = [
+                _motivo_sin_planificacion(idx)
+                for idx in detalle_sin_planificacion.index
+            ]
+
+            columnas_control = [
+                "Pedido",
+                "ClienteCodigo",
+                "ClienteDescripcion",
+                "CodigoDespacho",
+                "CodigoExpreso",
+                "FrecuenciaEntrega",
+                "LocalidadExpreso",
+                "ZonaAgrupadorExpreso",
+                "UnidadesDashboard",
+                "VolumenDashboard",
+                "Motivo",
+            ]
+            columnas_control = [
+                columna
+                for columna in columnas_control
+                if columna in detalle_sin_planificacion.columns
+            ]
+
+            detalle_sin_planificacion = (
+                detalle_sin_planificacion[columnas_control]
+                .drop_duplicates(subset=["Pedido"], keep="first")
+                .sort_values(["Motivo", "ClienteDescripcion", "Pedido"])
+                .reset_index(drop=True)
+            )
+
+            with st.expander(
+                f"Ver detalle de pedidos sin planificación "
+                f"({sin_planificacion_dashboard})",
+                expanded=False,
+            ):
+                st.dataframe(
+                    detalle_sin_planificacion,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "UnidadesDashboard": st.column_config.NumberColumn(
+                            "Unidades", format="%d"
+                        ),
+                        "VolumenDashboard": st.column_config.NumberColumn(
+                            "Volumen m³", format="%.3f"
+                        ),
+                    },
+                )
+
+                csv_sin_planificacion = (
+                    detalle_sin_planificacion
+                    .rename(
+                        columns={
+                            "UnidadesDashboard": "Unidades",
+                            "VolumenDashboard": "Volumen m3",
+                        }
+                    )
+                    .to_csv(index=False, sep=";", encoding="utf-8-sig")
+                    .encode("utf-8-sig")
+                )
+
+                st.download_button(
+                    "⬇️ Descargar pedidos sin planificación",
+                    data=csv_sin_planificacion,
+                    file_name="Pedidos_sin_planificacion.csv",
+                    mime="text/csv",
+                    key="descargar_pedidos_sin_planificacion_despachos",
+                )
+
         if (
             pedidos_retira_dashboard == 0
             and pedidos_camion_dashboard == 0

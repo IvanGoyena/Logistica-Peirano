@@ -21,6 +21,24 @@ def _fecha_analitico(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce", dayfirst=False, format="mixed")
 
 
+def _agregar_linea_comercial(df: pd.DataFrame) -> pd.DataFrame:
+    """Define línea comercial como Pedido + Código de artículo único."""
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    x = df.copy()
+    pedido = _texto(x.get("PedidoCodigos", pd.Series("", index=x.index))).str.upper()
+    codigo = (
+        _texto(x.get("CodigoArticulo", pd.Series("", index=x.index)))
+        .str.upper()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+    valida = pedido.ne("") & codigo.ne("")
+    x["LineaComercialKey"] = ""
+    x.loc[valida, "LineaComercialKey"] = pedido.loc[valida] + "|" + codigo.loc[valida]
+    return x
+
+
 def construir_base_estadisticas(
     df: pd.DataFrame,
     df_articulos: pd.DataFrame | None = None,
@@ -242,7 +260,7 @@ def _picking_analitico(
         a["Id"] = a["TareaId"]
     a["Id"] = _id(a["Id"]).where(_id(a["Id"]).ne(""), a["TareaId"])
 
-    return _enriquecer_articulos(a, df_articulos)
+    return _agregar_linea_comercial(_enriquecer_articulos(a, df_articulos))
 
 
 def _control_analitico(
@@ -294,7 +312,7 @@ def _control_analitico(
         a["Id"] = a["ControlContenedorId"]
     a["Id"] = _id(a["Id"]).where(_id(a["Id"]).ne(""), a["ControlContenedorId"])
 
-    return _enriquecer_articulos(a, df_articulos)
+    return _agregar_linea_comercial(_enriquecer_articulos(a, df_articulos))
 
 
 def _live_eventos(base: pd.DataFrame, proceso: str) -> pd.DataFrame:
@@ -353,7 +371,7 @@ def _live_eventos(base: pd.DataFrame, proceso: str) -> pd.DataFrame:
     primera = ~e.duplicated("EventoId", keep="first")
     e["EventosMetric"] = 0.0
     e.loc[primera, "EventosMetric"] = 1.0
-    return e
+    return _agregar_linea_comercial(e)
 
 
 def construir_eventos_hibridos(
@@ -404,7 +422,7 @@ def construir_eventos_hibridos(
 
 
 def resumen_usuarios(eventos: pd.DataFrame) -> pd.DataFrame:
-    columnas = ["Usuario", "Tareas", "Pickeos", "Preparaciones", "Unidades", "SKUs", "Unid/Tarea", "Participacion"]
+    columnas = ["Usuario", "Tareas", "Pickeos", "LineasComerciales", "Preparaciones", "Unidades", "SKUs", "Unid/Tarea", "Participacion"]
     if eventos is None or eventos.empty:
         return pd.DataFrame(columns=columnas)
 
@@ -412,9 +430,13 @@ def resumen_usuarios(eventos: pd.DataFrame) -> pd.DataFrame:
     for c in ["UnidadesProceso", "EventosMetric", "PickeosMetric"]:
         x[c] = pd.to_numeric(x.get(c, 0), errors="coerce").fillna(0)
 
+    if "LineaComercialKey" not in x.columns:
+        x = _agregar_linea_comercial(x)
+
     r = x.groupby("Usuario", as_index=False).agg(
         Tareas=("EventosMetric", "sum"),
         Pickeos=("PickeosMetric", "sum"),
+        LineasComerciales=("LineaComercialKey", lambda s: s.replace("", pd.NA).dropna().nunique()),
         Preparaciones=("Id", "nunique"),
         Unidades=("UnidadesProceso", "sum"),
         SKUs=("CodigoArticulo", lambda s: s.replace("", pd.NA).dropna().nunique()),
@@ -546,6 +568,7 @@ def construir_score_productividad(
     analitico: pd.DataFrame,
     df_volumetria: pd.DataFrame | None = None,
     df_ubicaciones: pd.DataFrame | None = None,
+    base_live: pd.DataFrame | None = None,
     desde=None,
     hasta=None,
     usuario: str = "Todos",
@@ -577,6 +600,24 @@ def construir_score_productividad(
     a["FechaScore"] = a["FechaFinScore"].dt.normalize()
     a["UnidadesDetalle"] = pd.to_numeric(a.get("UnidadesDetalle", 0), errors="coerce").fillna(0)
     a["Orden"] = pd.to_numeric(a.get("Orden", 0), errors="coerce").fillna(0)
+
+    # El Analítico de DIGIP no siempre trae el pedido comercial.
+    # Lo recuperamos desde Filtrar Preparación por TareaId para poder definir
+    # Línea comercial = Pedido + CódigoArticulo.
+    if base_live is not None and not base_live.empty and "TareaId" in base_live.columns:
+        mapa_tarea, _ = _mapas_live(base_live)
+        if not mapa_tarea.empty and "PedidoCodigos" in mapa_tarea.columns:
+            mapa_pedido = mapa_tarea[["TareaId", "PedidoCodigos"]].drop_duplicates("TareaId", keep="last")
+            if "PedidoCodigos" in a.columns:
+                a = a.merge(mapa_pedido, on="TareaId", how="left", suffixes=("", "_Live"), validate="many_to_one")
+                pedido_actual = _texto(a["PedidoCodigos"])
+                pedido_live = _texto(a.get("PedidoCodigos_Live", pd.Series("", index=a.index)))
+                a["PedidoCodigos"] = pedido_actual.where(pedido_actual.ne(""), pedido_live)
+                a = a.drop(columns=["PedidoCodigos_Live"], errors="ignore")
+            else:
+                a = a.merge(mapa_pedido, on="TareaId", how="left", validate="many_to_one")
+
+    a = _agregar_linea_comercial(a)
 
     if desde is not None:
         a = a.loc[a["FechaScore"].dt.date >= desde].copy()
@@ -660,7 +701,7 @@ def construir_score_productividad(
             "Usuario": usuario_t,
             "MinutosOperativos": minutos,
             "Unidades": unidades,
-            "Lineas": int(len(g)),
+            "Lineas": int(g["LineaComercialKey"].replace("", pd.NA).dropna().nunique()),
             "SKUs": int(g["CodigoArticulo"].replace("", pd.NA).dropna().nunique()),
             "M3": float(pd.to_numeric(g["M3Linea"], errors="coerce").fillna(0).sum()),
             "Kg": float(pd.to_numeric(g["KgLinea"], errors="coerce").fillna(0).sum()),
@@ -741,6 +782,7 @@ def construir_campeonato_productividad(
     analitico: pd.DataFrame,
     df_volumetria: pd.DataFrame | None = None,
     df_ubicaciones: pd.DataFrame | None = None,
+    base_live: pd.DataFrame | None = None,
     fecha_referencia=None,
     usuarios_excluidos: set[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
@@ -764,6 +806,7 @@ def construir_campeonato_productividad(
         analitico,
         df_volumetria,
         df_ubicaciones,
+        base_live=base_live,
         desde=mes_inicio,
         hasta=mes_fin,
         usuario="Todos",

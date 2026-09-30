@@ -357,154 +357,229 @@ ZONAS_PLANIFICACION = {
 # PLANIFICACIÓN ESPECÍFICA DE EXPRESOS
 # ==========================================================
 #
-# El código 05010001 identifica que el pedido se envía por
-# expreso, pero no define por sí solo el día ni el grupo.
+# 05010001 sigue siendo el código universal de despacho para
+# todos los expresos. La decisión operativa se toma después,
+# usando Código Expreso -> Datos Expresos.
 #
-# Para esos pedidos se usa la zona obtenida desde el maestro
-# de expresos (ZonaAgrupadorExpreso) y se la relaciona con:
-#
-# - planificacion: día operativo en que debe prepararse;
-# - grupo: grupo zonal al que se incorpora;
-# - codigos_despacho: códigos de zona que componen el grupo.
-#
-# IMPORTANTE:
-# Las claves deben coincidir con ZonaAgrupadorExpreso luego
-# de normalizar el texto a mayúsculas y quitar espacios.
+# Reglas:
+# 1) CABA SUR / CABA SUR I / CABA SUR II conservan circuito
+#    propio de EXPRESOS.
+# 2) GBA NORTE / GBA OESTE / GBA SUR / CABA NORTE dejan de
+#    formar un agrupador expreso independiente y deben heredar
+#    día/grupo de la ZONA correspondiente a su localidad.
+# 3) VALENTIN ALSINA es excepción explícita: MARTES / grupo 1.
 # ==========================================================
 
 PLANIFICACION_EXPRESOS = {
-
     "CABA SUR": {
         "planificacion": "JUEVES",
         "grupo": "2",
-        "codigos_despacho": [
-            "04010002",  # AVELLANEDA
-            "04010003",  # BERAZATEGUI
-            "04010006",  # QUILMES
-            "04010007",  # BERNAL
-        ],
+        "codigos_despacho": ["04010002", "04010003", "04010006", "04010007"],
     },
-
     "CABA SUR I": {
         "planificacion": "JUEVES",
         "grupo": "2",
-        "codigos_despacho": [
-            "04010002",
-            "04010003",
-            "04010006",
-            "04010007",
-        ],
+        "codigos_despacho": ["04010002", "04010003", "04010006", "04010007"],
     },
-
     "CABA SUR II": {
         "planificacion": "JUEVES",
         "grupo": "1",
-        "codigos_despacho": [
-            "04010004",  # BERISSO - CITY BELL - LA PLATA
-            "04010005",  # FLORENCIO VARELA
-        ],
-    },
-
-    "CABA NORTE": {
-        "planificacion": "LUNES",
-        "grupo": "3",
-        "codigos_despacho": [
-            "05020002",  # COMUNA 2
-            "05020012",  # COMUNA 12
-            "05020013",  # COMUNA 13
-            "05020014",  # COMUNA 14
-            "05020015",  # COMUNA 15
-        ],
+        "codigos_despacho": ["04010004", "04010005"],
     },
 }
 
+# Estos grupos NO deben usar una planificación fija de Expresos.
+# El motor debe resolverlos contra la zona normal usando la localidad
+# obtenida desde Datos Expresos.
+EXPRESOS_INTEGRAR_A_ZONAS = {
+    "GBA NORTE",
+    "GBA OESTE",
+    "GBA SUR",
+    "CABA NORTE",
+}
 
-# Alias para absorber diferencias de escritura provenientes
-# del maestro de expresos.
+# Si una localidad de una familia integrada no tiene coincidencia exacta
+# en ZONAS_PLANIFICACION, se usa este día operativo de respaldo.
+# GBA OESTE (incluye GBA OESTE I/II) pertenece a la zona VIERNES.
+PLANIFICACION_FALLBACK_EXPRESOS = {
+    "GBA OESTE": "VIERNES",
+}
+
+# Mapa operativo de localidades CABA según cronograma de entrega.
+# Se usa para integrar CABA NORTE a la planificación semanal real.
+# La planificación y el grupo coinciden con las comunas configuradas arriba:
+# CABA ZONA 1 -> LUNES / grupo 3
+# CABA ZONA 3 -> MARTES / grupo 2
+# CABA ZONA 2 -> MIERCOLES / grupo 2
+LOCALIDADES_CABA_PLANIFICACION = {
+    # CABA ZONA 1 - LUNES
+    "AGRONOMIA": {"planificacion": "LUNES", "grupo": "3"},
+    "BELGRANO": {"planificacion": "LUNES", "grupo": "3"},
+    "CHACARITA": {"planificacion": "LUNES", "grupo": "3"},
+    "COLEGIALES": {"planificacion": "LUNES", "grupo": "3"},
+    "NUÑEZ": {"planificacion": "LUNES", "grupo": "3"},
+    "NUNEZ": {"planificacion": "LUNES", "grupo": "3"},
+    "PALERMO": {"planificacion": "LUNES", "grupo": "3"},
+    "PARQUE CHAS": {"planificacion": "LUNES", "grupo": "3"},
+    "PATERNAL": {"planificacion": "LUNES", "grupo": "3"},
+    "RECOLETA": {"planificacion": "LUNES", "grupo": "3"},
+    "SAAVEDRA": {"planificacion": "LUNES", "grupo": "3"},
+    "VILLA CRESPO": {"planificacion": "LUNES", "grupo": "3"},
+    "VILLA ORTUZAR": {"planificacion": "LUNES", "grupo": "3"},
+    "VILLA PUEYRREDON": {"planificacion": "LUNES", "grupo": "3"},
+
+    # CABA ZONA 3 - MARTES
+    "ALMAGRO": {"planificacion": "MARTES", "grupo": "2"},
+    "BALVANERA": {"planificacion": "MARTES", "grupo": "2"},
+    "BOEDO": {"planificacion": "MARTES", "grupo": "2"},
+    "CONSTITUCION": {"planificacion": "MARTES", "grupo": "2"},
+    "MONTSERRAT": {"planificacion": "MARTES", "grupo": "2"},
+    "RETIRO": {"planificacion": "MARTES", "grupo": "2"},
+    "SAN CRISTOBAL": {"planificacion": "MARTES", "grupo": "2"},
+    "SAN NICOLAS": {"planificacion": "MARTES", "grupo": "2"},
+    "SAN TELMO": {"planificacion": "MARTES", "grupo": "2"},
+
+    # CABA ZONA 2 - MIERCOLES
+    "CABALLITO": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "FLORES": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "FLORESTA": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "LINIERS": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "MONTE CASTRO": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "PARQUE AVELLANEDA": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "PARQUE CHACABUCO": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VELEZ SARSFIELD": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VERSALLES": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA DEL PARQUE": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA DEVOTO": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA GRAL MITRE": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA GENERAL MITRE": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA LURO": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA REAL": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA SANTA RITA": {"planificacion": "MIERCOLES", "grupo": "2"},
+    "VILLA URQUIZA": {"planificacion": "MIERCOLES", "grupo": "2"},
+}
+
+# Excepciones por localidad. Tienen prioridad sobre Zona Agrupador.
+EXCEPCIONES_LOCALIDAD_EXPRESO = {
+    "VALENTIN ALSINA": {
+        "planificacion": "MARTES",
+        "grupo": "1",
+        "codigos_despacho": ["03010004"],  # referencia operativa: LANUS
+    },
+}
+
 ALIAS_ZONAS_EXPRESOS = {
     "CABA SUR 1": "CABA SUR I",
     "CABA SUR1": "CABA SUR I",
     "CABA SUR 2": "CABA SUR II",
     "CABA SUR2": "CABA SUR II",
     "SUR": "CABA SUR",
-    "NORTE": "CABA NORTE",
+
+    # Variantes operativas de familias GBA.
+    "GBA NORTE I": "GBA NORTE",
+    "GBA NORTE II": "GBA NORTE",
+    "GBA OESTE I": "GBA OESTE",
+    "GBA OESTE II": "GBA OESTE",
+    "GBA SUR I": "GBA SUR",
+    "GBA SUR II": "GBA SUR",
 }
 
-
-def normalizar_zona_expreso(valor) -> str:
-    """
-    Normaliza una zona de expreso para buscarla en la
-    configuración.
-    """
-
+def _normalizar_texto(valor) -> str:
     if valor is None:
         return ""
+    return " ".join(str(valor).strip().upper().split())
 
-    zona = " ".join(
-        str(valor)
-        .strip()
-        .upper()
-        .split()
-    )
+def normalizar_zona_expreso(valor) -> str:
+    zona = _normalizar_texto(valor)
+    return ALIAS_ZONAS_EXPRESOS.get(zona, zona)
 
-    return ALIAS_ZONAS_EXPRESOS.get(
-        zona,
-        zona,
-    )
-
-
-def obtener_planificacion_expreso(
-    zona_expreso
-) -> dict:
+def obtener_planificacion_expreso(zona_expreso, localidad_expreso=None) -> dict:
     """
-    Devuelve la configuración operativa de una zona de expreso.
+    Resuelve el tratamiento operativo del expreso.
 
-    Nunca inventa una asignación. Si la zona no está configurada,
-    devuelve valores vacíos y ZonaExpresoConfigurada=False para
-    que el motor pueda mostrarla como pendiente de parametrizar.
+    Es compatible con llamadas antiguas de un solo argumento, pero para
+    aplicar VALENTIN ALSINA y la integración GBA/CABA NORTE a zonas el
+    llamador debe enviar también localidad_expreso.
     """
+    zona = normalizar_zona_expreso(zona_expreso)
+    localidad = _normalizar_texto(localidad_expreso)
 
-    zona_normalizada = normalizar_zona_expreso(
-        zona_expreso
-    )
-
-    configuracion = PLANIFICACION_EXPRESOS.get(
-        zona_normalizada
-    )
-
-    if configuracion is None:
-
+    # 1. Excepción por localidad: prioridad máxima.
+    excepcion = EXCEPCIONES_LOCALIDAD_EXPRESO.get(localidad)
+    if excepcion is not None:
         return {
-            "ZonaExpresoNormalizada": zona_normalizada,
+            "ZonaExpresoNormalizada": zona,
+            "LocalidadExpresoNormalizada": localidad,
+            "PlanificacionExpreso": excepcion["planificacion"],
+            "GrupoExpreso": excepcion["grupo"],
+            "CodigosDespachoExpreso": list(excepcion.get("codigos_despacho", [])),
+            "ZonaExpresoConfigurada": True,
+            "IntegrarAZona": True,
+            "MotivoPlanificacionExpreso": "EXCEPCION_LOCALIDAD",
+        }
+
+    # 2. CABA NORTE se integra por barrio/localidad al cronograma real.
+    # Esto evita que CABA NORTE quede visible como una planificación propia.
+    if zona == "CABA NORTE":
+        configuracion_caba = LOCALIDADES_CABA_PLANIFICACION.get(localidad)
+        if configuracion_caba is not None:
+            return {
+                "ZonaExpresoNormalizada": zona,
+                "LocalidadExpresoNormalizada": localidad,
+                "PlanificacionExpreso": configuracion_caba["planificacion"],
+                "GrupoExpreso": configuracion_caba["grupo"],
+                "CodigosDespachoExpreso": [],
+                "ZonaExpresoConfigurada": True,
+                "IntegrarAZona": True,
+                "MotivoPlanificacionExpreso": "CABA_POR_LOCALIDAD",
+            }
+
+    # 3. Grupos que deben integrarse a la planificación zonal.
+    integrar_a_zona = (
+        zona in EXPRESOS_INTEGRAR_A_ZONAS
+        or zona.startswith("GBA NORTE ")
+        or zona.startswith("GBA OESTE ")
+        or zona.startswith("GBA SUR ")
+    )
+
+    if integrar_a_zona:
+        return {
+            "ZonaExpresoNormalizada": zona,
+            "LocalidadExpresoNormalizada": localidad,
             "PlanificacionExpreso": "",
             "GrupoExpreso": "",
             "CodigosDespachoExpreso": [],
-            "ZonaExpresoConfigurada": False,
+            "ZonaExpresoConfigurada": True,
+            "IntegrarAZona": True,
+            "MotivoPlanificacionExpreso": "RESOLVER_POR_LOCALIDAD",
         }
 
+    # 4. Circuitos de Expresos que permanecen separados.
+    configuracion = PLANIFICACION_EXPRESOS.get(zona)
+    if configuracion is not None:
+        return {
+            "ZonaExpresoNormalizada": zona,
+            "LocalidadExpresoNormalizada": localidad,
+            "PlanificacionExpreso": str(configuracion.get("planificacion", "")).strip().upper(),
+            "GrupoExpreso": str(configuracion.get("grupo", "")).strip(),
+            "CodigosDespachoExpreso": [
+                str(c).strip() for c in configuracion.get("codigos_despacho", []) if str(c).strip()
+            ],
+            "ZonaExpresoConfigurada": True,
+            "IntegrarAZona": False,
+            "MotivoPlanificacionExpreso": "CIRCUITO_EXPRESO",
+        }
+
+    # 5. No parametrizado: no inventar asignación.
     return {
-        "ZonaExpresoNormalizada": zona_normalizada,
-        "PlanificacionExpreso": str(
-            configuracion.get(
-                "planificacion",
-                ""
-            )
-        ).strip().upper(),
-        "GrupoExpreso": str(
-            configuracion.get(
-                "grupo",
-                ""
-            )
-        ).strip(),
-        "CodigosDespachoExpreso": [
-            str(codigo).strip()
-            for codigo in configuracion.get(
-                "codigos_despacho",
-                []
-            )
-            if str(codigo).strip()
-        ],
-        "ZonaExpresoConfigurada": True,
+        "ZonaExpresoNormalizada": zona,
+        "LocalidadExpresoNormalizada": localidad,
+        "PlanificacionExpreso": "",
+        "GrupoExpreso": "",
+        "CodigosDespachoExpreso": [],
+        "ZonaExpresoConfigurada": False,
+        "IntegrarAZona": False,
+        "MotivoPlanificacionExpreso": "NO_PARAMETRIZADO",
     }
 
 

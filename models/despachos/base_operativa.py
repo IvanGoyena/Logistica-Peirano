@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 
+from config_planificacion import (
+    ZONAS_PLANIFICACION,
+    PLANIFICACION_FALLBACK_EXPRESOS,
+    obtener_planificacion_expreso,
+)
+
 
 COLUMNAS_FINALES_DESPACHOS = [
     "Pedido",
@@ -15,8 +21,10 @@ COLUMNAS_FINALES_DESPACHOS = [
     "PreparacionID",
     "CodigoDespacho",
     "DespachoDescripcion",
+    "CodigoExpreso",
     "FrecuenciaEntrega",
     "DiaEntrega",
+    "LocalidadExpreso",
     "ZonaAgrupadorExpreso",
     "ZonaExpreso",
     "Planificacion",
@@ -57,6 +65,23 @@ def construir_tabla_operativa_despachos(
     pendientes_erp = tabla_pendientes_erp.copy()
     clientes = tabla_clientes.copy()
     expresos = tabla_expresos.copy()
+
+    # =====================================================
+    # EXCLUSIONES OPERATIVAS
+    # =====================================================
+    # Los códigos DEP_ corresponden a movimientos internos.
+    # No son pedidos de reparto y no deben consumir planificación,
+    # volumen, unidades ni capacidad de vehículos.
+    if "ClienteCodigo" in tabla.columns:
+        mascara_movimiento_interno = (
+            tabla["ClienteCodigo"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .str.startswith("DEP_")
+        )
+        tabla = tabla.loc[~mascara_movimiento_interno].copy()
 
     # =====================================================
     # CLAVES DE PEDIDO
@@ -309,6 +334,23 @@ def construir_tabla_operativa_despachos(
         .str.upper()
     )
 
+    # Normaliza variantes antes de resolver la planificación.
+    # Ej.: GBA OESTE II -> GBA OESTE.
+    zona_expreso = zona_expreso.map(
+        lambda valor: obtener_planificacion_expreso(valor).get(
+            "ZonaExpresoNormalizada",
+            valor,
+        )
+    )
+
+    localidad_expreso = (
+        tabla["LocalidadExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
     frecuencia_entrega = (
         tabla["FrecuenciaEntrega"]
         .fillna("")
@@ -327,49 +369,177 @@ def construir_tabla_operativa_despachos(
     tabla["ZonaExpreso"] = zona_expreso
 
     dias_entrega_semanal = {
-        "LUNES",
-        "MARTES",
-        "MIERCOLES",
-        "MIÉRCOLES",
-        "JUEVES",
-        "VIERNES",
+        "LUNES", "MARTES", "MIERCOLES", "MIÉRCOLES", "JUEVES", "VIERNES",
     }
 
-    es_entrega_semanal = (
-        frecuencia_entrega.isin(
-            dias_entrega_semanal
-        )
-    )
+    es_entrega_semanal = frecuencia_entrega.isin(dias_entrega_semanal)
+
+    # Índice de localidades/zonas normales. Se construye desde la misma
+    # configuración que usa el resto del motor para no duplicar reglas.
+    indice_localidades_zona: dict[str, dict] = {}
+    for codigo_zona, cfg_zona in ZONAS_PLANIFICACION.items():
+        descripcion = str(cfg_zona.get("descripcion", "")).strip().upper()
+        if descripcion:
+            indice_localidades_zona.setdefault(
+                descripcion,
+                {
+                    "codigo": str(codigo_zona).strip(),
+                    "planificacion": str(cfg_zona.get("planificacion", "")).strip().upper(),
+                    "grupo": str(cfg_zona.get("grupo", "")).strip(),
+                },
+            )
+
+    def resolver_planificacion_expreso(zona: str, localidad: str) -> str:
+        resolucion = obtener_planificacion_expreso(zona, localidad)
+
+        # Excepciones explícitas (ej. VALENTIN ALSINA -> MARTES).
+        planificacion_directa = str(
+            resolucion.get("PlanificacionExpreso", "")
+        ).strip().upper()
+        if planificacion_directa:
+            return planificacion_directa
+
+        # GBA NORTE/OESTE/SUR y CABA NORTE deben integrarse a la zona
+        # normal correspondiente a la localidad del maestro de Expresos.
+        if resolucion.get("IntegrarAZona", False):
+            cfg_localidad = indice_localidades_zona.get(localidad)
+            if cfg_localidad:
+                return cfg_localidad["planificacion"]
+
+            # Si no hay equivalencia exacta, aplicar el día operativo
+            # de respaldo parametrizado para la familia (ej. GBA OESTE -> VIERNES).
+            planificacion_fallback = PLANIFICACION_FALLBACK_EXPRESOS.get(zona, "")
+            if planificacion_fallback:
+                return planificacion_fallback
+
+            # Para familias sin fallback explícito, conservamos la clasificación
+            # para hacer visible el dato faltante y no inventar una zona.
+            return zona
+
+        # Los circuitos CABA SUR / I / II permanecen separados como Expresos.
+        if resolucion.get("MotivoPlanificacionExpreso") == "CIRCUITO_EXPRESO":
+            return zona
+
+        return zona
 
     tabla["Planificacion"] = ""
-    tabla.loc[
-        es_retira,
-        "Planificacion",
-    ] = "RETIRA"
+    tabla.loc[es_retira, "Planificacion"] = "RETIRA"
 
     mascara_no_retira = ~es_retira
 
-    tabla.loc[
-        mascara_no_retira,
-        "Planificacion",
-    ] = (
-        frecuencia_entrega.loc[
-            mascara_no_retira
-        ].where(
-            es_entrega_semanal.loc[
-                mascara_no_retira
-            ],
-            zona_expreso.loc[
-                mascara_no_retira
-            ].where(
-                zona_expreso.loc[
-                    mascara_no_retira
-                ].ne(""),
-                frecuencia_entrega.loc[
-                    mascara_no_retira
-                ],
-            ),
+    # Los circuitos CABA SUR / CABA SUR I / CABA SUR II tienen prioridad
+    # sobre FrecuenciaEntrega: deben conservarse como circuitos EXPRESOS
+    # aunque el maestro del cliente tenga LUNES/JUEVES/etc.
+    circuitos_expresos_separados = {"CABA SUR", "CABA SUR I", "CABA SUR II"}
+    mascara_circuito_expreso = (
+        mascara_no_retira
+        & zona_expreso.isin(circuitos_expresos_separados)
+    )
+    tabla.loc[mascara_circuito_expreso, "Planificacion"] = (
+        zona_expreso.loc[mascara_circuito_expreso]
+    )
+
+    # Para el resto, un día semanal informado se conserva. Las zonas que
+    # requieren integración (GBA/CABA NORTE) se resolverán luego por localidad.
+    mascara_integrar_zona = (
+        zona_expreso.eq("CABA NORTE")
+        | zona_expreso.str.startswith("GBA NORTE")
+        | zona_expreso.str.startswith("GBA OESTE")
+        | zona_expreso.str.startswith("GBA SUR")
+        | localidad_expreso.eq("VALENTIN ALSINA")
+    )
+
+    mascara_dia_semanal = (
+        mascara_no_retira
+        & ~mascara_circuito_expreso
+        & ~mascara_integrar_zona
+        & es_entrega_semanal
+    )
+    tabla.loc[mascara_dia_semanal, "Planificacion"] = (
+        frecuencia_entrega.loc[mascara_dia_semanal]
+    )
+
+    # Las filas todavía sin resolver pasan por la lógica de Expresos.
+    mascara_resolver_expreso = (
+        mascara_no_retira
+        & tabla["Planificacion"].eq("")
+        & zona_expreso.ne("")
+    )
+
+    tabla.loc[mascara_resolver_expreso, "Planificacion"] = [
+        resolver_planificacion_expreso(zona, localidad)
+        for zona, localidad in zip(
+            zona_expreso.loc[mascara_resolver_expreso],
+            localidad_expreso.loc[mascara_resolver_expreso],
         )
+    ]
+
+    # =====================================================
+    # RESPALDO POR CÓDIGO DE DESPACHO NORMAL
+    # =====================================================
+    # Para pedidos comerciales no Expreso, el Código Despacho del pedido es
+    # una clave operativa válida. Si existe en ZONAS_PLANIFICACION, se usa su
+    # planificación aunque el cruce con Maestro Clientes no haya aportado
+    # FrecuenciaEntrega.
+    codigo_despacho_normalizado = (
+        tabla["CodigoDespacho"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.upper()
+    )
+
+    indice_codigo_despacho: dict[str, str] = {}
+    for codigo_zona, cfg_zona in ZONAS_PLANIFICACION.items():
+        codigo_norm = str(codigo_zona).strip().upper()
+        planificacion_cfg = str(
+            cfg_zona.get("planificacion", "")
+        ).strip().upper()
+
+        if codigo_norm and planificacion_cfg:
+            indice_codigo_despacho[codigo_norm] = planificacion_cfg
+
+        # Compatibilidad entre códigos guardados con/sin cero inicial.
+        codigo_sin_ceros = codigo_norm.lstrip("0") or "0"
+        if codigo_sin_ceros and planificacion_cfg:
+            indice_codigo_despacho.setdefault(
+                codigo_sin_ceros,
+                planificacion_cfg,
+            )
+
+    codigo_expreso_universal = "05010001"
+    mascara_codigo_despacho_normal = (
+        mascara_no_retira
+        & tabla["Planificacion"].eq("")
+        & codigo_despacho_normalizado.ne("")
+        & ~codigo_despacho_normalizado.isin(
+            {codigo_expreso_universal, codigo_expreso_universal.lstrip("0")}
+        )
+    )
+
+    planificacion_por_codigo = codigo_despacho_normalizado.map(
+        indice_codigo_despacho
+    ).fillna("")
+
+    mascara_codigo_resuelto = (
+        mascara_codigo_despacho_normal
+        & planificacion_por_codigo.ne("")
+    )
+
+    tabla.loc[
+        mascara_codigo_resuelto,
+        "Planificacion",
+    ] = planificacion_por_codigo.loc[mascara_codigo_resuelto]
+
+    # Compatibilidad final: si todavía no se resolvió y existe una frecuencia
+    # de entrega válida, conservar el comportamiento anterior.
+    mascara_sin_planificacion = (
+        mascara_no_retira
+        & tabla["Planificacion"].eq("")
+    )
+    tabla.loc[mascara_sin_planificacion, "Planificacion"] = (
+        frecuencia_entrega.loc[mascara_sin_planificacion]
     )
 
     # =====================================================
@@ -384,8 +554,10 @@ def construir_tabla_operativa_despachos(
         "PreparacionEstado",
         "PreparacionID",
         "CodigoDespacho",
+        "CodigoExpreso",
         "FrecuenciaEntrega",
         "DiaEntrega",
+        "LocalidadExpreso",
         "ZonaAgrupadorExpreso",
         "ZonaExpreso",
         "Planificacion",

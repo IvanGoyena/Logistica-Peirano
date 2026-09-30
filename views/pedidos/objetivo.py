@@ -36,81 +36,177 @@ def _leer_archivo(ruta: Path) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _cargar_control_historico() -> pd.DataFrame:
-    carpeta = Path(CARPETA_WMS)
-    rutas = []
-    for patron in ("Control*.csv", "Control*.xlsx", "Control*.xls", "control*.csv", "control*.xlsx"):
-        rutas.extend(carpeta.glob(patron))
+    """
+    Histórico oficial de Objetivo.
+
+    Fuente:
+      Control <Mes> <Año>.csv
+
+    Se usa leer_archivo() con extensión explícita para que:
+      - local: lea Data_WMS físico;
+      - Streamlit Cloud: lea GitHub main.
+    """
+    meses = [
+        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+    ]
+
+    hoy = date.today()
     tablas = []
-    for ruta in sorted({r.resolve() for r in rutas if r.is_file()}):
-        t = _leer_archivo(ruta)
-        if not t.empty and "ControlContenedorId" in t.columns:
-            t = t.copy(); t["ArchivoOrigen"] = ruta.name; tablas.append(t)
-    if not tablas:
-        return pd.DataFrame()
-    total = pd.concat(tablas, ignore_index=True, sort=False).drop_duplicates()
-    return total.reset_index(drop=True)
 
+    # El WMS histórico disponible comienza en 2026.
+    for anio in range(2026, hoy.year + 1):
+        mes_hasta = hoy.month if anio == hoy.year else 12
+        for numero_mes in range(1, mes_hasta + 1):
+            nombre_base = f"Control {meses[numero_mes - 1]} {anio}"
+            t = pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _cargar_filtrar_preparaciones() -> pd.DataFrame:
-    """Fuente principal de Objetivo: histórico + ventana reciente de Filtrar Preparaciones."""
-    carpeta = Path(CARPETA_WMS)
-    rutas = []
+            # CSV es la descarga mensual normal. Dejamos XLSX como respaldo.
+            for ext in (".csv", ".xlsx"):
+                try:
+                    candidato = leer_archivo(
+                        CARPETA_WMS,
+                        nombre_base + ext,
+                        cache=False,
+                    )
+                except Exception:
+                    candidato = pd.DataFrame()
 
-    # Histórico consolidado, si existe.
-    for nombre in (
-        "Historico Filtrar Preparaciones.csv",
-        "Historico Filtrar Preparaciones.xlsx",
-        "Histórico Filtrar Preparaciones.csv",
-        "Histórico Filtrar Preparaciones.xlsx",
-    ):
-        ruta = carpeta / nombre
-        if ruta.exists():
-            rutas.append(ruta)
-            break
+                if (
+                    candidato is not None
+                    and not candidato.empty
+                    and "ControlContenedorId" in candidato.columns
+                ):
+                    t = candidato.copy()
+                    t["ArchivoOrigen"] = nombre_base + ext
+                    break
 
-    # Sumamos la ventana reciente para no depender de que el histórico ya haya sido actualizado.
-    for patron in (
-        "Filtrar Preparacion Ultimos 7 Dias*.csv",
-        "Filtrar Preparacion Ultimos 7 Dias*.xlsx",
-        "Filtrar Preparación Ultimos 7 Dias*.csv",
-        "Filtrar Preparación Últimos 7 Días*.csv",
-    ):
-        rutas.extend(carpeta.glob(patron))
-
-    # Si no hay histórico, usamos los meses guardados.
-    if not rutas:
-        for patron in ("Filtrar Preparacion*.csv", "Filtrar Preparación*.csv", "Filtrar Preparacion*.xlsx"):
-            rutas.extend(carpeta.glob(patron))
-        rutas = [r for r in rutas if "ultimos" not in r.name.lower() and "últimos" not in r.name.lower()]
-
-    tablas = []
-    for ruta in sorted({r.resolve() for r in rutas if r.is_file()}):
-        t = _leer_archivo(ruta)
-        if not t.empty and "ControlContenedorId" in t.columns:
-            t = t.copy()
-            t["ArchivoOrigen"] = ruta.name
-            tablas.append(t)
+            if not t.empty:
+                tablas.append(t)
 
     if not tablas:
         return pd.DataFrame()
 
     total = pd.concat(tablas, ignore_index=True, sort=False)
 
-    # Una fila física de detalle de contenedor debe existir una sola vez aunque aparezca
-    # tanto en histórico como en últimos 7 días. La fuente más reciente queda última.
-    if "ContenedorDetalleId" in total.columns:
-        clave = (total["ContenedorDetalleId"].astype("string").fillna("")
-                 .str.strip().str.replace(r"\.0+$", "", regex=True))
-        con = total.loc[clave.ne("")].copy()
-        sin = total.loc[clave.eq("")].copy()
-        if not con.empty:
-            con["_k"] = (con["ContenedorDetalleId"].astype("string").fillna("")
-                         .str.strip().str.replace(r"\.0+$", "", regex=True))
-            con = con.drop_duplicates("_k", keep="last").drop(columns="_k")
-        total = pd.concat([con, sin], ignore_index=True, sort=False)
+    # Clave de detalle para no duplicar una línea si un mensual fue republicado.
+    total["_ControlID"] = (
+        total["ControlContenedorId"].astype("string").fillna("")
+        .str.strip().str.replace(r"\.0+$", "", regex=True)
+    )
+    total["_Codigo"] = (
+        total.get("CodigoArticulo", pd.Series("", index=total.index))
+        .astype("string").fillna("").str.strip()
+    )
+    total["_FechaFinKey"] = (
+        total.get("FechaFin", pd.Series("", index=total.index))
+        .astype("string").fillna("").str.strip()
+    )
 
-    return total.reset_index(drop=True)
+    total = total.drop_duplicates(
+        subset=["_ControlID", "_Codigo", "_FechaFinKey"],
+        keep="last",
+    )
+
+    return total.drop(
+        columns=["_ControlID", "_Codigo", "_FechaFinKey"],
+        errors="ignore",
+    ).reset_index(drop=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cargar_filtrar_preparaciones() -> pd.DataFrame:
+    """
+    Objetivo NO usa Filtrar Preparaciones para reconstruir meses cerrados.
+    El histórico oficial sale de los reportes mensuales Control.
+    """
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cargar_filtrar_hoy_vivo() -> pd.DataFrame:
+    """
+    Fuente viva del día actual.
+
+    IMPORTANTE: se pide el .csv explícitamente. En Streamlit Cloud esto evita
+    que resolver_nombre() lo convierta erróneamente en .xlsx.
+    """
+    candidatos = [
+        "Filtrar Preparacion Ultimos 7 Dias.csv",
+        "Filtrar Preparaciones Ultimos 7 Dias.csv",
+        "Filtrar Preparación Últimos 7 Días.csv",
+        "Filtrar Preparaciones Últimos 7 Días.csv",
+    ]
+
+    vivo = pd.DataFrame()
+    for nombre in candidatos:
+        try:
+            t = leer_archivo(CARPETA_WMS, nombre, cache=False)
+        except Exception:
+            t = pd.DataFrame()
+
+        if (
+            t is not None
+            and not t.empty
+            and "ControlContenedorId" in t.columns
+            and "ControlContenedorFechaHoraEstado" in t.columns
+        ):
+            vivo = t.copy()
+            vivo["ArchivoOrigen"] = nombre
+            break
+
+    if vivo.empty:
+        return pd.DataFrame()
+
+    raw = vivo["ControlContenedorFechaHoraEstado"]
+    fecha = pd.to_datetime(raw, errors="coerce", dayfirst=True)
+
+    # Respaldo para formatos ISO / no ambiguos.
+    faltan = fecha.isna()
+    if faltan.any():
+        fecha.loc[faltan] = pd.to_datetime(raw.loc[faltan], errors="coerce")
+
+    vivo["_FechaViva"] = fecha
+    vivo = vivo[vivo["_FechaViva"].notna()].copy()
+    if vivo.empty:
+        return vivo
+
+    # La fecha máxima del propio archivo define la jornada viva.
+    # Así no dependemos de timezone/reloj del servidor.
+    fecha_viva = vivo["_FechaViva"].dt.normalize().max()
+    vivo = vivo[vivo["_FechaViva"].dt.normalize().eq(fecha_viva)].copy()
+    vivo["_EsUltimos7"] = True
+
+    # Deduplicación de detalle.
+    if "ContenedorDetalleId" in vivo.columns:
+        did = (
+            vivo["ContenedorDetalleId"].astype("string").fillna("")
+            .str.strip().str.replace(r"\.0+$", "", regex=True)
+        )
+        con_id = vivo[did.ne("")].copy()
+        if not con_id.empty:
+            con_id["_DID"] = (
+                con_id["ContenedorDetalleId"].astype("string").fillna("")
+                .str.strip().str.replace(r"\.0+$", "", regex=True)
+            )
+            con_id = con_id.drop_duplicates("_DID", keep="last").drop(columns="_DID")
+
+        sin_id = vivo[did.eq("")].copy()
+        if not sin_id.empty:
+            claves = [
+                c for c in [
+                    "ControlContenedorId",
+                    "CodigoArticulo",
+                    "ControlContenedorFechaHoraEstado",
+                ]
+                if c in sin_id.columns
+            ]
+            if claves:
+                sin_id = sin_id.drop_duplicates(claves, keep="last")
+
+        vivo = pd.concat([con_id, sin_id], ignore_index=True, sort=False)
+
+    return vivo.drop(columns=["_FechaViva"], errors="ignore").reset_index(drop=True)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -123,11 +219,35 @@ def _cargar_maestro_articulos() -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _cargar_maestro_personal() -> pd.DataFrame:
-    """Maestro de personas: autoridad para identidad, sector y puesto."""
+    """
+    Maestro de personas.
+
+    Primero intenta Data_Maestros/Maestro Personal.xlsx en la fuente versionada.
+    Si temporalmente falta, usa un fallback mínimo SOLO para Línea Control,
+    evitando que Objetivo vuelva a mostrar 0 operarios.
+    """
     try:
-        return leer_archivo(CARPETA_MAESTROS, "Maestro Personal", cache=True)
+        p = leer_archivo(
+            CARPETA_MAESTROS,
+            "Maestro Personal.xlsx",
+            cache=False,
+        )
     except Exception:
-        return pd.DataFrame()
+        p = pd.DataFrame()
+
+    if p is not None and not p.empty:
+        return p
+
+    # Respaldo basado en la nómina actual entregada para Objetivo.
+    return pd.DataFrame([
+        {"Usuario / Login":"ascirica",     "Nombre Completo":"Agustin Scirica",       "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"MDO",      "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"gsoderquvist", "Nombre Completo":"Gustavo Soderquvist",   "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"MDO",      "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"mbatista",     "Nombre Completo":"Maximo Batista",        "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"MDO",      "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"mhernandez",   "Nombre Completo":"Mirko Hernandez",       "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"MDO",      "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"nievasm",      "Nombre Completo":"Maximiliano Nievas",    "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"MDO",      "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"lescanoj",     "Nombre Completo":"Javier Lescano",        "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"EVENTUAL", "Jornada":"Completa", "Estado":"Activo"},
+        {"Usuario / Login":"niperez",      "Nombre Completo":"Nicolas Perez",         "Sector":"Preparacion", "Puesto":"Linea Control", "Nómina":"EVENTUAL", "Jornada":"Completa", "Estado":"Activo"},
+    ])
 
 
 def _normalizar_texto(v) -> str:
@@ -192,12 +312,12 @@ def _fecha_control(s: pd.Series) -> pd.Series:
     return a
 
 
-def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.DataFrame, personal: pd.DataFrame):
+def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.DataFrame, personal: pd.DataFrame, filtrar_hoy: pd.DataFrame | None = None):
     """
-    Construye un histórico mensual continuo usando la mejor fuente disponible por fecha:
-    - Filtrar Preparaciones manda en las fechas que contiene (fuente operativa exacta).
-    - Control completa las fechas anteriores/faltantes que todavía no están en Filtrar.
-    Así no perdemos ni el mes histórico ni días recientes como el 25/09.
+    Construye Objetivo con dos fuentes separadas:
+    - Fechas cerradas: reportes mensuales Control.
+    - Jornada viva: Filtrar Preparacion Ultimos 7 Dias, sólo en su fecha máxima.
+    Filtrar no reemplaza cierres mensuales históricos.
     """
     detalles = []
     actividades = []
@@ -214,11 +334,55 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
     det_c = pd.DataFrame()
     act_c = pd.DataFrame()
 
+    # La fuente viva se anexa de forma explícita. Para su fecha máxima elimina
+    # cualquier copia de esa misma fecha que haya quedado en el consolidado.
+    if filtrar_hoy is not None and not filtrar_hoy.empty:
+        vivo = filtrar_hoy.copy()
+        raw_v = vivo.get("ControlContenedorFechaHoraEstado", pd.Series(index=vivo.index, dtype="object"))
+        fv = pd.to_datetime(raw_v, errors="coerce")
+        faltan_v = fv.isna()
+        if faltan_v.any():
+            fv.loc[faltan_v] = pd.to_datetime(raw_v.loc[faltan_v], errors="coerce", dayfirst=True)
+        vivo["_FechaTmp"] = fv.dt.normalize()
+        fecha_viva = vivo["_FechaTmp"].max()
+
+        if pd.notna(fecha_viva):
+            if not filtrar.empty:
+                base_f = filtrar.copy()
+                raw_b = base_f.get("ControlContenedorFechaHoraEstado", pd.Series(index=base_f.index, dtype="object"))
+                fb = pd.to_datetime(raw_b, errors="coerce")
+                faltan_b = fb.isna()
+                if faltan_b.any():
+                    fb.loc[faltan_b] = pd.to_datetime(raw_b.loc[faltan_b], errors="coerce", dayfirst=True)
+                base_f["_FechaTmp"] = fb.dt.normalize()
+                base_f = base_f[~base_f["_FechaTmp"].eq(fecha_viva)].drop(columns="_FechaTmp", errors="ignore")
+            else:
+                base_f = pd.DataFrame()
+
+            vivo = vivo.drop(columns="_FechaTmp", errors="ignore")
+            filtrar = pd.concat([base_f, vivo], ignore_index=True, sort=False)
+
     if not filtrar.empty and "ControlContenedorId" in filtrar.columns:
         f = filtrar.copy()
         f["ControlID"] = (f["ControlContenedorId"].astype("string").fillna("")
                           .str.replace(r"\.0+$", "", regex=True).str.strip())
         f["CodigoArticulo"] = f.get("CodigoArticulo", pd.Series("", index=f.index)).astype("string").fillna("").str.strip()
+
+        # Línea comercial del día vivo:
+        # una misma línea puede estar repartida en varios contenedores.
+        # Por eso NO usamos ControlContenedorId + Código para contar líneas.
+        if "Id" in f.columns:
+            f["PedidoKey"] = (
+                f["Id"].astype("string").fillna("")
+                .str.strip().str.replace(r"\.0+$", "", regex=True)
+            )
+        elif "PedidoCodigos" in f.columns:
+            f["PedidoKey"] = f["PedidoCodigos"].astype("string").fillna("").str.strip()
+        else:
+            f["PedidoKey"] = f["ControlID"]
+
+        f["LineaComercialKey"] = f["PedidoKey"] + "|" + f["CodigoArticulo"]
+
         f["FechaControlDT"] = pd.to_datetime(
             f.get("ControlContenedorFechaHoraEstado", pd.Series(index=f.index, dtype="object")),
             errors="coerce", dayfirst=True,
@@ -255,6 +419,11 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         c = control.copy()
         c["ControlID"] = c["ControlContenedorId"].astype("string").fillna("").str.replace(r"\.0+$", "", regex=True).str.strip()
         c["CodigoArticulo"] = c.get("CodigoArticulo", pd.Series("", index=c.index)).astype("string").fillna("").str.strip()
+
+        # Los reportes mensuales Control no incluyen Pedido.
+        # Conservamos su granularidad histórica disponible: Control + Código.
+        c["LineaComercialKey"] = c["ControlID"] + "|" + c["CodigoArticulo"]
+
         c["UsuarioMostrar"] = c.get("Usuario", pd.Series("", index=c.index)).astype("string").fillna("").str.strip()
         c["FechaControlDT"] = _fecha_control(c.get("FechaFin", pd.Series(index=c.index, dtype="object")))
         c = c[c["FechaControlDT"].notna() & c["ControlID"].ne("")].copy()
@@ -280,9 +449,16 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         df = det_f[det_f["Fecha"].eq(fecha)].copy() if not det_f.empty else pd.DataFrame()
         dc = det_c[det_c["Fecha"].eq(fecha)].copy() if not det_c.empty else pd.DataFrame()
 
-        # Mayor número de filas de detalle = cierre más completo.
-        # En empate preferimos Filtrar por tener identidad de controlador más rica.
-        usar_filtrar = len(df) >= len(dc) and len(df) > 0
+        # Para jornadas históricas elegimos la fuente más completa.
+        # Para HOY, si existe información proveniente de "Últimos 7 días",
+        # forzamos Filtrar porque es la fuente viva que se actualiza durante la jornada.
+        filtrar_tiene_hoy_vivo = (
+            not df.empty
+            and "_EsUltimos7" in df.columns
+            and df["_EsUltimos7"].fillna(False).astype(bool).any()
+        )
+
+        usar_filtrar = filtrar_tiene_hoy_vivo or (len(df) >= len(dc) and len(df) > 0)
         if usar_filtrar:
             detalles.append(df)
             if not act_f.empty:
@@ -356,12 +532,16 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
             & actividad["HorasActividad"].ge(actividad["EsSabado"].map({True:MIN_HORAS_ACTIVO_SAB, False:MIN_HORAS_ACTIVO_LV}))
         )
         lop = detalle.groupby(["Fecha", "UsuarioMostrar"], as_index=False).agg(
-            Lineas=("CodigoArticulo", "count"), Unidades=("UnidadesNum", "sum"), Contenedores=("ControlID", "nunique")
+            Lineas=("LineaComercialKey", "nunique"),
+            Unidades=("UnidadesNum", "sum"),
+            Contenedores=("ControlID", "nunique"),
         )
         actividad = actividad.merge(lop, on=["Fecha", "UsuarioMostrar"], how="left")
 
     diario = detalle.groupby("Fecha", as_index=False).agg(
-        Lineas=("CodigoArticulo", "count"), Unidades=("UnidadesNum", "sum"), Contenedores=("ControlID", "nunique")
+        Lineas=("LineaComercialKey", "nunique"),
+        Unidades=("UnidadesNum", "sum"),
+        Contenedores=("ControlID", "nunique"),
     )
     if not actividad.empty:
         # Dotación activa = persona de Línea Control que tuvo actividad real ese día.
@@ -386,18 +566,36 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
     diario["Diferencia"] = diario["Lineas"] - diario["Objetivo"]
     diario["LineasOperario"] = diario["Lineas"].div(diario["OperariosActivos"].replace(0, pd.NA))
     diario["UnidadesOperario"] = diario["Unidades"].div(diario["OperariosActivos"].replace(0, pd.NA))
-    diario["Estado"] = diario.apply(lambda r: "Superado" if r.Lineas > r.Objetivo else ("Cumplido" if r.Lineas == r.Objetivo else "Por debajo"), axis=1)
+    fecha_en_curso = None
+    if filtrar_hoy is not None and not filtrar_hoy.empty:
+        raw_h = filtrar_hoy.get("ControlContenedorFechaHoraEstado", pd.Series(index=filtrar_hoy.index, dtype="object"))
+        fh = pd.to_datetime(raw_h, errors="coerce")
+        faltan_h = fh.isna()
+        if faltan_h.any():
+            fh.loc[faltan_h] = pd.to_datetime(raw_h.loc[faltan_h], errors="coerce", dayfirst=True)
+        if fh.notna().any():
+            fecha_en_curso = fh.dt.normalize().max().date()
+
+    diario["Estado"] = diario.apply(
+        lambda r: (
+            "En curso"
+            if fecha_en_curso is not None and r.Fecha.date() == fecha_en_curso
+            else ("Superado" if r.Lineas > r.Objetivo else ("Cumplido" if r.Lineas == r.Objetivo else "Por debajo"))
+        ),
+        axis=1,
+    )
     return diario.sort_values("Fecha"), detalle, actividad
 
 def render_objetivo() -> None:
     st.subheader("🎯 Objetivo")
-    st.caption("Cierre real de Control: líneas y unidades terminadas, cumplimiento del objetivo, dotación activa de jornada completa y composición por familias.")
+    st.caption("Histórico cerrado desde reportes mensuales de Control + jornada actual desde Filtrar Preparaciones. En la jornada viva, una línea comercial = Pedido/Preparación + Código único, aunque se reparta en varios contenedores.")
 
     control = _cargar_control_historico()
     filtrar = _cargar_filtrar_preparaciones()
+    filtrar_hoy = _cargar_filtrar_hoy_vivo()
     maestro = _cargar_maestro_articulos()
     personal = _cargar_maestro_personal()
-    diario, detalle, actividad = _preparar_base(control, filtrar, maestro, personal)
+    diario, detalle, actividad = _preparar_base(control, filtrar, maestro, personal, filtrar_hoy)
     if diario.empty:
         st.warning("No encontré histórico válido de Filtrar Preparaciones en Data_WMS.")
         return
@@ -436,11 +634,14 @@ def render_objetivo() -> None:
         st.info("No hay cierres en el período seleccionado."); return
 
     dias = len(d); lineas = int(d["Lineas"].sum()); unidades = int(d["Unidades"].sum()); objetivo = int(d["Objetivo"].sum())
-    cumplidos = int((d["Lineas"] >= d["Objetivo"]).sum()); pct = lineas/objetivo if objetivo else 0
+    cerrados = d[d["Estado"].ne("En curso")].copy()
+    cumplidos = int((cerrados["Lineas"] >= cerrados["Objetivo"]).sum())
+    dias_cerrados = len(cerrados)
+    pct = lineas/objetivo if objetivo else 0
     prom_l = d["Lineas"].mean(); prom_u = d["Unidades"].mean(); prom_op = d["OperariosActivos"].mean()
     k1,k2,k3,k4,k5,k6 = st.columns(6)
     k1.metric("Líneas cerradas", _fmt(lineas), f"{_fmt(lineas-objetivo)} vs objetivo")
-    k2.metric("Cumplimiento", f"{pct:.1%}", f"{cumplidos}/{dias} días")
+    k2.metric("Cumplimiento", f"{pct:.1%}", f"{cumplidos}/{dias_cerrados} días cerrados")
     k3.metric("Promedio líneas/día", _fmt(prom_l))
     k4.metric("Unidades/día", _fmt(prom_u))
     k5.metric("Operarios activos", _fmt(prom_op,1), "promedio jornada completa")
@@ -452,7 +653,7 @@ def render_objetivo() -> None:
     bars = alt.Chart(g).mark_bar(size=34).encode(
         x=alt.X("Jornada:N", sort=alt.SortField(field="Orden", order="ascending"), title=None),
         y=alt.Y("Lineas:Q", title="Líneas cerradas"),
-        color=alt.Color("Estado:N", scale=alt.Scale(domain=["Por debajo","Cumplido","Superado"], range=["#d95f5f","#f2c14e","#4caf70"]), legend=alt.Legend(title="Resultado")),
+        color=alt.Color("Estado:N", scale=alt.Scale(domain=["Por debajo","Cumplido","Superado","En curso"], range=["#d95f5f","#f2c14e","#4caf70","#5dade2"]), legend=alt.Legend(title="Resultado")),
         tooltip=[alt.Tooltip("Jornada:N", title="Fecha"), alt.Tooltip("Lineas:Q", title="Líneas", format=",.0f"), alt.Tooltip("Objetivo:Q", format=",.0f"), alt.Tooltip("Unidades:Q", format=",.0f"), alt.Tooltip("OperariosActivos:Q", title="Operarios activos"), alt.Tooltip("CumplimientoPct:Q", title="Cumplimiento %", format=".1f")]
     )
     puntos = alt.Chart(g).mark_line(point=True, strokeDash=[6,4], color="white").encode(
@@ -487,7 +688,7 @@ def render_objetivo() -> None:
     familia = (
         det.groupby("Familia", as_index=False)
         .agg(
-            Lineas=("CodigoArticulo","count"),
+            Lineas=("LineaComercialKey","nunique"),
             Unidades=("UnidadesNum","sum"),
             Contenedores=("ControlID","nunique"),
         )

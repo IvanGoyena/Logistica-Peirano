@@ -60,7 +60,7 @@ FUENTES_MAESTRAS = {
 # ==========================================================
 
 @st.cache_data(
-    ttl=270,
+    ttl=600,
     show_spinner=False,
 )
 def _leer_dinamicas() -> dict[str, pd.DataFrame]:
@@ -140,7 +140,7 @@ def _leer_archivo_control(
 
 
 @st.cache_data(
-    ttl=270,
+    ttl=900,
     show_spinner=False,
 )
 def _leer_historico_control() -> pd.DataFrame:
@@ -242,7 +242,7 @@ def _leer_historico_control() -> pd.DataFrame:
 # HISTORICO FILTRAR PREPARACION
 # ==========================================================
 
-@st.cache_data(ttl=270, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _leer_historico_preparaciones() -> pd.DataFrame:
     """
     Fuente de control para Operación en vivo.
@@ -473,7 +473,7 @@ def _leer_preparaciones_recientes_directo() -> pd.DataFrame:
 # HISTORICO ANALITICO DE PREPARACION
 # ==========================================================
 
-@st.cache_data(ttl=270, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _leer_analitico_preparacion() -> pd.DataFrame:
     """Consolida Preparacion <Mes> <Año>.*, excluyendo Filtrar Preparacion."""
     carpeta = Path(CARPETA_WMS)
@@ -516,60 +516,20 @@ def _recuperar_fuente(
     clave: str,
     dataframe: pd.DataFrame | None,
     nombre_visible: str,
-) -> tuple[
-    pd.DataFrame,
-    bool,
-    str | None,
-]:
-    clave_session = (
-        f"tareas_fuente_valida_{clave}"
-    )
+) -> tuple[pd.DataFrame, bool, str | None]:
+    """
+    Devuelve directamente la fuente compartida por st.cache_data.
 
-    if (
-        dataframe is not None
-        and not dataframe.empty
-    ):
-        st.session_state[
-            clave_session
-        ] = dataframe.copy()
-
-        return (
-            dataframe.copy(),
-            True,
-            None,
-        )
-
-    respaldo = (
-        st.session_state.get(
-            clave_session
-        )
-    )
-
-    if (
-        isinstance(
-            respaldo,
-            pd.DataFrame,
-        )
-        and not respaldo.empty
-    ):
-        return (
-            respaldo.copy(),
-            False,
-            (
-                f"{nombre_visible}: "
-                "se conserva la última "
-                "versión válida."
-            ),
-        )
+    No conserva copias completas de DataFrames en st.session_state:
+    una pestaña = una sesión, y el respaldo anterior multiplicaba RAM.
+    """
+    if dataframe is not None and not dataframe.empty:
+        return dataframe, True, None
 
     return (
         pd.DataFrame(),
         False,
-        (
-            f"{nombre_visible}: "
-            "no hay una versión válida "
-            "disponible."
-        ),
+        f"{nombre_visible}: no hay una versión válida disponible.",
     )
 
 

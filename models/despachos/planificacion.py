@@ -438,263 +438,230 @@ def enriquecer_pedidos_planificacion(
     )
 
     # ------------------------------------------------------
-    # EXPRESOS
-    #
-    # REGLA PRINCIPAL:
-    # - Planificacion ya contiene el día de entrega del cliente.
-    # - ZonaExpreso / ZonaAgrupadorExpreso determina el grupo.
-    # - La configuración nunca reemplaza un día informado.
-    #
-    # Ejemplo:
-    # Planificacion = JUEVES
-    # ZonaExpreso = CABA SUR II
-    # Resultado = JUEVES | Grupo 1
+    # EXPRESOS — REGLA DEFINITIVA
     # ------------------------------------------------------
-
-    # ------------------------------------------------------
-    # CLASIFICACIÓN DEFINITIVA DE EXPRESOS
-    # ------------------------------------------------------
+    # El código 05010001 solamente identifica que el pedido nació como
+    # Expreso. La decisión operativa se toma con ZonaExpreso + localidad:
     #
-    # No alcanza con mirar el código de despacho.
-    # Algunos clientes tienen el código genérico de expreso,
-    # pero poseen un día semanal de entrega.
+    # - CABA SUR / CABA SUR I / CABA SUR II: conservan circuito expreso.
+    # - GBA NORTE / OESTE / SUR / CABA NORTE: se integran a la zona semanal.
+    # - Excepciones de config (ej. VALENTIN ALSINA): usan día/grupo explícito.
     #
-    # Esos pedidos deben entrar en la planificación normal:
-    # LUNES, MARTES, MIÉRCOLES, JUEVES o VIERNES.
-    # ------------------------------------------------------
+    # IMPORTANTE: obtener_planificacion_expreso debe recibir también la
+    # localidad; de lo contrario las reglas nuevas del config no pueden
+    # resolverse correctamente.
 
     planificacion_original = (
         tabla["Planificacion"]
         .fillna("")
         .astype(str)
         .str.strip()
+        .str.upper()
     )
 
-    dia_entrega_semanal = (
-        planificacion_original
-        .apply(extraer_dia_entrega)
-    )
-
-    grupo_entrega_semanal = (
-        planificacion_original
-        .apply(extraer_grupo_entrega)
-    )
+    dia_entrega_semanal = planificacion_original.apply(extraer_dia_entrega)
+    grupo_entrega_semanal = planificacion_original.apply(extraer_grupo_entrega)
 
     mascara_codigo_expreso = (
-        tabla["EsExpreso"]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    mascara_entrega_semanal = (
-        dia_entrega_semanal.ne("")
-    )
-
-    mascara_expresos_semanales = (
-        mascara_codigo_expreso
-        & mascara_entrega_semanal
-    )
-
-    # Continúan como expresos solamente aquellos pedidos
-    # cuyo código es expreso y no poseen día semanal.
-    mascara_expresos = (
-        mascara_codigo_expreso
-        & ~mascara_entrega_semanal
-    )
-
-    tabla["EsExpreso"] = mascara_expresos
-
-    # ------------------------------------------------------
-    # INTEGRACIÓN REAL A LA PLANIFICACIÓN SEMANAL
-    # ------------------------------------------------------
-    #
-    # Ejemplo:
-    # 4 - Jueves | Grupo 1
-    #
-    # se convierte en:
-    # Planificacion = JUEVES
-    # GrupoDespacho = 1
-    # EsExpreso = False
-    # ------------------------------------------------------
-
-    tabla.loc[
-        mascara_expresos_semanales,
-        "Planificacion"
-    ] = dia_entrega_semanal.loc[
-        mascara_expresos_semanales
-    ]
-
-    tabla.loc[
-        mascara_expresos_semanales,
-        "PlanificacionConfigurada"
-    ] = dia_entrega_semanal.loc[
-        mascara_expresos_semanales
-    ]
-
-    tabla.loc[
-        mascara_expresos_semanales,
-        "GrupoDespacho"
-    ] = grupo_entrega_semanal.loc[
-        mascara_expresos_semanales
-    ]
-
-    tabla.loc[
-        mascara_expresos_semanales,
-        "ZonaConfigurada"
-    ] = True
-
-    tabla.loc[
-        mascara_expresos_semanales,
-        "ZonaDescripcion"
-    ] = (
-        "ENTREGA SEMANAL "
-        + dia_entrega_semanal.loc[
-            mascara_expresos_semanales
-        ]
+        tabla["EsExpreso"].fillna(False).astype(bool)
     )
 
     if "ZonaExpreso" in tabla.columns:
-
         zona_expreso = (
-            tabla["ZonaExpreso"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
+            tabla["ZonaExpreso"].fillna("").astype(str).str.strip().str.upper()
         )
-
     elif "ZonaAgrupadorExpreso" in tabla.columns:
-
         zona_expreso = (
-            tabla["ZonaAgrupadorExpreso"]
+            tabla["ZonaAgrupadorExpreso"].fillna("").astype(str).str.strip().str.upper()
+        )
+    else:
+        zona_expreso = pd.Series("", index=tabla.index, dtype="object")
+
+    # La carga puede exponer la localidad con distintos nombres según la fuente.
+    columna_localidad = next(
+        (
+            c for c in [
+                "LocalidadExpreso",
+                "Localidad",
+                "LocalidadEntrega",
+                "LocalidadCliente",
+            ]
+            if c in tabla.columns
+        ),
+        None,
+    )
+
+    if columna_localidad is None:
+        localidad_expreso = pd.Series("", index=tabla.index, dtype="object")
+    else:
+        localidad_expreso = (
+            tabla[columna_localidad]
             .fillna("")
             .astype(str)
             .str.strip()
             .str.upper()
-        )
-
-    else:
-
-        zona_expreso = pd.Series(
-            "",
-            index=tabla.index,
-            dtype="object",
         )
 
     columnas_configuracion_expreso = [
         "ZonaExpresoNormalizada",
+        "LocalidadExpresoNormalizada",
         "PlanificacionExpreso",
         "GrupoExpreso",
         "CodigosDespachoExpreso",
         "ZonaExpresoConfigurada",
+        "IntegrarAZona",
+        "MotivoPlanificacionExpreso",
     ]
 
     if tabla.empty:
-
         configuracion_expresos = pd.DataFrame(
             columns=columnas_configuracion_expreso,
             index=tabla.index,
         )
-
     else:
-
-        configuracion_expresos = (
-            zona_expreso
-            .apply(obtener_planificacion_expreso)
-            .apply(pd.Series)
-            .reindex(
-                columns=columnas_configuracion_expreso
-            )
-        )
+        configuracion_expresos = pd.DataFrame(
+            [
+                obtener_planificacion_expreso(zona, localidad)
+                for zona, localidad in zip(zona_expreso, localidad_expreso)
+            ],
+            index=tabla.index,
+        ).reindex(columns=columnas_configuracion_expreso)
 
     tabla["ZonaExpreso"] = (
-        configuracion_expresos[
-            "ZonaExpresoNormalizada"
-        ]
-        .fillna("")
+        configuracion_expresos["ZonaExpresoNormalizada"]
+        .fillna(zona_expreso)
         .astype(str)
         .str.strip()
         .str.upper()
     )
 
     tabla["ZonaExpresoConfigurada"] = (
-        configuracion_expresos[
-            "ZonaExpresoConfigurada"
-        ]
+        configuracion_expresos["ZonaExpresoConfigurada"]
         .fillna(False)
         .astype(bool)
     )
 
-    mascara_expresos_configurados = (
-        mascara_expresos
+    integrar_a_zona = (
+        configuracion_expresos["IntegrarAZona"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    motivo_expreso = (
+        configuracion_expresos["MotivoPlanificacionExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # ------------------------------------------------------
+    # 1) EXPRESOS QUE SE INTEGRAN A ZONAS NORMALES
+    # ------------------------------------------------------
+    mascara_integrados = mascara_codigo_expreso & integrar_a_zona
+
+    # Día: una excepción explícita del config tiene prioridad; para el resto
+    # se conserva el día semanal ya resuelto por la carga del módulo.
+    dia_integrado = dia_entrega_semanal.copy()
+    mascara_excepcion = mascara_integrados & motivo_expreso.eq("EXCEPCION_LOCALIDAD")
+    dia_integrado.loc[mascara_excepcion] = (
+        configuracion_expresos.loc[mascara_excepcion, "PlanificacionExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # Grupo: excepción explícita > grupo informado en Planificacion > grupo 1.
+    grupo_integrado = grupo_entrega_semanal.copy()
+    grupo_integrado.loc[mascara_excepcion] = (
+        configuracion_expresos.loc[mascara_excepcion, "GrupoExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    grupo_integrado = grupo_integrado.replace("", "1")
+
+    mascara_integrados_validos = mascara_integrados & dia_integrado.ne("")
+
+    tabla.loc[mascara_integrados_validos, "Planificacion"] = (
+        dia_integrado.loc[mascara_integrados_validos]
+    )
+    tabla.loc[mascara_integrados_validos, "PlanificacionConfigurada"] = (
+        dia_integrado.loc[mascara_integrados_validos]
+    )
+    tabla.loc[mascara_integrados_validos, "GrupoDespacho"] = (
+        grupo_integrado.loc[mascara_integrados_validos]
+    )
+    tabla.loc[mascara_integrados_validos, "ZonaConfigurada"] = True
+    tabla.loc[mascara_integrados_validos, "EsExpreso"] = False
+    tabla.loc[mascara_integrados_validos, "ZonaDescripcion"] = (
+        "EXPRESO INTEGRADO - "
+        + tabla.loc[mascara_integrados_validos, "ZonaExpreso"].astype(str)
+    )
+
+    # ------------------------------------------------------
+    # 2) CIRCUITOS EXPRESOS QUE DEBEN PERMANECER SEPARADOS
+    # ------------------------------------------------------
+    mascara_circuito_expreso = (
+        mascara_codigo_expreso
+        & ~integrar_a_zona
         & tabla["ZonaExpresoConfigurada"]
     )
 
-    # El grupo sí proviene de la zona configurada.
-    tabla.loc[
-        mascara_expresos_configurados,
-        "GrupoDespacho"
-    ] = configuracion_expresos.loc[
-        mascara_expresos_configurados,
-        "GrupoExpreso"
-    ].values
+    # Para estos circuitos la planificación operativa es el nombre del
+    # agrupador expreso, NO el día (JUEVES). Así CABA SUR I/II no se mezclan.
+    tabla.loc[mascara_circuito_expreso, "Planificacion"] = (
+        tabla.loc[mascara_circuito_expreso, "ZonaExpreso"]
+    )
+    tabla.loc[mascara_circuito_expreso, "PlanificacionConfigurada"] = (
+        tabla.loc[mascara_circuito_expreso, "ZonaExpreso"]
+    )
+    tabla.loc[mascara_circuito_expreso, "GrupoDespacho"] = (
+        configuracion_expresos.loc[mascara_circuito_expreso, "GrupoExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    tabla.loc[mascara_circuito_expreso, "ZonaDescripcion"] = (
+        tabla.loc[mascara_circuito_expreso, "ZonaExpreso"]
+    )
+    tabla.loc[mascara_circuito_expreso, "ZonaConfigurada"] = True
+    tabla.loc[mascara_circuito_expreso, "EsExpreso"] = True
 
-    tabla.loc[
-        mascara_expresos_configurados,
-        "ZonaDescripcion"
-    ] = tabla.loc[
-        mascara_expresos_configurados,
-        "ZonaExpreso"
-    ]
-
-    # Planificacion conserva la agrupación operativa:
-    # CABA SUR, CABA SUR II, CABA NORTE, etc.
-    #
-    # El día configurado se guarda por separado para control,
-    # pero nunca reemplaza el nombre de la zona.
     tabla["DiaEntregaConfigurado"] = ""
-
-    tabla.loc[
-        mascara_expresos_configurados,
-        "DiaEntregaConfigurado"
-    ] = configuracion_expresos.loc[
-        mascara_expresos_configurados,
-        "PlanificacionExpreso"
-    ].values
-
-    # Para validar los expresos, la planificación configurada
-    # coincide con la propia agrupación operativa.
-    tabla.loc[
-        mascara_expresos,
-        "PlanificacionConfigurada"
-    ] = tabla.loc[
-        mascara_expresos,
-        "Planificacion"
-    ]
-
-    tabla.loc[
-        mascara_expresos,
-        "ZonaConfigurada"
-    ] = True
-
-    # Las zonas todavía no configuradas no se eliminan.
-    # Quedan identificadas para poder agregarlas después.
-    mascara_expresos_sin_config = (
-        mascara_expresos
-        & ~tabla["ZonaExpresoConfigurada"]
+    tabla.loc[mascara_circuito_expreso, "DiaEntregaConfigurado"] = (
+        configuracion_expresos.loc[
+            mascara_circuito_expreso,
+            "PlanificacionExpreso",
+        ]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    tabla.loc[mascara_integrados_validos, "DiaEntregaConfigurado"] = (
+        dia_integrado.loc[mascara_integrados_validos]
     )
 
-    tabla.loc[
-        mascara_expresos_sin_config,
-        "ZonaDescripcion"
-    ] = zona_expreso.loc[
-        mascara_expresos_sin_config
-    ]
+    # ------------------------------------------------------
+    # 3) EXPRESOS NO PARAMETRIZADOS
+    # ------------------------------------------------------
+    mascara_expresos_sin_config = (
+        mascara_codigo_expreso
+        & ~tabla["ZonaExpresoConfigurada"]
+        & ~mascara_integrados_validos
+    )
 
-    tabla.loc[
-        mascara_expresos_sin_config,
-        "GrupoDespacho"
-    ] = "EXPRESO SIN CONFIG"
+    tabla.loc[mascara_expresos_sin_config, "EsExpreso"] = True
+    tabla.loc[mascara_expresos_sin_config, "ZonaDescripcion"] = (
+        zona_expreso.loc[mascara_expresos_sin_config]
+    )
+    tabla.loc[mascara_expresos_sin_config, "GrupoDespacho"] = "EXPRESO SIN CONFIG"
+    tabla.loc[mascara_expresos_sin_config, "ZonaConfigurada"] = True
+    tabla.loc[mascara_expresos_sin_config, "PlanificacionConfigurada"] = (
+        tabla.loc[mascara_expresos_sin_config, "Planificacion"]
+    )
 
     # ------------------------------------------------------
     # PRIORIDAD ABSOLUTA — RETIRA

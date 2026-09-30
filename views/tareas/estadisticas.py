@@ -88,6 +88,8 @@ def _tabla_ranking(eventos: pd.DataFrame, proceso: str) -> pd.DataFrame:
 
     tabla = ranking.copy()
     tabla.insert(0, "#", pd.Series(range(1, len(tabla) + 1), dtype="string"))
+    if "LineasComerciales" in tabla.columns:
+        tabla = tabla.rename(columns={"LineasComerciales": "Líneas comerciales"})
     if proceso == "Control":
         tabla = tabla.rename(columns={"Tareas": "Controles", "Unid/Tarea": "Unid/Control"})
 
@@ -101,6 +103,9 @@ def _tabla_ranking(eventos: pd.DataFrame, proceso: str) -> pd.DataFrame:
         "Usuario": "TOTAL",
         col_eventos: total_eventos,
         "Preparaciones": int(eventos["Id"].nunique()) if "Id" in eventos else 0,
+        "Líneas comerciales": int(
+            eventos["LineaComercialKey"].replace("", pd.NA).dropna().nunique()
+        ) if "LineaComercialKey" in eventos else 0,
         "Unidades": int(total_unidades),
         "SKUs": int(eventos["CodigoArticulo"].nunique()) if "CodigoArticulo" in eventos else 0,
         col_ratio: round(total_unidades / total_eventos, 1) if total_eventos else 0.0,
@@ -243,11 +248,14 @@ def render_estadisticas_tareas() -> None:
 
     def _kpis_proceso(df: pd.DataFrame) -> dict[str, int]:
         if df is None or df.empty:
-            return {"unidades": 0, "eventos": 0, "pickeos": 0, "preparaciones": 0, "skus": 0, "usuarios": 0}
+            return {"unidades": 0, "eventos": 0, "pickeos": 0, "lineas_comerciales": 0, "preparaciones": 0, "skus": 0, "usuarios": 0}
         return {
             "unidades": int(pd.to_numeric(df.get(_col_unidades(df), 0), errors="coerce").fillna(0).sum()),
             "eventos": int(pd.to_numeric(df.get("EventosMetric", 0), errors="coerce").fillna(0).sum()),
             "pickeos": int(pd.to_numeric(df.get("PickeosMetric", 0), errors="coerce").fillna(0).sum()),
+            "lineas_comerciales": int(
+                df["LineaComercialKey"].replace("", pd.NA).dropna().nunique()
+            ) if "LineaComercialKey" in df else 0,
             "preparaciones": int(df["Id"].nunique()) if "Id" in df else 0,
             "skus": int(df["CodigoArticulo"].replace("", pd.NA).dropna().nunique()) if "CodigoArticulo" in df else 0,
             "usuarios": int(df["Usuario"].nunique()) if "Usuario" in df else 0,
@@ -296,7 +304,7 @@ def render_estadisticas_tareas() -> None:
         ("Unidades pickeadas", _fmt(kp["unidades"]), "Volumen procesado en Picking"),
         ("Pickeos", _fmt(kp["pickeos"]), "Líneas de pickeo registradas"),
         ("Tareas", _fmt(kp["eventos"]), "CuantasTareas consolidado / proxy en vivo"),
-        ("SKUs", _fmt(kp["skus"]), "Artículos únicos trabajados"),
+        ("Líneas comerciales", _fmt(kp["lineas_comerciales"]), "Pedido + código único"),
         ("Usuarios activos", _fmt(kp["usuarios"]), "Operarios con actividad"),
         ("Promedio líneas", f"{promedio_lineas_pick:.2f}", "Unidades / pickeos"),
     ])
@@ -306,7 +314,7 @@ def render_estadisticas_tareas() -> None:
         ("Unidades controladas", _fmt(kc["unidades"]), "Volumen procesado en Control"),
         ("Pickeos control", _fmt(kc["pickeos"]), "Líneas controladas"),
         ("Carros controlados", _fmt(carros_controlados), "Preparaciones / carros únicos controlados"),
-        ("SKUs", _fmt(kc["skus"]), "Artículos únicos controlados"),
+        ("Líneas comerciales", _fmt(kc["lineas_comerciales"]), "Pedido + código único"),
         ("Usuarios activos", _fmt(kc["usuarios"]), "Operarios con actividad"),
         ("Promedio líneas", f"{promedio_lineas_control:.2f}", "Unidades / pickeos control"),
     ])
@@ -340,6 +348,7 @@ def render_estadisticas_tareas() -> None:
         fuentes.get("preparacion_analitico"),
         fuentes.get("volumetria"),
         fuentes.get("ubicaciones"),
+        base_live=base,
         fecha_referencia=hasta,
         usuarios_excluidos=USUARIOS_EXCLUIDOS_ESTADISTICAS,
     )
@@ -414,7 +423,7 @@ def render_estadisticas_tareas() -> None:
             "Bronce": "🥉",
         })
         cols_mes = ["#", "Usuario", "Puntos", "Score prom.", "Días", "Tareas", "Horas", "Unidades", "Líneas", "🥇", "🥈", "🥉"]
-        tabla_mes = tabla_mes.rename(columns={"Lineas": "Líneas"})
+        tabla_mes = tabla_mes.rename(columns={"Lineas": "Líneas comerciales"})
         tabla_mes = tabla_mes[[c for c in cols_mes if c in tabla_mes.columns]]
 
         rm1, rm2 = st.columns([1.55, .85], vertical_alignment="top")
@@ -500,7 +509,7 @@ def render_estadisticas_tareas() -> None:
             detalle_t = detalle_t[[
                 "Fecha", "TareaId", "Unidades", "Lineas", "SKUs",
                 "Minutos", "m³", "Kg", "Recorrido", "Score", "Puntos",
-            ]].rename(columns={"Lineas": "Líneas"})
+            ]].rename(columns={"Lineas": "Líneas comerciales"})
             st.dataframe(detalle_t, hide_index=True, width="stretch", height=390)
 
             # Desglose visual de la tarea seleccionada.
@@ -512,7 +521,7 @@ def render_estadisticas_tareas() -> None:
             )
             ft = tareas_u.loc[tareas_u["TareaId"].astype(str).eq(str(tarea_sel))].iloc[0]
             desglose_t = pd.DataFrame({
-                "Componente": ["Unidades/h", "Tareas/h", "Líneas/h", "Volumen/h", "Kg/h", "Recorrido/h"],
+                "Componente": ["Unidades/h", "Tareas/h", "Líneas comerciales/h", "Volumen/h", "Kg/h", "Recorrido/h"],
                 "Puntos": [ft["PtsUnid"], ft["PtsTareas"], ft["PtsLineas"], ft["PtsM3"], ft["PtsKg"], ft["PtsRecorrido"]],
             })
             desglose_t["Puntos"] = desglose_t["Puntos"].round(1)

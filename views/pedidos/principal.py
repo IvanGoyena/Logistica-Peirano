@@ -3,6 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from config_planificacion import (
+    ZONAS_PLANIFICACION,
+    PLANIFICACION_FALLBACK_EXPRESOS,
+    obtener_planificacion_expreso,
+)
+
 from utils.consultas.leer_gestion_consultas import (
     obtener_solicitudes_abiertas, obtener_urgencias_activas,
     obtener_anulaciones_pendientes, obtener_reclamos_abiertos,
@@ -674,19 +680,19 @@ def render_modulo_pedidos() -> None:
 
 
     # =====================================================
-    # REFERENCIAS FINALES DE PLANIFICACIÓN
-    # =====================================================
-    #
-    # El día de entrega es siempre la referencia principal:
-    # LUNES, MARTES, MIERCOLES, JUEVES, VIERNES, DIARIOS
-    # o EXPRESOS.
-    #
-    # La zona del expreso se conserva en una columna separada
-    # para determinar el grupo dentro de ese día.
+    # PLANIFICACIÓN FINAL - MISMA REGLA QUE DESPACHOS
     # =====================================================
 
     zona_expreso = (
         tabla["ZonaAgrupadorExpreso"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    localidad_expreso = (
+        tabla["LocalidadExpreso"]
         .fillna("")
         .astype(str)
         .str.strip()
@@ -701,59 +707,129 @@ def render_modulo_pedidos() -> None:
         .str.upper()
     )
 
-    # =====================================================
-    # REGLA DE PRIORIDAD ABSOLUTA: RETIRA
-    # =====================================================
-    #
-    # La referencia RETIRA proviene del agrupador de expresos.
-    # Si ZonaAgrupadorExpreso indica RETIRA, debe prevalecer sobre
-    # cualquier frecuencia semanal, zona o código de despacho.
-    # =====================================================
-
     es_retira = zona_expreso.eq("RETIRA")
 
     tabla["DiaEntrega"] = frecuencia_entrega.where(
         ~es_retira,
-        "RETIRA"
+        "RETIRA",
     )
-
     tabla["ZonaExpreso"] = zona_expreso
 
-    # =====================================================
-    # REGLA DEFINITIVA DE PLANIFICACIÓN
-    # =====================================================
-    #
-    # Orden de prioridad:
-    # 1. RETIRA informado en ZonaAgrupadorExpreso.
-    # 2. Día semanal informado en FrecuenciaEntrega.
-    # 3. Zona del expreso.
-    # 4. Frecuencia de entrega restante.
-    # =====================================================
-
     dias_entrega_semanal = {
-        "LUNES",
-        "MARTES",
-        "MIERCOLES",
-        "MIÉRCOLES",
-        "JUEVES",
-        "VIERNES",
+        "LUNES", "MARTES", "MIERCOLES", "MIÉRCOLES", "JUEVES", "VIERNES",
     }
+    es_entrega_semanal = frecuencia_entrega.isin(dias_entrega_semanal)
 
-    es_entrega_semanal = frecuencia_entrega.isin(
-        dias_entrega_semanal
+    # Índice de localidades normales: localidad -> día/grupo de la zona.
+    indice_localidades_zona: dict[str, dict] = {}
+    for codigo_zona, cfg_zona in ZONAS_PLANIFICACION.items():
+        descripcion = str(cfg_zona.get("descripcion", "")).strip().upper()
+        if descripcion:
+            indice_localidades_zona.setdefault(
+                descripcion,
+                {
+                    "codigo": str(codigo_zona).strip(),
+                    "planificacion": str(
+                        cfg_zona.get("planificacion", "")
+                    ).strip().upper(),
+                    "grupo": str(cfg_zona.get("grupo", "")).strip(),
+                },
+            )
+
+    def resolver_planificacion_expreso(zona: str, localidad: str) -> str:
+        resolucion = obtener_planificacion_expreso(zona, localidad)
+
+        # Excepción explícita, por ejemplo VALENTIN ALSINA -> MARTES.
+        planificacion_directa = str(
+            resolucion.get("PlanificacionExpreso", "")
+        ).strip().upper()
+        if planificacion_directa:
+            # Los circuitos CABA SUR / I / II deben seguir visibles como
+            # circuitos expresos, no convertirse en su día interno.
+            if resolucion.get("MotivoPlanificacionExpreso") == "CIRCUITO_EXPRESO":
+                return str(
+                    resolucion.get("ZonaExpresoNormalizada", zona)
+                ).strip().upper()
+            return planificacion_directa
+
+        if resolucion.get("IntegrarAZona", False):
+            cfg_localidad = indice_localidades_zona.get(localidad)
+            if cfg_localidad:
+                return cfg_localidad["planificacion"]
+
+            # Respaldo operativo parametrizado (ej. GBA OESTE -> VIERNES).
+            zona_normalizada = str(
+                resolucion.get("ZonaExpresoNormalizada", zona)
+            ).strip().upper()
+            fallback = str(
+                PLANIFICACION_FALLBACK_EXPRESOS.get(zona_normalizada, "")
+            ).strip().upper()
+            if fallback:
+                return fallback
+
+            # Si no existe equivalencia ni fallback, dejar visible la zona
+            # para detectar el maestro faltante sin inventar asignaciones.
+            return zona_normalizada
+
+        return str(
+            resolucion.get("ZonaExpresoNormalizada", zona)
+        ).strip().upper()
+
+    tabla["Planificacion"] = ""
+    tabla.loc[es_retira, "Planificacion"] = "RETIRA"
+
+    mascara_no_retira = ~es_retira
+
+    # CABA SUR / I / II conservan su circuito aunque FrecuenciaEntrega
+    # tenga un día semanal cargado.
+    circuitos_expresos_separados = {"CABA SUR", "CABA SUR I", "CABA SUR II"}
+    mascara_circuito_expreso = (
+        mascara_no_retira
+        & zona_expreso.isin(circuitos_expresos_separados)
+    )
+    tabla.loc[mascara_circuito_expreso, "Planificacion"] = (
+        zona_expreso.loc[mascara_circuito_expreso]
     )
 
-    planificacion_base = frecuencia_entrega.where(
-        es_entrega_semanal,
-        zona_expreso.where(
-            zona_expreso.ne(""),
-            frecuencia_entrega
+    # Familias integradas deben resolverse por LocalidadExpreso, no por
+    # FrecuenciaEntrega del cliente.
+    mascara_integrar_zona = (
+        zona_expreso.eq("CABA NORTE")
+        | zona_expreso.str.startswith("GBA NORTE")
+        | zona_expreso.str.startswith("GBA OESTE")
+        | zona_expreso.str.startswith("GBA SUR")
+        | localidad_expreso.eq("VALENTIN ALSINA")
+    )
+
+    mascara_dia_semanal = (
+        mascara_no_retira
+        & ~mascara_circuito_expreso
+        & ~mascara_integrar_zona
+        & es_entrega_semanal
+    )
+    tabla.loc[mascara_dia_semanal, "Planificacion"] = (
+        frecuencia_entrega.loc[mascara_dia_semanal]
+    )
+
+    mascara_resolver_expreso = (
+        mascara_no_retira
+        & tabla["Planificacion"].eq("")
+        & zona_expreso.ne("")
+    )
+    tabla.loc[mascara_resolver_expreso, "Planificacion"] = [
+        resolver_planificacion_expreso(zona, localidad)
+        for zona, localidad in zip(
+            zona_expreso.loc[mascara_resolver_expreso],
+            localidad_expreso.loc[mascara_resolver_expreso],
         )
-    )
+    ]
 
-    tabla["Planificacion"] = planificacion_base.where(
-        ~es_retira,
-        "RETIRA"
+    # Pedidos no expresos: conservar la frecuencia existente.
+    mascara_sin_planificacion = (
+        mascara_no_retira & tabla["Planificacion"].eq("")
+    )
+    tabla.loc[mascara_sin_planificacion, "Planificacion"] = (
+        frecuencia_entrega.loc[mascara_sin_planificacion]
     )
 
     # =====================================================
@@ -774,6 +850,7 @@ def render_modulo_pedidos() -> None:
         "CodigoDespacho",
         "FrecuenciaEntrega",
         "DiaEntrega",
+        "LocalidadExpreso",
         "ZonaAgrupadorExpreso",
         "ZonaExpreso",
         "Planificacion",
