@@ -219,6 +219,7 @@ def _cerrar_agrupador_manual(agrupador: str) -> None:
     )
 
 
+@st.cache_data(ttl=300, max_entries=8, show_spinner=False)
 def _mapa_controladores_por_preparacion_area(
     contexto: dict[str, object],
 ) -> dict[tuple[str, str], dict[str, object]]:
@@ -334,6 +335,7 @@ def _mapa_controladores_por_preparacion_area(
     }
 
 
+@st.cache_data(ttl=300, max_entries=8, show_spinner=False)
 def _despachos_id_expirados_por_ultimo_control(
     contexto: dict[str, object],
     horas: int = 8,
@@ -453,7 +455,9 @@ def _despachos_id_expirados_por_ultimo_control(
         .all()
     )
 
-    t["_CerradaDIGIP"] = t["_PrepKey"].map(estado_por_prep).fillna(False)
+    # .eq(True) convierte los faltantes directamente en False sin el
+    # downcasting de fillna(False) que generaba miles de FutureWarning.
+    t["_CerradaDIGIP"] = t["_PrepKey"].map(estado_por_prep).eq(True)
 
     resumen_digip = (
         t.groupby("_DespachoIdKey", as_index=False)
@@ -1090,6 +1094,8 @@ def _render_indicadores(
                     )
                     invalidar_cache_tareas()
                     construir_contexto_tareas.clear()
+                    _mapa_controladores_por_preparacion_area.clear()
+                    _despachos_id_expirados_por_ultimo_control.clear()
                     st.rerun()
 
             if filtro_control != "Todos":
@@ -2250,6 +2256,8 @@ def render_tareas() -> None:
         if st.button("🔄 Actualizar ahora", width="stretch"):
             invalidar_cache_tareas()
             construir_contexto_tareas.clear()
+            _mapa_controladores_por_preparacion_area.clear()
+            _despachos_id_expirados_por_ultimo_control.clear()
             st.rerun()
 
     # Navegación con carga bajo demanda: a diferencia de st.tabs,
