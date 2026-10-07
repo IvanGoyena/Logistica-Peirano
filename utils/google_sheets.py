@@ -317,12 +317,19 @@ COLUMNAS_PLANNING_HISTORIAL = [
     "Lineas", "Unidades", "Accion", "Usuario", "Fecha", "Observacion",
 ]
 
+# Persistencia del agrupado físico del módulo Tareas.
+COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO = [
+    "Clave", "DespachoId", "Preparacion", "Pedido", "Agrupador", "Estado",
+]
+
 
 ESTRUCTURA_HOJAS = {
 
     "PlanningCoordinacion": COLUMNAS_PLANNING_COORDINACION,
 
     "PlanningHistorial": COLUMNAS_PLANNING_HISTORIAL,
+
+    "PedidosAgrupadosDespacho": COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO,
 
     "Solicitudes": COLUMNAS_SOLICITUDES,
 
@@ -1138,6 +1145,69 @@ def numero_a_columna_excel(numero: int) -> str:
         resultado = chr(65 + resto) + resultado
 
     return resultado
+
+
+# ==========================================================
+# API DE AGRUPADO FÍSICO / TAREAS
+# ==========================================================
+
+def leer_pedidos_agrupados_despacho() -> pd.DataFrame:
+    """Lee los pedidos marcados como agrupados físicamente."""
+    asegurar_hoja("PedidosAgrupadosDespacho")
+    return leer_hoja("PedidosAgrupadosDespacho")
+
+
+def guardar_pedidos_agrupados_despacho(registros: list[dict[str, Any]]) -> int:
+    """
+    Guarda en lote el estado de agrupado físico.
+
+    La Clave (DespachoId|Preparacion) es única: si ya existe, se actualiza
+    en lugar de duplicar la fila. Devuelve la cantidad de registros procesados.
+    """
+    if not registros:
+        return 0
+
+    asegurar_hoja("PedidosAgrupadosDespacho")
+    actuales = leer_hoja("PedidosAgrupadosDespacho")
+
+    claves_existentes: set[str] = set()
+    if not actuales.empty and "Clave" in actuales.columns:
+        claves_existentes = set(
+            actuales["Clave"].fillna("").astype(str).str.strip().loc[lambda x: x.ne("")].tolist()
+        )
+
+    nuevos: list[dict[str, Any]] = []
+    procesados = 0
+
+    for registro in registros:
+        clave = limpiar_valor(registro.get("Clave", ""))
+        if not clave:
+            continue
+
+        fila = {
+            columna: limpiar_valor(registro.get(columna, ""))
+            for columna in COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO
+        }
+        fila["Clave"] = clave
+        fila["Estado"] = fila["Estado"] or "AGRUPADO"
+
+        if clave in claves_existentes:
+            actualizar_registro(
+                "PedidosAgrupadosDespacho",
+                "Clave",
+                clave,
+                fila,
+            )
+        else:
+            nuevos.append(fila)
+            claves_existentes.add(clave)
+
+        procesados += 1
+
+    if nuevos:
+        agregar_registros("PedidosAgrupadosDespacho", nuevos)
+
+    return procesados
 
 
 # ==========================================================
