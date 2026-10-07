@@ -22,9 +22,6 @@ from models.expresos import construir_tabla_expresos
 # FUENTES BASE DEL MODULO PEDIDOS
 # ==========================================================
 
-@st.cache_data(
-    show_spinner="Cargando datos operativos..."
-)
 def cargar_datos_base():
     return {
         # WMS
@@ -67,10 +64,12 @@ def cargar_datos_base():
             "Datos Expresos",
             cache=True,
         ),
+        # La volumetría cambia operativamente y debe reflejarse
+        # inmediatamente en Pedidos. No conservar una copia vieja en cache.
         "volumetria": leer_archivo(
             CARPETA_MAESTROS,
             "Maestro Volumetria",
-            cache=True,
+            cache=False,
         ),
         "personal": leer_archivo(
             CARPETA_MAESTROS,
@@ -173,7 +172,6 @@ def construir_tablas_base_cacheadas(
 # ==========================================================
 
 def limpiar_cache_pedidos() -> None:
-    cargar_datos_base.clear()
     cargar_datos_cobertura.clear()
     construir_fechas_oc_cobertura.clear()
     construir_tablas_base_cacheadas.clear()

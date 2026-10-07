@@ -11,6 +11,10 @@ import streamlit as st
 from models.tareas_modulo.contexto import construir_contexto_tareas
 from models.tareas import sugerir_equipamiento_operativo
 from utils.rendimiento import medir_tiempo, mostrar_info_dataframe
+from utils.google_sheets import (
+    leer_pedidos_agrupados_despacho,
+    guardar_pedidos_agrupados_despacho,
+)
 from utils.tareas.carga import cargar_fuentes_tareas, invalidar_cache_tareas
 from utils.tareas.formatos import preparar_tabla_operativa_visual, resaltar_carro
 from utils.tareas.graficos import grafico_avance_despacho, grafico_sectorizaciones
@@ -217,6 +221,68 @@ def _cerrar_agrupador_manual(agrupador: str) -> None:
     pd.concat([df, nuevo], ignore_index=True).to_csv(
         _ARCHIVO_CIERRES_AGRUPACION, index=False, encoding="utf-8-sig"
     )
+
+
+# ==========================================================
+# OCULTAMIENTO PERSISTENTE DE PEDIDOS EN DESPACHO
+# Fuente: Google Sheets / PedidosAgrupadosDespacho
+# ==========================================================
+def _clave_operativa(valor: object) -> str:
+    texto = str(valor if valor is not None else "").strip()
+    return re.sub(r"\.0+$", "", texto)
+
+
+def _leer_pedidos_ocultos() -> pd.DataFrame:
+    try:
+        df = leer_pedidos_agrupados_despacho()
+    except Exception as error:
+        st.warning(f"No se pudo leer Agrupado físico desde Google Sheets: {error}")
+        return pd.DataFrame()
+    if not df.empty and "Estado" in df.columns:
+        df = df.loc[df["Estado"].fillna("").astype(str).str.upper().ne("RESTAURADO")].copy()
+    return df
+
+
+def _claves_pedidos_ocultos() -> set[tuple[str, str]]:
+    df = _leer_pedidos_ocultos()
+    if df.empty:
+        return set()
+    return {
+        (_clave_operativa(r.get("DespachoId","")), _clave_operativa(r.get("Preparacion","")))
+        for _, r in df.iterrows()
+        if _clave_operativa(r.get("DespachoId","")) and _clave_operativa(r.get("Preparacion",""))
+    }
+
+
+def _ocultar_pedidos_manual_lote(registros: list[dict]) -> int:
+    payload=[]
+    for r in registros:
+        despacho=_clave_operativa(r.get("despacho_id",r.get("DespachoId","")))
+        prep=_clave_operativa(r.get("preparacion",r.get("Preparacion","")))
+        if despacho and prep:
+            payload.append({
+                "Clave":f"{despacho}|{prep}","DespachoId":despacho,"Preparacion":prep,
+                "Pedido":str(r.get("pedido",r.get("Pedido",""))).strip(),
+                "Agrupador":str(r.get("agrupador",r.get("Agrupador",""))).strip(),
+                "Estado":"AGRUPADO",
+            })
+    return guardar_pedidos_agrupados_despacho(payload) if payload else 0
+
+
+def _ocultar_pedido_manual(*, despacho_id, preparacion, pedido, agrupador) -> None:
+    _ocultar_pedidos_manual_lote([{"despacho_id":despacho_id,"preparacion":preparacion,"pedido":pedido,"agrupador":agrupador}])
+
+
+def _ocultar_agrupador_completo(control: pd.DataFrame, agrupador: str) -> None:
+    if control.empty or "Despacho" not in control.columns:
+        return
+    base=control.loc[control["Despacho"].astype(str).str.strip().eq(str(agrupador).strip())].copy()
+    registros=[]
+    for preparacion,grupo in base.groupby("Preparacion",dropna=False):
+        fila=grupo.iloc[0]
+        registros.append({"despacho_id":fila.get("DespachoId",""),"preparacion":preparacion,
+                          "pedido":fila.get("_PedidoVisible",preparacion),"agrupador":agrupador})
+    _ocultar_pedidos_manual_lote(registros)
 
 
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
@@ -455,9 +521,18 @@ def _despachos_id_expirados_por_ultimo_control(
         .all()
     )
 
-    # .eq(True) convierte los faltantes directamente en False sin el
-    # downcasting de fillna(False) que generaba miles de FutureWarning.
-    t["_CerradaDIGIP"] = t["_PrepKey"].map(estado_por_prep).eq(True)
+    # Pedidos DIGIP es el universo ACTIVO. Cuando un pedido pasa a
+    # COMPLETO/COMPLETADO puede dejar de aparecer en ese reporte aunque en
+    # Informe Tareas haya quedado una preparación técnicamente abierta.
+    #
+    # Por eso:
+    # - si la preparación sigue en Pedidos DIGIP y está PENDIENTE/PREPARACION:
+    #   sigue abierta;
+    # - si aparece explícitamente cerrada: está cerrada;
+    # - si ya NO aparece en Pedidos DIGIP: para esta lógica operativa se
+    #   considera cerrada/retirada del universo activo.
+    _estado_mapeado = t["_PrepKey"].map(estado_por_prep)
+    t["_CerradaDIGIP"] = _estado_mapeado.eq(True) | _estado_mapeado.isna()
 
     resumen_digip = (
         t.groupby("_DespachoIdKey", as_index=False)
@@ -553,6 +628,177 @@ def _render_indicadores(
             )
 
         avance = contexto["avance_despachos"].copy()
+
+        # ------------------------------------------------------
+        # MISMA VIGENCIA QUE "ESTADO DE PREPARACIONES / CONTROL"
+        # ------------------------------------------------------
+        # La ventana de 8 h NO depende de que la preparación haya quedado
+        # técnicamente cerrada en WMS. Si DIGIP ya confirma el pedido/preparación
+        # como COMPLETO/COMPLETADO, _despachos_id_expirados_por_ultimo_control()
+        # toma el último control real y vence esa instancia después de 8 h.
+        #
+        # Se filtra por DespachoId (no por nombre, porque los nombres se reutilizan).
+        _ids_expirados_avance = _despachos_id_expirados_por_ultimo_control(
+            contexto,
+            horas=8,
+        )
+        if (
+            _ids_expirados_avance
+            and not avance.empty
+            and "DespachoId" in avance.columns
+        ):
+            _id_avance = (
+                avance["DespachoId"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+                .str.replace(r"\.0+$", "", regex=True)
+            )
+            avance = avance.loc[
+                ~_id_avance.isin(_ids_expirados_avance)
+            ].copy()
+
+        # ------------------------------------------------------
+        # VIGENCIA CORRECTA: DIGIP ACTIVO MANDA
+        # ------------------------------------------------------
+        # Un DespachoId NO se elimina por tener tareas viejas si todavía contiene
+        # alguna preparación/pedido activo en Pedidos DIGIP.
+        #
+        # Sólo vencemos por 8 h a una instancia que YA NO tenga ninguna
+        # preparación activa en DIGIP. Esto evita sacar CAMIONETA EXP 1, que está
+        # operativa, y a la vez limpia residuos históricos cuya preparación quedó
+        # técnicamente abierta en WMS.
+        _tareas_vigencia = contexto.get("_tareas_raw")
+        _pedidos_vigencia = contexto.get("_pedidos_raw")
+
+        if (
+            isinstance(_tareas_vigencia, pd.DataFrame)
+            and not _tareas_vigencia.empty
+            and isinstance(_pedidos_vigencia, pd.DataFrame)
+            and not _pedidos_vigencia.empty
+            and {"DespachoId", "PreparacionId", "FechaHoraEstado"}.issubset(
+                _tareas_vigencia.columns
+            )
+            and not avance.empty
+            and "DespachoId" in avance.columns
+        ):
+            _tv = _tareas_vigencia[
+                ["DespachoId", "PreparacionId", "FechaHoraEstado"]
+            ].copy()
+            _pv = _pedidos_vigencia.copy()
+            _pv.columns = [
+                str(c).replace("\ufeff", "").strip() for c in _pv.columns
+            ]
+
+            def _key_vigencia(serie: pd.Series) -> pd.Series:
+                return (
+                    serie.astype("string")
+                    .fillna("")
+                    .str.strip()
+                    .str.replace(r"\.0+$", "", regex=True)
+                )
+
+            _tv["_DespachoIdKey"] = _key_vigencia(_tv["DespachoId"])
+            _tv["_PrepKey"] = _key_vigencia(_tv["PreparacionId"])
+            _tv["_FechaActividad"] = pd.to_datetime(
+                _tv["FechaHoraEstado"],
+                errors="coerce",
+                dayfirst=True,
+            )
+
+            _prep_col = next(
+                (
+                    c for c in [
+                        "Preparación Id",
+                        "Preparacion Id",
+                        "PreparacionId",
+                        "PreparaciónId",
+                    ]
+                    if c in _pv.columns
+                ),
+                None,
+            )
+            _estado_col = next(
+                (
+                    c for c in ["Estado", "Estado pedido", "Estado Pedido"]
+                    if c in _pv.columns
+                ),
+                None,
+            )
+            _estado_prep_col = next(
+                (
+                    c for c in [
+                        "Estado preparación",
+                        "Estado preparacion",
+                        "EstadoPreparacion",
+                        "Estado Preparación",
+                    ]
+                    if c in _pv.columns
+                ),
+                None,
+            )
+
+            if _prep_col:
+                _pv["_PrepKey"] = _key_vigencia(_pv[_prep_col])
+
+                _estado_pedido = (
+                    _pv[_estado_col]
+                    .astype("string").fillna("").str.strip().str.upper()
+                    if _estado_col
+                    else pd.Series("", index=_pv.index, dtype="string")
+                )
+                _estado_prep = (
+                    _pv[_estado_prep_col]
+                    .astype("string").fillna("").str.strip().str.upper()
+                    if _estado_prep_col
+                    else pd.Series("", index=_pv.index, dtype="string")
+                )
+
+                _estados_abiertos = {
+                    "PENDIENTE",
+                    "PREPARACION",
+                    "PREPARACIÓN",
+                    "EN PREPARACION",
+                    "EN PREPARACIÓN",
+                }
+                _pv["_ActivaDIGIP"] = (
+                    _estado_pedido.isin(_estados_abiertos)
+                    | _estado_prep.isin(_estados_abiertos)
+                )
+
+                _preps_activas = set(
+                    _pv.loc[
+                        _pv["_PrepKey"].ne("") & _pv["_ActivaDIGIP"],
+                        "_PrepKey",
+                    ].astype(str).tolist()
+                )
+
+                _tv["_PrepActivaDIGIP"] = _tv["_PrepKey"].isin(_preps_activas)
+
+                _estado_despacho = (
+                    _tv.loc[_tv["_DespachoIdKey"].ne("")]
+                    .groupby("_DespachoIdKey", as_index=False)
+                    .agg(
+                        _TieneActivaDIGIP=("_PrepActivaDIGIP", "any"),
+                        _UltimaActividad=("_FechaActividad", "max"),
+                    )
+                )
+
+                _limite_8h = pd.Timestamp.now() - pd.Timedelta(hours=8)
+                _ids_vencidos_sin_activos = set(
+                    _estado_despacho.loc[
+                        (~_estado_despacho["_TieneActivaDIGIP"])
+                        & _estado_despacho["_UltimaActividad"].notna()
+                        & _estado_despacho["_UltimaActividad"].le(_limite_8h),
+                        "_DespachoIdKey",
+                    ].astype(str).tolist()
+                )
+
+                if _ids_vencidos_sin_activos:
+                    _id_avance = _key_vigencia(avance["DespachoId"])
+                    avance = avance.loc[
+                        ~_id_avance.isin(_ids_vencidos_sin_activos)
+                    ].copy()
 
         # Solo mostrar agrupadores que ya tengan avance (> 0%).
         # Este filtro es únicamente visual y no modifica el resto del tablero.
@@ -1024,9 +1270,86 @@ def _render_indicadores(
                 "Preparacion",
             ]
 
+            # Ocultar solamente la instancia concreta del pedido:
+            # DespachoId + Preparacion. Así un nombre de agrupador reutilizado
+            # en el futuro no queda bloqueado por un cierre anterior.
+            control_base_total_agrupado = control_base.copy()
+            _ocultos = _claves_pedidos_ocultos()
+            if _ocultos and "DespachoId" in control_base.columns:
+                _claves_actuales = list(zip(
+                    control_base["DespachoId"].map(_clave_operativa),
+                    control_base["Preparacion"].map(_clave_operativa),
+                ))
+                control_base = control_base.loc[
+                    [clave not in _ocultos for clave in _claves_actuales]
+                ].copy()
+
+            if control_base.empty:
+                st.info("No hay pedidos visibles: ya fueron agrupados físicamente o finalizados.")
+                return
+
             # La persona ya viene correctamente resuelta en ControlUsuario.
             # Para la hora usamos el histórico crudo como fallback SIN tocar el usuario.
             mapa_control_hora = _mapa_controladores_por_preparacion_area(contexto)
+
+            # ------------------------------------------------------
+            # CIERRE REAL DE CONTROL
+            # ------------------------------------------------------
+            # `Categoria` puede venir desfasada respecto del histórico de
+            # Filtrar Preparaciones. Si existe un control real para la misma
+            # Preparacion + Area, esa fila debe considerarse FINALIZADA.
+            #
+            # Importante: NO usamos TareaEstado=Finalizada del Informe Tareas,
+            # porque eso representa el fin del picking y no necesariamente
+            # el cierre de control.
+            def _control_real_desde_mapa(fila):
+                clave = (
+                    str(fila.get("Preparacion", "")).strip(),
+                    str(fila.get("Area", "")).strip().upper(),
+                )
+                return mapa_control_hora.get(clave)
+
+            _control_real = control_base.apply(_control_real_desde_mapa, axis=1)
+            _mask_control_real = _control_real.notna()
+
+            # El histórico de control es evidencia suficiente de cierre.
+            control_base.loc[_mask_control_real, "Categoria"] = "Finalizado"
+
+            # Completar usuario y fecha/hora desde la misma fuente cuando
+            # tabla_operativa no los haya resuelto.
+            if "ControlUsuario" not in control_base.columns:
+                control_base["ControlUsuario"] = ""
+            if "ControlFechaHora" not in control_base.columns:
+                control_base["ControlFechaHora"] = pd.NaT
+
+            for idx in control_base.index[_mask_control_real]:
+                dato = _control_real.loc[idx]
+                if not isinstance(dato, dict):
+                    continue
+
+                usuario = str(dato.get("usuario", "") or "").strip()
+                fecha = pd.to_datetime(
+                    dato.get("fecha_hora", pd.NaT),
+                    errors="coerce",
+                    dayfirst=True,
+                )
+
+                usuario_actual = str(
+                    control_base.at[idx, "ControlUsuario"]
+                    if pd.notna(control_base.at[idx, "ControlUsuario"])
+                    else ""
+                ).strip()
+
+                fecha_actual = pd.to_datetime(
+                    control_base.at[idx, "ControlFechaHora"],
+                    errors="coerce",
+                    dayfirst=True,
+                )
+
+                if not usuario_actual and usuario:
+                    control_base.at[idx, "ControlUsuario"] = usuario
+                if pd.isna(fecha_actual) and pd.notna(fecha):
+                    control_base.at[idx, "ControlFechaHora"] = fecha
 
             def _hora_desde_mapa(fila):
                 clave = (
@@ -1065,33 +1388,21 @@ def _render_indicadores(
                     key="control_filtro_agrupador_camioneta",
                 )
             with col_cierre:
-                ya_finalizado = (
-                    filtro_control != "Todos"
-                    and _agrupador_cerrado_visible(filtro_control)
-                )
-                cerrar_deshabilitado = filtro_control == "Todos" or ya_finalizado
+                cerrar_deshabilitado = filtro_control == "Todos"
 
                 if st.button(
-                    "✅ Agrupación Finalizada" if ya_finalizado else "🔒 Agrupación Finalizada",
+                    "🔒 Agrupación Finalizada",
                     key="control_cerrar_agrupador",
                     disabled=cerrar_deshabilitado,
                     width="stretch",
                     help=(
                         "Seleccioná un agrupador para cerrarlo."
                         if filtro_control == "Todos"
-                        else (
-                            "Este agrupador ya fue finalizado. Permanecerá visible "
-                            "hasta completar 8 horas desde el cierre."
-                            if ya_finalizado
-                            else f"Finalizar manualmente {filtro_control}"
-                        )
+                        else f"Finalizar y retirar de la vista {filtro_control}"
                     ),
                 ):
                     _cerrar_agrupador_manual(filtro_control)
-                    st.success(
-                        f"Agrupación finalizada: {filtro_control}. "
-                        "Seguirá visible durante 8 horas."
-                    )
+                    _ocultar_agrupador_completo(control_base, filtro_control)
                     invalidar_cache_tareas()
                     construir_contexto_tareas.clear()
                     _mapa_controladores_por_preparacion_area.clear()
@@ -1102,6 +1413,22 @@ def _render_indicadores(
                 control_base = control_base.loc[
                     control_base["Despacho"].eq(filtro_control)
                 ].copy()
+
+            base_total_kpi = control_base_total_agrupado.copy()
+            if filtro_control != "Todos":
+                base_total_kpi = base_total_kpi.loc[
+                    base_total_kpi["Despacho"].astype(str).str.strip().eq(str(filtro_control).strip())
+                ].copy()
+            claves_total_kpi = set(zip(
+                base_total_kpi["DespachoId"].map(_clave_operativa),
+                base_total_kpi["Preparacion"].map(_clave_operativa),
+            )) if not base_total_kpi.empty else set()
+            total_pedidos_agrupado_kpi = len(claves_total_kpi)
+            pedidos_agrupados_kpi = len(claves_total_kpi & _ocultos)
+            avance_agrupado_kpi = (
+                100.0 * pedidos_agrupados_kpi / total_pedidos_agrupado_kpi
+                if total_pedidos_agrupado_kpi else 0.0
+            )
 
             def _datos_carro(fila):
                 categoria = str(fila.get("Categoria", "")).strip()
@@ -1168,7 +1495,7 @@ def _render_indicadores(
                 <style>
                 .control-kpi-grid{
                     display:grid;
-                    grid-template-columns:repeat(5,minmax(0,1fr));
+                    grid-template-columns:repeat(6,minmax(0,1fr));
                     gap:10px;
                     margin:6px 0 14px 0;
                 }
@@ -1249,6 +1576,14 @@ def _render_indicadores(
                     </div>
                     <div class="control-kpi-detail">{controlados_kpi} / {carros_kpi} carros</div>
                   </div>
+                  <div class="control-kpi-card">
+                    <div class="control-kpi-title">📦 Agrupado físico</div>
+                    <div class="control-kpi-value">{avance_agrupado_kpi:.0f}%</div>
+                    <div class="control-kpi-progress">
+                      <div style="width:{min(max(avance_agrupado_kpi,0),100):.1f}%"></div>
+                    </div>
+                    <div class="control-kpi-detail">{pedidos_agrupados_kpi} / {total_pedidos_agrupado_kpi} pedidos</div>
+                  </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1266,9 +1601,83 @@ def _render_indicadores(
                 na_position="last",
             ).reset_index(drop=True)
 
-            filas_html = []
+            # La tabla mantiene el mismo diseño original.
+            # Único agregado visual: una columna angosta de checkbox a la izquierda.
+            st.markdown("""
+<style>
+.control-head-wrap,.control-row-wrap{
+    display:grid;
+    grid-template-columns:34px 1fr;
+    gap:0;
+    align-items:stretch;
+}
+.control-check-head{
+    border:1px solid #30363d;
+    border-right:0;
+    border-radius:8px 0 0 0;
+    background:#1d222b;
+}
+.control-head-single{
+    display:grid;
+    grid-template-columns:9% 16% 1fr 7% 8%;
+    background:#1d222b;
+    font-weight:700;
+    color:#b9c0ca;
+    font-size:.83rem;
+    border:1px solid #30363d;
+    border-radius:0 8px 0 0;
+    overflow:hidden;
+}
+.control-head-single>div{
+    padding:8px 10px;
+    border-right:1px solid #30363d;
+}
+.control-head-single>div:last-child{border-right:0}
+.control-row-single{
+    display:grid;
+    grid-template-columns:9% 16% 1fr 7% 8%;
+    align-items:stretch;
+    border:1px solid #30363d;
+    border-top:0;
+    overflow:hidden;
+}
+.control-row-single>div{
+    padding:8px 10px;
+    border-right:1px solid #30363d;
+}
+.control-row-single>div:last-child{border-right:0}
+.control-prep,.control-cliente{font-weight:700;display:flex;align-items:center}
+.control-prep{color:#8fd0ff}
+.control-carros{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.control-total{display:flex;align-items:center;justify-content:center;font-weight:700}
+.carro-card{min-width:150px;padding:6px 10px;border-radius:7px;background:#151a21;border:1px solid #39414c;line-height:1.15}
+.carro-card.finalizado{border-color:#168c4b}
+.carro-titulo{font-weight:700;font-size:.84rem;white-space:nowrap}
+.carro-picker{font-size:.76rem;margin-top:4px;color:#c9d1d9}
+.carro-control{font-size:.76rem;margin-top:2px;color:#8fd0ff}
+.carro-hora{font-size:.74rem;color:#9aa4b2;margin-top:1px}
+.sin-dato{color:#8b949e}
+
+/* Hace que el checkbox quede visualmente pegado a su fila y no genere una lista aparte. */
+div[data-testid="stCheckbox"]{
+    margin-top:8px;
+}
+</style>
+<div class="control-head-wrap">
+  <div class="control-check-head"></div>
+  <div class="control-head-single">
+    <div>Pedido</div><div>Cliente</div><div>Carros (sector - unidades)</div>
+    <div>Total carros</div><div>Total unidades</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
             claves_fila = ["Preparacion", "Cliente"]
-            for (preparacion, cliente), grupo in control_base.groupby(claves_fila, sort=False, dropna=False):
+            grupos_visual = list(
+                control_base.groupby(claves_fila, sort=False, dropna=False)
+            )
+
+            for (preparacion, cliente), grupo in grupos_visual:
                 # Seguridad: si por cualquier motivo la tabla operativa trae repetida
                 # exactamente la misma tarea, conservar una sola tarjeta.
                 if "TareaId" in grupo.columns:
@@ -1279,41 +1688,170 @@ def _render_indicadores(
 
                 tarjetas, total_unidades = [], 0
                 for _, r in grupo.iterrows():
-                    titulo, estado = html.escape(str(r["_TituloCarro"])), str(r["_EstadoCarro"])
+                    titulo = html.escape(str(r["_TituloCarro"]))
+                    estado = str(r["_EstadoCarro"])
                     usuario = html.escape(str(r["_Controlador"])) if str(r["_Controlador"]).strip() else ""
                     picker = html.escape(str(r["_Picker"])) if str(r["_Picker"]).strip() else ""
                     hora = html.escape(str(r["_HoraControl"])) if str(r["_HoraControl"]).strip() else ""
-                    total_unidades += int(round(float(pd.to_numeric(pd.Series([r.get("Unidades",0)]), errors="coerce").fillna(0).iloc[0])))
-                    detalle_picker = f'<div class="carro-picker">🛒 {picker}</div>' if picker else '<div class="carro-picker sin-dato">🛒 Sin dato</div>'
+                    total_unidades += int(round(float(
+                        pd.to_numeric(pd.Series([r.get("Unidades", 0)]), errors="coerce")
+                        .fillna(0).iloc[0]
+                    )))
+                    detalle_picker = (
+                        f'<div class="carro-picker">🛒 {picker}</div>'
+                        if picker
+                        else '<div class="carro-picker sin-dato">🛒 Sin dato</div>'
+                    )
                     if estado == "finalizado":
                         detalle = detalle_picker
-                        detalle += f'<div class="carro-control">👤 {usuario}</div>' if usuario else '<div class="carro-control sin-dato">👤 Sin dato</div>'
-                        if hora: detalle += f'<div class="carro-hora">🕒 {hora}</div>'
-                        tarjetas.append(f'<div class="carro-card finalizado"><div class="carro-titulo">✅ {titulo}</div>{detalle}</div>')
+                        detalle += (
+                            f'<div class="carro-control">👤 {usuario}</div>'
+                            if usuario
+                            else '<div class="carro-control sin-dato">👤 Sin dato</div>'
+                        )
+                        if hora:
+                            detalle += f'<div class="carro-hora">🕒 {hora}</div>'
+                        tarjetas.append(
+                            f'<div class="carro-card finalizado">'
+                            f'<div class="carro-titulo">✅ {titulo}</div>{detalle}</div>'
+                        )
                     else:
                         icono = "🕒" if estado == "curso" else "⏳"
-                        tarjetas.append(f'<div class="carro-card curso"><div class="carro-titulo">{icono} {titulo}</div>{detalle_picker}</div>')
+                        tarjetas.append(
+                            f'<div class="carro-card curso">'
+                            f'<div class="carro-titulo">{icono} {titulo}</div>'
+                            f'{detalle_picker}</div>'
+                        )
 
-                _pedido_grupo = (
-                    grupo["_PedidoVisible"].iloc[0]
-                    if "_PedidoVisible" in grupo.columns and not grupo.empty
-                    else preparacion
+                fila_base = grupo.iloc[0]
+                pedido_grupo = (
+                    fila_base.get("_PedidoVisible", preparacion)
+                    if not grupo.empty else preparacion
                 )
-                prep_visible = html.escape(str(_pedido_grupo)) if str(_pedido_grupo).strip() else "—"
+                prep_visible = (
+                    html.escape(str(pedido_grupo))
+                    if str(pedido_grupo).strip() else "—"
+                )
                 cliente_visible = html.escape(str(cliente))
-                filas_html.append(
-                    '<div class="control-row">'
-                    + f'<div class="control-prep">{prep_visible}</div>'
-                    + f'<div class="control-cliente">{cliente_visible}</div>'
-                    + f'<div class="control-carros">{"".join(tarjetas)}</div>'
-                    + f'<div class="control-total">{len(grupo)}</div>'
-                    + f'<div class="control-total">{total_unidades:,}</div></div>'
+
+                despacho_id = fila_base.get("DespachoId", "")
+                agrupador = str(fila_base.get("Despacho", "")).strip()
+                clave_checkbox = (
+                    f"ocultar_pedido_"
+                    f"{_clave_operativa(despacho_id)}_"
+                    f"{_clave_operativa(preparacion)}"
                 )
 
-            st.markdown("""
-<style>
-.control-grid{border:1px solid #30363d;border-radius:8px;overflow:hidden;margin:.35rem 0 .65rem}.control-head,.control-row{display:grid;grid-template-columns:9% 16% 1fr 7% 8%;align-items:stretch}.control-head{background:#1d222b;font-weight:700;color:#b9c0ca;font-size:.83rem}.control-head>div,.control-row>div{padding:8px 10px;border-right:1px solid #30363d;border-bottom:1px solid #30363d}.control-row:last-child>div{border-bottom:0}.control-head>div:last-child,.control-row>div:last-child{border-right:0}.control-prep,.control-cliente{font-weight:700;display:flex;align-items:center}.control-prep{color:#8fd0ff}.control-carros{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.control-total{display:flex;align-items:center;justify-content:center;font-weight:700}.carro-card{min-width:150px;padding:6px 10px;border-radius:7px;background:#151a21;border:1px solid #39414c;line-height:1.15}.carro-card.finalizado{border-color:#168c4b}.carro-titulo{font-weight:700;font-size:.84rem;white-space:nowrap}.carro-picker{font-size:.76rem;margin-top:4px;color:#c9d1d9}.carro-control{font-size:.76rem;margin-top:2px;color:#8fd0ff}.carro-hora{font-size:.74rem;color:#9aa4b2;margin-top:1px}.sin-dato{color:#8b949e}
-</style><div class="control-grid"><div class="control-head"><div>Pedido</div><div>Cliente</div><div>Carros (sector - unidades)</div><div>Total carros</div><div>Total unidades</div></div>""" + "".join(filas_html) + "</div>", unsafe_allow_html=True)
+                col_check, col_fila = st.columns([0.025, 0.975], gap=None)
+                with col_check:
+                    ocultar = st.checkbox(
+                        "Ocultar",
+                        key=clave_checkbox,
+                        label_visibility="collapsed",
+                        help="Marcar cuando el pedido ya fue agrupado físicamente en despacho.",
+                    )
+
+                with col_fila:
+                    st.markdown(
+                        '<div class="control-row-single">'
+                        + f'<div class="control-prep">{prep_visible}</div>'
+                        + f'<div class="control-cliente">{cliente_visible}</div>'
+                        + f'<div class="control-carros">{"".join(tarjetas)}</div>'
+                        + f'<div class="control-total">{len(grupo)}</div>'
+                        + f'<div class="control-total">{total_unidades:,}</div>'
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # El checkbox SOLO selecciona. No modifica persistencia ni oculta
+                # el pedido hasta que Operaciones confirme la selección.
+            # ------------------------------------------------------
+            # CONFIRMACIÓN MANUAL DE PEDIDOS AGRUPADOS FÍSICAMENTE
+            # ------------------------------------------------------
+            seleccionados = []
+
+            for (preparacion, cliente), grupo in grupos_visual:
+                if grupo.empty:
+                    continue
+
+                fila_base = grupo.iloc[0]
+                despacho_id = fila_base.get("DespachoId", "")
+                agrupador = str(fila_base.get("Despacho", "")).strip()
+                pedido = fila_base.get("_PedidoVisible", preparacion)
+
+                clave_checkbox = (
+                    f"ocultar_pedido_"
+                    f"{_clave_operativa(despacho_id)}_"
+                    f"{_clave_operativa(preparacion)}"
+                )
+
+                if bool(st.session_state.get(clave_checkbox, False)):
+                    seleccionados.append({
+                        "despacho_id": despacho_id,
+                        "preparacion": preparacion,
+                        "pedido": pedido,
+                        "agrupador": agrupador,
+                        "key": clave_checkbox,
+                    })
+
+            cantidad_seleccionada = len(seleccionados)
+
+            col_confirmar, col_limpiar, col_espacio = st.columns(
+                [1.35, 0.85, 3.8],
+                vertical_alignment="center",
+            )
+
+            with col_confirmar:
+                confirmar = st.button(
+                    (
+                        f"📦 Confirmar agrupados ({cantidad_seleccionada})"
+                        if cantidad_seleccionada
+                        else "📦 Confirmar agrupados"
+                    ),
+                    key="control_confirmar_pedidos_agrupados",
+                    disabled=cantidad_seleccionada == 0,
+                    width="stretch",
+                    type="primary" if cantidad_seleccionada else "secondary",
+                    help=(
+                        "Oculta de la vista los pedidos seleccionados y guarda "
+                        "el estado de forma persistente."
+                    ),
+                )
+
+            # Streamlit no permite modificar el session_state de un checkbox
+            # después de que ese widget ya fue instanciado en la misma ejecución.
+            # Para "Limpiar selección" usamos callback: Streamlit lo ejecuta
+            # antes de reconstruir los widgets en el siguiente rerun.
+            def _limpiar_checkboxes_pedidos(claves: tuple[str, ...]) -> None:
+                for clave in claves:
+                    st.session_state[clave] = False
+
+            claves_seleccionadas = tuple(
+                item["key"] for item in seleccionados
+            )
+
+            with col_limpiar:
+                st.button(
+                    "↩️ Limpiar selección",
+                    key="control_limpiar_seleccion_pedidos",
+                    disabled=cantidad_seleccionada == 0,
+                    width="stretch",
+                    on_click=_limpiar_checkboxes_pedidos,
+                    args=(claves_seleccionadas,),
+                )
+
+            if confirmar:
+                _ocultar_pedidos_manual_lote(seleccionados)
+
+                # No tocamos aquí st.session_state[item["key"]].
+                # Al persistir los pedidos y hacer rerun, esas filas dejan de
+                # renderizarse automáticamente; por lo tanto sus checkboxes
+                # también desaparecen sin provocar StreamlitAPIException.
+                st.toast(
+                    f"{cantidad_seleccionada} pedido(s) retirado(s) de la vista.",
+                    icon="✅",
+                )
+                st.rerun()
 
             # Descarga agrupada: una fila por preparación, sin IDs visibles.
             detalle_descarga = control_base.copy()
@@ -1331,23 +1869,39 @@ def _render_indicadores(
             }
 
             def _detalle_carro(fila):
-                sector = abreviar_sector.get(
-                    str(fila["Sector"]).strip().upper(),
-                    str(fila["Sector"]).strip().upper()[:3]
-                )
+                # IMPORTANTE: la pantalla ya resolvió correctamente qué es un carro
+                # físico y qué es un contenedor. La descarga reutiliza ESA MISMA
+                # clasificación (_TituloCarro / _EstadoCarro), sin reinterpretar
+                # el campo Carro ni los IDs numéricos de contenedor.
+                titulo = str(fila.get("_TituloCarro", "")).strip()
+                estado = str(fila.get("_EstadoCarro", "")).strip().lower()
                 usuario = str(fila["Controló"]).strip()
                 hora = str(fila["Hora control"]).strip()
 
-                # Replicar en Excel la misma lectura visual de las tarjetas.
-                controlado = bool(usuario)
-                if controlado:
-                    texto = f"✅ {sector} - {int(fila['Unidades'])} u. · 👤 {usuario}"
+                if estado == "curso":
+                    # En pantalla: "178 (IMP - 12 u.)"
+                    # En Excel: icono de carro + número + área + unidades.
+                    m = re.match(
+                        r"^([^()]+?)\\s*\\(([^()]+)\\)\\s*$",
+                        titulo,
+                    )
+                    if m:
+                        numero = m.group(1).strip()
+                        detalle = m.group(2).strip()
+                        return f"🛒 {numero} · {detalle}"
+                    return f"🛒 {titulo}" if titulo else "🛒"
+
+                if estado == "finalizado":
+                    # Contenedor controlado: el ID largo no se muestra.
+                    texto = f"✅ {titulo}"
+                    if usuario:
+                        texto += f" · 👤 {usuario}"
                     if hora:
                         texto += f" · 🕒 {hora}"
-                else:
-                    texto = f"🕒 {sector} - {int(fila['Unidades'])} u. · —"
+                    return texto
 
-                return texto
+                # Contenedor todavía pendiente: tampoco mostrar su ID largo.
+                return f"🕒 {titulo} · —" if titulo else "🕒 —"
 
             detalle_descarga["_DetalleCarro"] = detalle_descarga.apply(_detalle_carro, axis=1)
 

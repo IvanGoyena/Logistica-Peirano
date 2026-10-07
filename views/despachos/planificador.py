@@ -474,9 +474,10 @@ def render_planificador_despachos(
         with col_plan1:
 
             capacidad_camioneta = st.number_input(
-                "Capacidad por camioneta (m³)",
+                "Capacidad operativa Sprinter (m³) — máximo provisorio 5,5",
                 min_value=0.1,
-                value=8.0,
+                value=5.5,
+                max_value=5.5,
                 step=0.5,
                 format="%.1f"
             )

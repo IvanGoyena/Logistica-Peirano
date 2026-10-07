@@ -769,9 +769,319 @@ def construir_contexto_tareas(
         pedidos_resumen,
     )
 
-    # El avance necesita la historia reciente COMPLETA, incluidos pedidos
-    # que ya cerraron. La tabla visual sigue usando solo pedidos abiertos.
+    # El avance histórico original se conserva para métricas auxiliares,
+    # pero el numerador/denominador visual debe representar CARROS reales
+    # de la instancia vigente de cada agrupador.
     avance_despachos, despachos_sin_iniciar = obtener_avance_despachos(tabla_tareas)
+
+    # ------------------------------------------------------
+    # AVANCE REAL POR CARRO / CONTENEDOR
+    # ------------------------------------------------------
+    # Problema corregido:
+    # obtener_avance_despachos() resume por TareaId y puede perder del universo
+    # los carros que ya fueron controlados. En DIGIP, al cerrar/controlar un carro,
+    # éste sigue existiendo en Informe Tareas con su ContenedorId real.
+    #
+    # Fuente de verdad:
+    #   - universo: Informe Tareas / tabla_tareas de la instancia vigente;
+    #   - identidad del carro: Preparacion + ContenedorId;
+    #   - controlado: ControlUsuario resuelto por enriquecer_control_por_tarea()
+    #     mediante Preparacion+ContenedorId (fallback Preparacion+TareaId).
+    #
+    # Así un carro NO desaparece del denominador cuando se controla.
+    if (
+        isinstance(tabla_tareas, pd.DataFrame)
+        and not tabla_tareas.empty
+        and {"Despacho", "DespachoId", "Preparacion", "ContenedorId"}.issubset(tabla_tareas.columns)
+    ):
+        _carros = tabla_tareas.copy()
+
+        def _key_carro(serie: pd.Series) -> pd.Series:
+            return (
+                serie.astype("string")
+                .fillna("")
+                .str.strip()
+                .str.replace(r"\.0+$", "", regex=True)
+            )
+
+        for _c in ["Despacho", "DespachoId", "Preparacion", "ContenedorId"]:
+            _carros[_c] = _key_carro(_carros[_c])
+
+        _carros = _carros.loc[
+            _carros["Despacho"].ne("")
+            & _carros["DespachoId"].ne("")
+            & _carros["Preparacion"].ne("")
+            & _carros["ContenedorId"].ne("")
+        ].copy()
+
+        # Resolver la instancia vigente por nombre de agrupador usando la última
+        # actividad real del Informe Tareas crudo.
+        if (
+            isinstance(df_tareas, pd.DataFrame)
+            and not df_tareas.empty
+            and {"DespachoId", "DespachoDescripcion", "FechaHoraEstado"}.issubset(df_tareas.columns)
+        ):
+            _inst = df_tareas[
+                ["DespachoId", "DespachoDescripcion", "FechaHoraEstado"]
+            ].copy()
+            _inst["_DespachoId"] = _key_carro(_inst["DespachoId"])
+            _inst["_Despacho"] = (
+                _inst["DespachoDescripcion"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+            _inst["_Fecha"] = pd.to_datetime(
+                _inst["FechaHoraEstado"], errors="coerce", dayfirst=True
+            )
+            _inst = _inst.loc[
+                _inst["_DespachoId"].ne("")
+                & _inst["_Despacho"].ne("")
+                & _inst["_Fecha"].notna()
+            ].copy()
+
+            if not _inst.empty:
+                _vigente = (
+                    _inst.groupby(["_Despacho", "_DespachoId"], as_index=False)["_Fecha"]
+                    .max()
+                    .sort_values(["_Despacho", "_Fecha", "_DespachoId"], kind="stable")
+                    .drop_duplicates("_Despacho", keep="last")
+                    .set_index("_Despacho")["_DespachoId"]
+                    .to_dict()
+                )
+                _esperado = _carros["Despacho"].map(_vigente)
+                _carros = _carros.loc[
+                    _esperado.isna()
+                    | _esperado.eq("")
+                    | _carros["DespachoId"].eq(_esperado)
+                ].copy()
+
+        # ------------------------------------------------------
+        # MISMA REGLA DE VIGENCIA QUE LA TABLA INFERIOR
+        # ------------------------------------------------------
+        # No alcanza con tomar "la última instancia": un agrupador ya cerrado
+        # puede seguir siendo la última instancia histórica y por eso aparecía
+        # arriba al 100 %. La tabla inferior lo elimina cuando el último control
+        # real de esa instancia ya superó la ventana operativa de 8 horas.
+        #
+        # Para los donuts aplicamos la misma regla: si TODOS los carros de la
+        # instancia están controlados y el último control fue hace más de 8 h,
+        # el despacho deja de formar parte del tablero.
+        if "ControlFechaHora" in _carros.columns and not _carros.empty:
+            _carros["_FechaControlReal"] = pd.to_datetime(
+                _carros["ControlFechaHora"],
+                errors="coerce",
+                dayfirst=True,
+            )
+            _carros["_UsuarioControlReal"] = (
+                _carros.get(
+                    "ControlUsuario",
+                    pd.Series("", index=_carros.index, dtype="string"),
+                )
+                .astype("string")
+                .fillna("")
+                .str.strip()
+            )
+
+            _estado_instancia = (
+                _carros.groupby(["Despacho", "DespachoId"], as_index=False)
+                .agg(
+                    _CarrosInstancia=("ContenedorId", "size"),
+                    _CarrosControlados=(
+                        "_UsuarioControlReal",
+                        lambda s: int(s.ne("").sum()),
+                    ),
+                    _UltimoControl=("_FechaControlReal", "max"),
+                )
+            )
+
+            _ahora = pd.Timestamp.now()
+            _estado_instancia["_CerradoCompleto"] = (
+                _estado_instancia["_CarrosInstancia"].gt(0)
+                & _estado_instancia["_CarrosControlados"].eq(
+                    _estado_instancia["_CarrosInstancia"]
+                )
+            )
+            _estado_instancia["_Expirado"] = (
+                _estado_instancia["_CerradoCompleto"]
+                & _estado_instancia["_UltimoControl"].notna()
+                & _estado_instancia["_UltimoControl"].le(
+                    _ahora - pd.Timedelta(hours=8)
+                )
+            )
+
+            _expirados = set(
+                zip(
+                    _estado_instancia.loc[
+                        _estado_instancia["_Expirado"], "Despacho"
+                    ].astype(str),
+                    _estado_instancia.loc[
+                        _estado_instancia["_Expirado"], "DespachoId"
+                    ].astype(str),
+                )
+            )
+
+            if _expirados:
+                _clave_instancia = list(
+                    zip(
+                        _carros["Despacho"].astype(str),
+                        _carros["DespachoId"].astype(str),
+                    )
+                )
+                _carros = _carros.loc[
+                    [k not in _expirados for k in _clave_instancia]
+                ].copy()
+
+        # Una fila por carro físico de esa preparación.
+        _carros = _carros.drop_duplicates(
+            ["DespachoId", "Preparacion", "ContenedorId"],
+            keep="last",
+        )
+
+        if "ControlUsuario" in _carros.columns:
+            _carros["_Controlado"] = (
+                _carros["ControlUsuario"]
+                .astype("string")
+                .fillna("")
+                .str.strip()
+                .ne("")
+            )
+        else:
+            _carros["_Controlado"] = False
+
+        _avance_carros = (
+            _carros.groupby(["Despacho", "DespachoId"], as_index=False)
+            .agg(
+                TotalTareas=("ContenedorId", "size"),
+                TareasFinalizadas=("_Controlado", "sum"),
+            )
+        )
+
+        # Alias que usa principal.py para ordenar/calcular el avance.
+        _avance_carros["TareasTotales"] = _avance_carros["TotalTareas"]
+
+        _avance_carros["Porcentaje"] = (
+            100.0
+            * _avance_carros["TareasFinalizadas"]
+            / _avance_carros["TotalTareas"].where(
+                _avance_carros["TotalTareas"].gt(0)
+            )
+        ).fillna(0.0)
+
+        # graficos.py lee explícitamente "Avance".
+        _avance_carros["Avance"] = _avance_carros["Porcentaje"]
+
+        # Conservar volumen/unidades y cualquier otra métrica que ya produzca
+        # obtener_avance_despachos(); reemplazar solamente avance/cantidades.
+        if isinstance(avance_despachos, pd.DataFrame) and not avance_despachos.empty:
+            _cols_reemplazar = [
+                c for c in [
+                    "TotalTareas",
+                    "TareasTotales",
+                    "TareasFinalizadas",
+                    "Porcentaje",
+                    "Avance",
+                ]
+                if c in avance_despachos.columns
+            ]
+            _base = avance_despachos.drop(columns=_cols_reemplazar, errors="ignore")
+            # El universo válido es _avance_carros. No usar OUTER:
+            # dejaba agrupadores históricos sin carros actuales y generaba
+            # TareasTotales/TareasFinalizadas = NaN, que luego el gráfico
+            # intentaba convertir con int(NaN).
+            avance_despachos = _avance_carros.merge(
+                _base,
+                on="Despacho",
+                how="left",
+            )
+        else:
+            avance_despachos = _avance_carros.copy()
+
+        # Blindaje numérico para la capa gráfica.
+        for _c in ["TotalTareas", "TareasTotales", "TareasFinalizadas"]:
+            if _c in avance_despachos.columns:
+                avance_despachos[_c] = (
+                    pd.to_numeric(avance_despachos[_c], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                )
+
+        if "Porcentaje" in avance_despachos.columns:
+            avance_despachos["Porcentaje"] = (
+                pd.to_numeric(avance_despachos["Porcentaje"], errors="coerce")
+                .fillna(0.0)
+            )
+
+        # Compatibilidad por si el gráfico usa Avance en lugar de Porcentaje.
+        if "Avance" in avance_despachos.columns:
+            avance_despachos["Avance"] = avance_despachos["Porcentaje"]
+
+        # ------------------------------------------------------
+        # DONUTS: MOSTRAR SOLO AGRUPADORES EN PROCESO
+        # ------------------------------------------------------
+        # Un despacho al 100 % ya está finalizado y pertenece al tratamiento
+        # de cierre de la tabla inferior; no debe seguir apareciendo en
+        # "Avance de despachos".
+        if "Porcentaje" in avance_despachos.columns:
+            _pct_visible = pd.to_numeric(
+                avance_despachos["Porcentaje"], errors="coerce"
+            ).fillna(0.0)
+            avance_despachos = avance_despachos.loc[
+                _pct_visible.gt(0.0) & _pct_visible.lt(100.0)
+            ].copy()
+        elif {"TareasFinalizadas", "TotalTareas"}.issubset(avance_despachos.columns):
+            _fin_visible = pd.to_numeric(
+                avance_despachos["TareasFinalizadas"], errors="coerce"
+            ).fillna(0.0)
+            _tot_visible = pd.to_numeric(
+                avance_despachos["TotalTareas"], errors="coerce"
+            ).fillna(0.0)
+            avance_despachos = avance_despachos.loc[
+                _fin_visible.gt(0)
+                & _tot_visible.gt(0)
+                & _fin_visible.lt(_tot_visible)
+            ].copy()
+
+        # ------------------------------------------------------
+        # BLINDAJE FINAL DEL CONTRATO CON graficos.py
+        # ------------------------------------------------------
+        # El merge conserva métricas auxiliares del avance histórico. Para
+        # agrupadores que existen en el universo actual pero no en ese resumen
+        # histórico, esas métricas pueden quedar NaN. graficos.py convierte
+        # varias de ellas directamente con int()/float(), por lo que TODAS
+        # deben salir numéricas.
+        _columnas_numericas_grafico = [
+            "Avance",
+            "Porcentaje",
+            "TotalTareas",
+            "TareasTotales",
+            "TareasFinalizadas",
+            "PreparacionesFinalizadas",
+            "TotalPreparaciones",
+            "VolumenPendienteM3",
+            "VolumenTotalM3",
+            "UnidadesPendientes",
+            "UnidadesTotales",
+        ]
+        for _c in _columnas_numericas_grafico:
+            if _c in avance_despachos.columns:
+                avance_despachos[_c] = pd.to_numeric(
+                    avance_despachos[_c], errors="coerce"
+                ).fillna(0)
+
+        # Contadores enteros.
+        for _c in [
+            "TotalTareas",
+            "TareasTotales",
+            "TareasFinalizadas",
+            "PreparacionesFinalizadas",
+            "TotalPreparaciones",
+            "UnidadesPendientes",
+            "UnidadesTotales",
+        ]:
+            if _c in avance_despachos.columns:
+                avance_despachos[_c] = avance_despachos[_c].astype(int)
+
     carros_criticos = obtener_carros_criticos(tabla_operativa, avance_despachos)
     pendiente_pick = obtener_pendiente_pick(tabla_operativa, tabla_pedidos)
     organizacion_pre = obtener_organizacion_pre(tabla_operativa)

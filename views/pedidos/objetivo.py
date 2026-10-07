@@ -13,6 +13,17 @@ from utils.leer_datos import leer_archivo
 
 OBJETIVO_LV = 750
 OBJETIVO_SABADO = 500
+
+# Referencias operativas calibradas con Control Feb-Sep 2026.
+# Mediana histórica: ~5,91 unidades por línea.
+UNIDADES_POR_LINEA_REF = 5.9142
+OBJETIVO_UNIDADES_LV = round(OBJETIVO_LV * UNIDADES_POR_LINEA_REF)      # ~4.436
+OBJETIVO_UNIDADES_SABADO = round(OBJETIVO_SABADO * UNIDADES_POR_LINEA_REF)  # ~2.957
+
+# En el histórico, las jornadas con >=10% de líneas Sanitarios tuvieron
+# una mediana cercana a 400 líneas vs ~666 en el resto.
+UMBRAL_SAN_FUERTE = 0.10
+FACTOR_OBJETIVO_SAN_FUERTE = 400 / 666
 MIN_HORAS_ACTIVO_LV = 5.5
 MIN_HORAS_ACTIVO_SAB = 3.5
 MIN_CONTROLES_ACTIVO = 5
@@ -117,16 +128,84 @@ def _cargar_control_historico() -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner=False)
 def _cargar_filtrar_preparaciones() -> pd.DataFrame:
     """
-    Objetivo NO usa Filtrar Preparaciones para reconstruir meses cerrados.
-    El histórico oficial sale de los reportes mensuales Control.
+    Fuente Filtrar histórica.
+
+    Regla:
+    - Meses CERRADOS: Filtrar Preparacion <Mes> <Año> es la fuente oficial.
+    - Mes ACTUAL: Historico Filtrar Preparaciones conserva lo acumulado.
+    - Últimos 7 días se incorpora aparte y tiene prioridad en el mes actual.
     """
-    return pd.DataFrame()
+    meses = [
+        "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+        "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre",
+    ]
+    hoy = date.today()
+    tablas = []
+
+    # 1) Mensuales cerrados. NO cargamos el mes actual desde mensual:
+    # durante el mes puede ser una descarga parcial.
+    for anio in range(2026, hoy.year + 1):
+        mes_hasta = (hoy.month - 1) if anio == hoy.year else 12
+        for numero_mes in range(1, mes_hasta + 1):
+            base = f"Filtrar Preparacion {meses[numero_mes-1]} {anio}"
+            for ext in (".csv",".xlsx"):
+                try:
+                    t = leer_archivo(CARPETA_WMS, base + ext, cache=False)
+                except Exception:
+                    t = pd.DataFrame()
+                if t is not None and not t.empty and "ControlContenedorId" in t.columns:
+                    t=t.copy()
+                    t["ArchivoOrigen"]=base+ext
+                    t["_TipoFuente"]="FILTRAR_MENSUAL_CERRADO"
+                    tablas.append(t)
+                    break
+
+    # 2) Histórico acumulado: sólo nos interesa para el MES ACTUAL.
+    for nombre in [
+        "Historico Filtrar Preparaciones.csv",
+        "Historico Filtrar Preparaciones.csv.tmp",
+        "Historico Filtrar Preparacion.csv",
+        "Histórico Filtrar Preparaciones.csv",
+    ]:
+        try:
+            h=leer_archivo(CARPETA_WMS,nombre,cache=False)
+        except Exception:
+            h=pd.DataFrame()
+        if h is not None and not h.empty and "ControlContenedorFechaHoraEstado" in h.columns:
+            h=h.copy()
+            fh=pd.to_datetime(h["ControlContenedorFechaHoraEstado"],errors="coerce",dayfirst=True)
+            h=h[fh.dt.to_period("M").eq(pd.Timestamp(hoy).to_period("M"))].copy()
+            if not h.empty:
+                h["ArchivoOrigen"]=nombre
+                h["_TipoFuente"]="HISTORICO_MES_ACTUAL"
+                tablas.append(h)
+            break
+
+    if not tablas:
+        return pd.DataFrame()
+
+    total=pd.concat(tablas,ignore_index=True,sort=False)
+
+    # Deduplicar únicamente por detalle físico, nunca por Control+Código.
+    if "ContenedorDetalleId" in total.columns:
+        did=total["ContenedorDetalleId"].astype("string").fillna("").str.strip().str.replace(r"\.0+$","",regex=True)
+        con=total[did.ne("")].copy()
+        if not con.empty:
+            con["_DID"]=con["ContenedorDetalleId"].astype("string").fillna("").str.strip().str.replace(r"\.0+$","",regex=True)
+            con=con.drop_duplicates("_DID",keep="last").drop(columns="_DID")
+        sin=total[did.eq("")].copy()
+        claves=[c for c in ["ControlContenedorId","CodigoArticulo","ControlContenedorFechaHoraEstado","PedidoCodigos"] if c in sin.columns]
+        if claves and not sin.empty:
+            sin=sin.drop_duplicates(claves,keep="last")
+        total=pd.concat([con,sin],ignore_index=True,sort=False)
+
+    return total.reset_index(drop=True)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cargar_filtrar_hoy_vivo() -> pd.DataFrame:
     """
-    Fuente viva del día actual.
+    Fuente operativa prioritaria de los últimos 7 días.
 
     IMPORTANTE: se pide el .csv explícitamente. En Streamlit Cloud esto evita
     que resolver_nombre() lo convierta erróneamente en .xlsx.
@@ -171,10 +250,11 @@ def _cargar_filtrar_hoy_vivo() -> pd.DataFrame:
     if vivo.empty:
         return vivo
 
-    # La fecha máxima del propio archivo define la jornada viva.
-    # Así no dependemos de timezone/reloj del servidor.
-    fecha_viva = vivo["_FechaViva"].dt.normalize().max()
-    vivo = vivo[vivo["_FechaViva"].dt.normalize().eq(fecha_viva)].copy()
+    # IMPORTANTE:
+    # "Últimos 7 días" no se usa sólo para HOY. Es la fuente operativa
+    # más completa para TODAS las fechas que contiene, porque conserva
+    # Pedido, Despacho, Cliente y el detalle físico real.
+    # Esto permite que 30/09, por ejemplo, conserve EASY y PEDIDOS LOZA.
     vivo["_EsUltimos7"] = True
 
     # Deduplicación de detalle.
@@ -344,9 +424,14 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         if faltan_v.any():
             fv.loc[faltan_v] = pd.to_datetime(raw_v.loc[faltan_v], errors="coerce", dayfirst=True)
         vivo["_FechaTmp"] = fv.dt.normalize()
-        fecha_viva = vivo["_FechaTmp"].max()
 
-        if pd.notna(fecha_viva):
+        # Últimos 7 días actualiza exclusivamente el MES ACTUAL.
+        # Un mes cerrado queda congelado por su Filtrar mensual completo.
+        periodo_actual = pd.Timestamp(date.today()).to_period("M")
+        vivo = vivo[vivo["_FechaTmp"].dt.to_period("M").eq(periodo_actual)].copy()
+        fechas_vivas = set(vivo["_FechaTmp"].dropna().tolist())
+
+        if fechas_vivas:
             if not filtrar.empty:
                 base_f = filtrar.copy()
                 raw_b = base_f.get("ControlContenedorFechaHoraEstado", pd.Series(index=base_f.index, dtype="object"))
@@ -355,7 +440,9 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
                 if faltan_b.any():
                     fb.loc[faltan_b] = pd.to_datetime(raw_b.loc[faltan_b], errors="coerce", dayfirst=True)
                 base_f["_FechaTmp"] = fb.dt.normalize()
-                base_f = base_f[~base_f["_FechaTmp"].eq(fecha_viva)].drop(columns="_FechaTmp", errors="ignore")
+                # Últimos 7 días manda sobre histórico Filtrar para TODAS
+                # las fechas presentes en el archivo, no sólo la fecha máxima.
+                base_f = base_f[~base_f["_FechaTmp"].isin(fechas_vivas)].drop(columns="_FechaTmp", errors="ignore")
             else:
                 base_f = pd.DataFrame()
 
@@ -382,6 +469,31 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
             f["PedidoKey"] = f["ControlID"]
 
         f["LineaComercialKey"] = f["PedidoKey"] + "|" + f["CodigoArticulo"]
+
+        # Contexto operativo explícito del WMS.
+        # EASY sólo se marca cuando la fuente lo identifica: cliente CENCOSUD
+        # o descripción/código de despacho EASY. No se infiere por cantidad.
+        despacho_desc = (
+            f.get("DespachoDescripcion", pd.Series("", index=f.index))
+            .astype("string").fillna("").str.strip().str.upper()
+        )
+
+        # EASY oficial: únicamente agrupador/despacho "EASY dd-mm".
+        # NO usamos Cliente=CENCOSUD porque también existen sucursales chicas
+        # que no deben clasificar la jornada como EASY.
+        f["EsEasy"] = despacho_desc.str.match(
+            r"^EASY\s+\d{2}-\d{2}$",
+            case=False,
+            na=False,
+        )
+
+        # LOZA explícita manda sobre el porcentaje de familia.
+        f["EsLozaExplicita"] = despacho_desc.str.contains(
+            r"PEDIDOS\s+LOZA",
+            case=False,
+            regex=True,
+            na=False,
+        )
 
         f["FechaControlDT"] = pd.to_datetime(
             f.get("ControlContenedorFechaHoraEstado", pd.Series(index=f.index, dtype="object")),
@@ -423,6 +535,10 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         # Los reportes mensuales Control no incluyen Pedido.
         # Conservamos su granularidad histórica disponible: Control + Código.
         c["LineaComercialKey"] = c["ControlID"] + "|" + c["CodigoArticulo"]
+        # El reporte mensual Control no trae cliente/pedido/despacho.
+        # No inventamos retrospectivamente la marca EASY.
+        c["EsEasy"] = False
+        c["EsLozaExplicita"] = False
 
         c["UsuarioMostrar"] = c.get("Usuario", pd.Series("", index=c.index)).astype("string").fillna("").str.strip()
         c["FechaControlDT"] = _fecha_control(c.get("FechaFin", pd.Series(index=c.index, dtype="object")))
@@ -432,6 +548,7 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
 
         det_c = c.drop_duplicates(["ControlID", "CodigoArticulo", "Fecha"], keep="last").copy()
         det_c["Fuente"] = "Control"
+        det_c["_TipoFuente"] = "CONTROL_FALLBACK"
         controles_c = c.drop_duplicates(["ControlID", "Fecha"], keep="last").copy()
         act_c = controles_c.groupby(["Fecha", "UsuarioMostrar"], as_index=False).agg(
             PrimerControl=("FechaControlDT", "min"), UltimoControl=("FechaControlDT", "max"), Controles=("ControlID", "nunique")
@@ -458,7 +575,9 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
             and df["_EsUltimos7"].fillna(False).astype(bool).any()
         )
 
-        usar_filtrar = filtrar_tiene_hoy_vivo or (len(df) >= len(dc) and len(df) > 0)
+        # Filtrar es la fuente operativa principal: conserva pedido, despacho,
+        # cliente y detalle físico. Control sólo completa fechas sin Filtrar.
+        usar_filtrar = len(df) > 0
         if usar_filtrar:
             detalles.append(df)
             if not act_f.empty:
@@ -516,6 +635,30 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
                 )
                 detalle = detalle.drop(columns=["Sector_Maestro"])
 
+    # Sanitarios se identifica desde el maestro de artículos.
+    fam_norm = detalle["Familia"].astype("string").fillna("").str.strip().str.lower()
+    sec_norm = detalle["Sector"].astype("string").fillna("").str.strip().str.lower()
+    loza_exp = detalle.get("EsLozaExplicita", pd.Series(False, index=detalle.index)).fillna(False).astype(bool)
+    # LOZA OPERATIVA: clasificación por código, no por Familia.
+    # Incluye únicamente piezas que generan carga física real:
+    #   INO...-1 = inodoro
+    #   INO...-2 = mochila/depósito
+    #   BID...   = bidet
+    #   PDU...   = piso de ducha (PDU120 excluido: es desagüe)
+    #   BAN...   = bañera
+    # Excluye asientos, fijaciones, válvulas, tapas, repuestos y BACHAS.
+    cod_loza = detalle["CodigoArticulo"].astype("string").fillna("").str.strip().str.upper()
+    detalle["TipoLoza"] = "NO_LOZA"
+    detalle.loc[cod_loza.str.match(r"^INO.+-1$", na=False), "TipoLoza"] = "INODORO"
+    detalle.loc[cod_loza.str.match(r"^INO.+-2$", na=False), "TipoLoza"] = "MOCHILA"
+    detalle.loc[cod_loza.str.match(r"^BID", na=False), "TipoLoza"] = "BIDET"
+    detalle.loc[cod_loza.str.match(r"^PDU", na=False) & ~cod_loza.eq("PDU120"), "TipoLoza"] = "PISO_DUCHA"
+    detalle.loc[cod_loza.str.match(r"^BAN", na=False), "TipoLoza"] = "BANERA"
+    detalle["EsSanitario"] = detalle["TipoLoza"].ne("NO_LOZA")
+    if "EsEasy" not in detalle.columns:
+        detalle["EsEasy"] = False
+    detalle["EsEasy"] = detalle["EsEasy"].fillna(False).astype(bool)
+
     actividad = pd.concat(actividades, ignore_index=True, sort=False) if actividades else pd.DataFrame()
     if not actividad.empty:
         clasif = actividad["UsuarioMostrar"].apply(lambda u: _clasificar_persona(u, por_login, por_nombre))
@@ -538,10 +681,21 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         )
         actividad = actividad.merge(lop, on=["Fecha", "UsuarioMostrar"], how="left")
 
+    # Etiqueta de fuente para auditoría.
+    if "_TipoFuente" not in detalle.columns:
+        detalle["_TipoFuente"] = detalle.get("Fuente", "SIN_FUENTE")
+
     diario = detalle.groupby("Fecha", as_index=False).agg(
+        FuenteDatos=("_TipoFuente", lambda s: " + ".join(sorted(set(str(x) for x in s.dropna() if str(x))))),
         Lineas=("LineaComercialKey", "nunique"),
         Unidades=("UnidadesNum", "sum"),
         Contenedores=("ControlID", "nunique"),
+        LineasSan=("LineaComercialKey", lambda s: s[detalle.loc[s.index, "EsSanitario"]].nunique()),
+        UnidadesSan=("UnidadesNum", lambda s: s[detalle.loc[s.index, "EsSanitario"]].sum()),
+        LineasLoza=("LineaComercialKey", lambda s: s[detalle.loc[s.index, "EsLozaExplicita"].fillna(False).astype(bool)].nunique() if "EsLozaExplicita" in detalle.columns else 0),
+        UnidadesLoza=("UnidadesNum", lambda s: s[detalle.loc[s.index, "EsLozaExplicita"].fillna(False).astype(bool)].sum() if "EsLozaExplicita" in detalle.columns else 0),
+        LineasEasy=("LineaComercialKey", lambda s: s[detalle.loc[s.index, "EsEasy"]].nunique()),
+        UnidadesEasy=("UnidadesNum", lambda s: s[detalle.loc[s.index, "EsEasy"]].sum()),
     )
     if not actividad.empty:
         # Dotación activa = persona de Línea Control que tuvo actividad real ese día.
@@ -559,11 +713,195 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
     diario["OperariosActivos"] = pd.to_numeric(diario["OperariosActivos"], errors="coerce").fillna(0).astype(int)
     diario["ApoyosActivos"] = diario.get("ApoyosActivos", 0)
     diario["ApoyosActivos"] = pd.to_numeric(diario["ApoyosActivos"], errors="coerce").fillna(0).astype(int)
+    # --- Carga operativa LOZA por jornada ---
+    # El inodoro y su mochila del mismo modelo forman un COMBO.
+    # No sumamos 1+1 como dos piezas de carga: emparejamos cantidades.
+    loza = detalle[detalle["EsSanitario"]].copy()
+    if not loza.empty:
+        loza["UnidadesLozaNum"] = pd.to_numeric(loza["UnidadesNum"], errors="coerce").fillna(0)
+        loza["CodigoLoza"] = loza["CodigoArticulo"].astype("string").fillna("").str.upper().str.strip()
+        loza["ModeloINO"] = loza["CodigoLoza"].str.replace(r"-[12]$", "", regex=True)
+
+        # Totales por día/tipo.
+        piv = loza.pivot_table(
+            index="Fecha", columns="TipoLoza", values="UnidadesLozaNum",
+            aggfunc="sum", fill_value=0
+        )
+        for col in ["INODORO","MOCHILA","BIDET","PISO_DUCHA","BANERA"]:
+            if col not in piv.columns:
+                piv[col] = 0
+
+        # Emparejamiento de INO-1 + INO-2 por modelo.
+        inos = loza[loza["TipoLoza"].isin(["INODORO","MOCHILA"])].pivot_table(
+            index=["Fecha","ModeloINO"], columns="TipoLoza",
+            values="UnidadesLozaNum", aggfunc="sum", fill_value=0
+        ).reset_index()
+        for col in ["INODORO","MOCHILA"]:
+            if col not in inos.columns:
+                inos[col] = 0
+        inos["CombosINO"] = inos[["INODORO","MOCHILA"]].min(axis=1)
+        inos["InodorosSueltos"] = (inos["INODORO"] - inos["CombosINO"]).clip(lower=0)
+        inos["MochilasSueltas"] = (inos["MOCHILA"] - inos["CombosINO"]).clip(lower=0)
+        ino_dia = inos.groupby("Fecha", as_index=False)[["CombosINO","InodorosSueltos","MochilasSueltas"]].sum()
+
+        piv = piv.reset_index().merge(ino_dia, on="Fecha", how="left").fillna(0)
+
+        # Equivalentes físicos: combo cuenta una vez.
+        piv["LozaEquivalente"] = (
+            piv["CombosINO"] + piv["InodorosSueltos"] + piv["MochilasSueltas"]
+            + piv["BIDET"] + piv["PISO_DUCHA"] + piv["BANERA"]
+        )
+
+        # Pallets equivalentes de carga operativa.
+        # Inodoro: 6/pallet. Bidet: 10/pallet.
+        # Mochilas cerradas varían 35/45/48; usamos 45 como referencia
+        # visible y mantenemos unidades separadas para poder recalibrarlo.
+        # Combo usa el componente dominante: el inodoro (6/pallet), no suma mochila.
+        piv["PalletsEqINO"] = (piv["CombosINO"] + piv["InodorosSueltos"]) / 6.0
+        piv["PalletsEqBidet"] = piv["BIDET"] / 10.0
+        piv["PalletsEqMochilaSuelta"] = piv["MochilasSueltas"] / 45.0
+        # PDU/Bañera se dejan como piezas visibles; no inventamos capacidad pallet.
+        piv["PalletsEqLozaBase"] = piv["PalletsEqINO"] + piv["PalletsEqBidet"] + piv["PalletsEqMochilaSuelta"]
+
+        diario = diario.merge(
+            piv[["Fecha","INODORO","MOCHILA","BIDET","PISO_DUCHA","BANERA",
+                 "CombosINO","InodorosSueltos","MochilasSueltas",
+                 "LozaEquivalente","PalletsEqLozaBase"]],
+            on="Fecha", how="left"
+        )
+    else:
+        for col in ["INODORO","MOCHILA","BIDET","PISO_DUCHA","BANERA",
+                    "CombosINO","InodorosSueltos","MochilasSueltas",
+                    "LozaEquivalente","PalletsEqLozaBase"]:
+            diario[col] = 0
+
+    for col in ["INODORO","MOCHILA","BIDET","PISO_DUCHA","BANERA",
+                "CombosINO","InodorosSueltos","MochilasSueltas",
+                "LozaEquivalente","PalletsEqLozaBase"]:
+        diario[col] = pd.to_numeric(diario[col], errors="coerce").fillna(0)
+
+    # --- Clasificación de CARGA LOZA por PEDIDO/PREPARACIÓN ---
+    # Sólo combo INO+mochila e inodoro suelto + BIDET determinan carga.
+    # 6 combos/inodoros = 1 pallet; 10 bidets = 1 pallet.
+    # Pisos de ducha y bañeras se auditan, pero NO disparan carga operativa.
+    # Umbral: >= 3 pallets equivalentes EN UN MISMO PEDIDO/PREPARACIÓN.
+    carga_base = detalle[detalle["EsSanitario"]].copy()
+    if not carga_base.empty:
+        carga_base["UnidadesCarga"] = pd.to_numeric(carga_base["UnidadesNum"], errors="coerce").fillna(0)
+        carga_base["CodigoCarga"] = carga_base["CodigoArticulo"].astype("string").fillna("").str.upper().str.strip()
+        carga_base["ModeloINO"] = carga_base["CodigoCarga"].str.replace(r"-[12]$", "", regex=True)
+
+        # La clave ya normalizada por la fuente prioriza Id y luego PedidoCodigos.
+        carga_base["PedidoCarga"] = carga_base.get("PedidoKey", pd.Series("", index=carga_base.index)).astype("string").fillna("")
+        vacio = carga_base["PedidoCarga"].str.strip().eq("")
+        if vacio.any():
+            carga_base.loc[vacio, "PedidoCarga"] = carga_base.loc[vacio, "ControlID"].astype("string")
+
+        # INO-1 / INO-2 se emparejan dentro del mismo pedido y modelo.
+        ci = carga_base[carga_base["TipoLoza"].isin(["INODORO","MOCHILA"])].pivot_table(
+            index=["Fecha","PedidoCarga","ModeloINO"],
+            columns="TipoLoza",
+            values="UnidadesCarga",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+        for col in ["INODORO","MOCHILA"]:
+            if col not in ci.columns:
+                ci[col] = 0
+        ci["Combos"] = ci[["INODORO","MOCHILA"]].min(axis=1)
+        ci["InodorosSueltosPedido"] = (ci["INODORO"] - ci["Combos"]).clip(lower=0)
+
+        ino_pedido = ci.groupby(["Fecha","PedidoCarga"], as_index=False).agg(
+            CombosPedido=("Combos","sum"),
+            InodorosSueltosPedido=("InodorosSueltosPedido","sum"),
+        )
+
+        bid = carga_base[carga_base["TipoLoza"].eq("BIDET")].groupby(
+            ["Fecha","PedidoCarga"], as_index=False
+        )["UnidadesCarga"].sum().rename(columns={"UnidadesCarga":"BidetsPedido"})
+
+        pisos = carga_base[carga_base["TipoLoza"].eq("PISO_DUCHA")].groupby(
+            ["Fecha","PedidoCarga"], as_index=False
+        )["UnidadesCarga"].sum().rename(columns={"UnidadesCarga":"PisosDuchaPedido"})
+
+        ban = carga_base[carga_base["TipoLoza"].eq("BANERA")].groupby(
+            ["Fecha","PedidoCarga"], as_index=False
+        )["UnidadesCarga"].sum().rename(columns={"UnidadesCarga":"BanerasPedido"})
+
+        pedidos = ino_pedido.merge(bid, on=["Fecha","PedidoCarga"], how="outer")
+        pedidos = pedidos.merge(pisos, on=["Fecha","PedidoCarga"], how="outer")
+        pedidos = pedidos.merge(ban, on=["Fecha","PedidoCarga"], how="outer").fillna(0)
+
+        for col in ["CombosPedido","InodorosSueltosPedido","BidetsPedido","PisosDuchaPedido","BanerasPedido"]:
+            pedidos[col] = pd.to_numeric(pedidos[col], errors="coerce").fillna(0)
+
+        pedidos["PalletsEqPedido"] = (
+            (pedidos["CombosPedido"] + pedidos["InodorosSueltosPedido"]) / 6.0
+            + pedidos["BidetsPedido"] / 10.0
+        )
+        pedidos["EsCargaLoza"] = pedidos["PalletsEqPedido"].ge(3.0)
+        pedidos["TieneLozaPedido"] = (
+            pedidos[["CombosPedido","InodorosSueltosPedido","BidetsPedido","PisosDuchaPedido","BanerasPedido"]]
+            .sum(axis=1).gt(0)
+        )
+
+        resumen_carga = pedidos.groupby("Fecha", as_index=False).agg(
+            PedidosConLoza=("TieneLozaPedido","sum"),
+            PedidosCargaLoza=("EsCargaLoza","sum"),
+        )
+        chicos = pedidos[pedidos["TieneLozaPedido"] & ~pedidos["EsCargaLoza"]].groupby("Fecha").size().rename("PedidosLozaChicos").reset_index()
+        carga = pedidos[pedidos["EsCargaLoza"]].groupby("Fecha", as_index=False).agg(
+            CombosCarga=("CombosPedido","sum"),
+            InodorosSueltosCarga=("InodorosSueltosPedido","sum"),
+            BidetsCarga=("BidetsPedido","sum"),
+            PalletsEqCarga=("PalletsEqPedido","sum"),
+            MayorCargaPedido=("PalletsEqPedido","max"),
+        )
+        resumen_carga = resumen_carga.merge(chicos, on="Fecha", how="left").merge(carga, on="Fecha", how="left").fillna(0)
+        diario = diario.merge(resumen_carga, on="Fecha", how="left")
+    else:
+        for col in ["PedidosConLoza","PedidosLozaChicos","PedidosCargaLoza","CombosCarga",
+                    "InodorosSueltosCarga","BidetsCarga","PalletsEqCarga","MayorCargaPedido"]:
+            diario[col] = 0
+
+    for col in ["PedidosConLoza","PedidosLozaChicos","PedidosCargaLoza","CombosCarga",
+                "InodorosSueltosCarga","BidetsCarga","PalletsEqCarga","MayorCargaPedido"]:
+        if col not in diario.columns:
+            diario[col] = 0
+        diario[col] = pd.to_numeric(diario[col], errors="coerce").fillna(0)
+
     diario["DiaSemana"] = diario["Fecha"].dt.weekday
     diario = diario[diario["DiaSemana"].le(5)].copy()
-    diario["Objetivo"] = diario["DiaSemana"].eq(5).map({True:OBJETIVO_SABADO, False:OBJETIVO_LV})
-    diario["Cumplimiento"] = diario["Lineas"] / diario["Objetivo"]
+    diario["ObjetivoBase"] = diario["DiaSemana"].eq(5).map({True:OBJETIVO_SABADO, False:OBJETIVO_LV})
+    diario["ObjetivoUnidades"] = diario["DiaSemana"].eq(5).map({True:OBJETIVO_UNIDADES_SABADO, False:OBJETIVO_UNIDADES_LV})
+
+    diario["PctSan"] = diario["LineasSan"].div(diario["Lineas"].replace(0, pd.NA)).fillna(0)
+    diario["PctEasy"] = diario["LineasEasy"].div(diario["Lineas"].replace(0, pd.NA)).fillna(0)
+
+    # SAN fuerte ajusta la referencia de líneas porque el histórico muestra
+    # una caída estructural de throughput cuando >=10% de las líneas son Sanitarios.
+    diario["SanFuerte"] = diario["PctSan"].ge(UMBRAL_SAN_FUERTE)
+    diario["Objetivo"] = diario["ObjetivoBase"].astype(float)
+    diario.loc[diario["SanFuerte"], "Objetivo"] = (
+        diario.loc[diario["SanFuerte"], "ObjetivoBase"] * FACTOR_OBJETIVO_SAN_FUERTE
+    ).round()
+
+    diario["CumplimientoLineas"] = diario["Lineas"] / diario["Objetivo"].replace(0, pd.NA)
+    diario["CumplimientoUnidades"] = diario["Unidades"] / diario["ObjetivoUnidades"].replace(0, pd.NA)
+
+    # Cumplimiento operativo: reconoce dos formas válidas de consumir capacidad.
+    # Muchas líneas chicas -> gobiernan líneas.
+    # Pocas líneas con mucha cantidad (caso EASY) -> gobiernan unidades.
+    diario["Cumplimiento"] = diario[["CumplimientoLineas", "CumplimientoUnidades"]].max(axis=1).fillna(0)
     diario["Diferencia"] = diario["Lineas"] - diario["Objetivo"]
+
+    # Sólo un pedido individual >=3 pallets equivalentes de combo/inodoro+bidet
+    # convierte la jornada en CARGA LOZA. La suma de pedidos chicos NO lo hace.
+    diario["TieneLozaSan"] = diario["PedidosCargaLoza"].gt(0)
+    diario["Mix"] = "Normal"
+    diario.loc[diario["TieneLozaSan"], "Mix"] = "🚽 CARGA LOZA"
+    diario.loc[diario["LineasEasy"].gt(0), "Mix"] = "🏬 EASY"
+    diario.loc[diario["TieneLozaSan"] & diario["LineasEasy"].gt(0), "Mix"] = "🏬🚽 MIX"
     diario["LineasOperario"] = diario["Lineas"].div(diario["OperariosActivos"].replace(0, pd.NA))
     diario["UnidadesOperario"] = diario["Unidades"].div(diario["OperariosActivos"].replace(0, pd.NA))
     fecha_en_curso = None
@@ -580,7 +918,7 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
         lambda r: (
             "En curso"
             if fecha_en_curso is not None and r.Fecha.date() == fecha_en_curso
-            else ("Superado" if r.Lineas > r.Objetivo else ("Cumplido" if r.Lineas == r.Objetivo else "Por debajo"))
+            else ("Superado" if r.Cumplimiento > 1.0 else ("Cumplido" if r.Cumplimiento >= 0.95 else "Por debajo"))
         ),
         axis=1,
     )
@@ -588,7 +926,7 @@ def _preparar_base(control: pd.DataFrame, filtrar: pd.DataFrame, maestro: pd.Dat
 
 def render_objetivo() -> None:
     st.subheader("🎯 Objetivo")
-    st.caption("Histórico cerrado desde reportes mensuales de Control + jornada actual desde Filtrar Preparaciones. En la jornada viva, una línea comercial = Pedido/Preparación + Código único, aunque se reparta en varios contenedores.")
+    st.caption("Fuente: Filtrar Preparaciones histórico/mensual + Últimos 7 Días como actualización viva; Control mensual sólo completa fechas sin Filtrar. EASY se marca únicamente cuando el agrupador/despacho es EASY dd-mm.")
 
     control = _cargar_control_historico()
     filtrar = _cargar_filtrar_preparaciones()
@@ -600,66 +938,195 @@ def render_objetivo() -> None:
         st.warning("No encontré histórico válido de Filtrar Preparaciones en Data_WMS.")
         return
 
-    fmax = diario["Fecha"].max().date(); fmin = diario["Fecha"].min().date()
-    opciones = ["Esta semana", "Semana anterior", "Este mes", "Últimos 30 días", "Histórico", "Personalizado"]
-    c1,c2,c3 = st.columns([1.5,1,1])
-    periodo = c1.selectbox("Período", opciones, index=2, key="obj_periodo")
-    hoy = fmax
-    lunes = hoy - timedelta(days=hoy.weekday())
-    if periodo == "Esta semana": ini, fin = lunes, hoy
-    elif periodo == "Semana anterior": ini, fin = lunes-timedelta(days=7), lunes-timedelta(days=1)
-    elif periodo == "Este mes": ini, fin = hoy.replace(day=1), hoy
-    elif periodo == "Últimos 30 días": ini, fin = hoy-timedelta(days=29), hoy
-    elif periodo == "Histórico": ini, fin = fmin, fmax
-    else:
-        ini = c2.date_input("Desde", value=max(fmin, hoy-timedelta(days=30)), min_value=fmin, max_value=fmax, key="obj_desde")
-        fin = c3.date_input("Hasta", value=hoy, min_value=fmin, max_value=fmax, key="obj_hasta")
-    if periodo != "Personalizado":
-        c2.metric("Desde", ini.strftime("%d/%m/%Y")); c3.metric("Hasta", fin.strftime("%d/%m/%Y"))
-
-    # Filtro estricto del período. Para "Este mes" reforzamos además mes/año
-    # para impedir que una fecha de respaldo mal interpretada (p. ej. 31/08)
-    # se cuele en la visualización de septiembre.
+    fmax = diario["Fecha"].max().date()
+    fmin = diario["Fecha"].min().date()
     diario["Fecha"] = pd.to_datetime(diario["Fecha"], errors="coerce").dt.normalize()
+
+    st.markdown("### 📅 Período de análisis")
+    fd1, fd2 = st.columns(2)
+    ini = fd1.date_input(
+        "Desde",
+        value=max(fmin, fmax - timedelta(days=29)),
+        min_value=fmin,
+        max_value=fmax,
+        key="obj_desde_directo",
+    )
+    fin = fd2.date_input(
+        "Hasta",
+        value=fmax,
+        min_value=fmin,
+        max_value=fmax,
+        key="obj_hasta_directo",
+    )
+    if ini > fin:
+        st.warning("La fecha Desde no puede ser posterior a Hasta.")
+        return
+
     d = diario.loc[
         diario["Fecha"].between(pd.Timestamp(ini), pd.Timestamp(fin), inclusive="both")
     ].copy()
-    if periodo == "Este mes":
-        d = d.loc[
-            d["Fecha"].dt.year.eq(ini.year)
-            & d["Fecha"].dt.month.eq(ini.month)
-        ].copy()
-    d = d.sort_values("Fecha").reset_index(drop=True)
+    d = d.sort_values("Fecha", kind="stable").reset_index(drop=True)
     if d.empty:
-        st.info("No hay cierres en el período seleccionado."); return
+        st.info("No hay cierres en el período seleccionado.")
+        return
 
-    dias = len(d); lineas = int(d["Lineas"].sum()); unidades = int(d["Unidades"].sum()); objetivo = int(d["Objetivo"].sum())
+    dias = len(d)
+    lineas = int(d["Lineas"].sum())
+    unidades = int(d["Unidades"].sum())
+    objetivo = int(d["Objetivo"].sum())
     cerrados = d[d["Estado"].ne("En curso")].copy()
-    cumplidos = int((cerrados["Lineas"] >= cerrados["Objetivo"]).sum())
+    cumplidos = int((cerrados["Cumplimiento"] >= 0.95).sum())
     dias_cerrados = len(cerrados)
-    pct = lineas/objetivo if objetivo else 0
-    prom_l = d["Lineas"].mean(); prom_u = d["Unidades"].mean(); prom_op = d["OperariosActivos"].mean()
-    k1,k2,k3,k4,k5,k6 = st.columns(6)
-    k1.metric("Líneas cerradas", _fmt(lineas), f"{_fmt(lineas-objetivo)} vs objetivo")
-    k2.metric("Cumplimiento", f"{pct:.1%}", f"{cumplidos}/{dias_cerrados} días cerrados")
-    k3.metric("Promedio líneas/día", _fmt(prom_l))
-    k4.metric("Unidades/día", _fmt(prom_u))
-    k5.metric("Operarios activos", _fmt(prom_op,1), "promedio jornada completa")
+    pct = float(cerrados["Cumplimiento"].mean()) if len(cerrados) else float(d["Cumplimiento"].mean())
+    prom_u = d["Unidades"].mean()
+    prom_op = d["OperariosActivos"].mean()
     prod = d["Lineas"].sum() / d["OperariosActivos"].sum() if d["OperariosActivos"].sum() else 0
-    k6.metric("Líneas / operario", _fmt(prod,1))
+    upl = unidades / lineas if lineas else 0
+    jornadas_easy = int(d["LineasEasy"].gt(0).sum())
+    jornadas_loza = int(d["TieneLozaSan"].sum())
 
-    st.markdown("### 📈 Cierre diario vs objetivo")
-    g = d.copy(); g["Jornada"] = g["Fecha"].dt.strftime("%d/%m"); g["Orden"] = range(len(g)); g["CumplimientoPct"] = g["Cumplimiento"]*100
+    def _kpi_card(icono, titulo, valor, detalle_txt):
+        st.markdown(
+            f"""
+            <div style="
+                border:1px solid #2d3a4d;
+                border-radius:10px;
+                padding:14px 16px 12px 16px;
+                min-height:108px;
+                background:#111823;
+                margin-bottom:10px;">
+                <div style="font-size:13px;font-weight:700;color:#f3f6fb;margin-bottom:8px;">
+                    {icono} {titulo}
+                </div>
+                <div style="font-size:27px;font-weight:800;line-height:1.05;color:#ffffff;">
+                    {valor}
+                </div>
+                <div style="font-size:11px;color:#8fb7e8;margin-top:10px;">
+                    {detalle_txt}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    r1 = st.columns(4)
+    with r1[0]:
+        _kpi_card("🎯", "Cumplimiento operativo", f"{pct:.1%}", f"{cumplidos} de {dias_cerrados} jornadas cerradas ≥95%")
+    with r1[1]:
+        _kpi_card("📦", "Líneas cerradas", _fmt(lineas), f"Objetivo ajustado acumulado: {_fmt(objetivo)}")
+    with r1[2]:
+        _kpi_card("🔢", "Unidades", _fmt(unidades), f"{_fmt(prom_u)} promedio por jornada")
+    with r1[3]:
+        _kpi_card("⚖️", "Unidades / línea", _fmt(upl,1), f"Referencia histórica: {_fmt(UNIDADES_POR_LINEA_REF,1)}")
+
+    r2 = st.columns(4)
+    with r2[0]:
+        _kpi_card("👥", "Dotación", _fmt(prom_op,1), "Operarios activos promedio")
+    with r2[1]:
+        _kpi_card("⚡", "Líneas / operario", _fmt(prod,1), "Productividad acumulada de Control")
+    with r2[2]:
+        _kpi_card("🏬", "Jornadas EASY", _fmt(jornadas_easy), f"{(jornadas_easy/dias if dias else 0):.0%} de las jornadas del período")
+    with r2[3]:
+        _kpi_card("🚽", "Jornadas LOZA / SAN", _fmt(jornadas_loza), f"{(jornadas_loza/dias if dias else 0):.0%} de las jornadas del período")
+
+    st.markdown("### 📈 Producción diaria vs capacidad operativa")
+    g = d.copy().sort_values("Fecha", kind="stable").reset_index(drop=True)
+    # Etiqueta visual compacta: sólo iconos sobre la barra.
+    # El valor completo de Mix se conserva para auditoría y tooltip.
+    g["IconoMix"] = ""
+    g.loc[g["Mix"].eq("🏬 EASY"), "IconoMix"] = "🏬"
+    g.loc[g["Mix"].eq("🚽 CARGA LOZA"), "IconoMix"] = "🚽"
+    g.loc[g["Mix"].eq("🏬🚽 MIX"), "IconoMix"] = "🏬 🚽"
+    g["Jornada"] = g["Fecha"].dt.strftime("%d/%m")
+    g["Orden"] = range(len(g))
+    g["CumplimientoPct"] = g["Cumplimiento"]*100
+    g["CumplimientoLineasPct"] = g["CumplimientoLineas"]*100
+    g["CumplimientoUnidadesPct"] = g["CumplimientoUnidades"]*100
+    g["UnidadesLinea"] = g["Unidades"].div(g["Lineas"].replace(0, pd.NA)).fillna(0)
     bars = alt.Chart(g).mark_bar(size=34).encode(
-        x=alt.X("Jornada:N", sort=alt.SortField(field="Orden", order="ascending"), title=None),
+        x=alt.X("Fecha:T", title=None, axis=alt.Axis(format="%d/%m", labelAngle=-55)),
         y=alt.Y("Lineas:Q", title="Líneas cerradas"),
         color=alt.Color("Estado:N", scale=alt.Scale(domain=["Por debajo","Cumplido","Superado","En curso"], range=["#d95f5f","#f2c14e","#4caf70","#5dade2"]), legend=alt.Legend(title="Resultado")),
-        tooltip=[alt.Tooltip("Jornada:N", title="Fecha"), alt.Tooltip("Lineas:Q", title="Líneas", format=",.0f"), alt.Tooltip("Objetivo:Q", format=",.0f"), alt.Tooltip("Unidades:Q", format=",.0f"), alt.Tooltip("OperariosActivos:Q", title="Operarios activos"), alt.Tooltip("CumplimientoPct:Q", title="Cumplimiento %", format=".1f")]
+        tooltip=[
+            alt.Tooltip("Jornada:N", title="Fecha"),
+            alt.Tooltip("Mix:N", title="Mix"),
+            alt.Tooltip("Lineas:Q", title="Líneas", format=",.0f"),
+            alt.Tooltip("Objetivo:Q", title="Objetivo líneas ajustado", format=",.0f"),
+            alt.Tooltip("Unidades:Q", title="Unidades", format=",.0f"),
+            alt.Tooltip("ObjetivoUnidades:Q", title="Referencia unidades", format=",.0f"),
+            alt.Tooltip("UnidadesLinea:Q", title="Unidades/línea", format=".1f"),
+            alt.Tooltip("LineasEasy:Q", title="Líneas EASY", format=",.0f"),
+            alt.Tooltip("UnidadesEasy:Q", title="Unidades EASY", format=",.0f"),
+            alt.Tooltip("PedidosCargaLoza:Q", title="Pedidos CARGA LOZA", format=",.0f"),
+            alt.Tooltip("CombosCarga:Q", title="Combos en carga", format=",.0f"),
+            alt.Tooltip("BidetsCarga:Q", title="Bidets en carga", format=",.0f"),
+            alt.Tooltip("PalletsEqCarga:Q", title="Pallets eq. carga", format=".1f"),
+            alt.Tooltip("MayorCargaPedido:Q", title="Mayor pedido pallets eq.", format=".1f"),
+            alt.Tooltip("PISO_DUCHA:Q", title="Pisos ducha (informativo)", format=",.0f"),
+            alt.Tooltip("BANERA:Q", title="Bañeras (informativo)", format=",.0f"),
+            alt.Tooltip("OperariosActivos:Q", title="Operarios activos"),
+            alt.Tooltip("CumplimientoLineasPct:Q", title="Cumpl. líneas %", format=".1f"),
+            alt.Tooltip("CumplimientoUnidadesPct:Q", title="Cumpl. unidades %", format=".1f"),
+            alt.Tooltip("CumplimientoPct:Q", title="Cumpl. operativo %", format=".1f"),
+        ]
     )
     puntos = alt.Chart(g).mark_line(point=True, strokeDash=[6,4], color="white").encode(
-        x=alt.X("Jornada:N", sort=alt.SortField(field="Orden", order="ascending")), y=alt.Y("Objetivo:Q")
+        x=alt.X("Fecha:T"), y=alt.Y("Objetivo:Q")
     )
-    st.altair_chart((bars+puntos).properties(height=390), use_container_width=True)
+    marcas = alt.Chart(g[g["IconoMix"].ne("")]).mark_text(
+        dy=-10,
+        fontSize=18,
+        align="center",
+        baseline="bottom",
+    ).encode(
+        x=alt.X("Fecha:T"),
+        y=alt.Y("Lineas:Q"),
+        text=alt.Text("IconoMix:N"),
+        tooltip=[alt.Tooltip("Mix:N", title="Contexto operativo")]
+    )
+    st.altair_chart((bars+puntos+marcas).properties(height=410), use_container_width=True)
+
+    with st.expander("🔎 Auditoría de fuente del período"):
+        aud = d[[
+            "Fecha","FuenteDatos","Lineas","Unidades",
+            "LineasEasy","UnidadesEasy",
+            "PedidosConLoza","PedidosLozaChicos","PedidosCargaLoza",
+            "CombosCarga","InodorosSueltosCarga","BidetsCarga",
+            "PalletsEqCarga","MayorCargaPedido",
+            "PISO_DUCHA","BANERA",
+            "LozaEquivalente",
+            "LineasLoza","UnidadesLoza","Mix"
+        ]].copy()
+        aud["Fecha"] = aud["Fecha"].dt.strftime("%d/%m/%Y")
+        st.dataframe(
+            aud.rename(columns={
+                "Lineas":"Líneas totales",
+                "Unidades":"Unidades totales",
+                "LineasEasy":"Líneas EASY",
+                "UnidadesEasy":"Unidades EASY",
+                "PedidosConLoza":"Pedidos con LOZA",
+                "PedidosLozaChicos":"Pedidos LOZA chicos",
+                "PedidosCargaLoza":"Pedidos CARGA LOZA",
+                "CombosCarga":"Combos en carga",
+                "InodorosSueltosCarga":"Inodoros sueltos carga",
+                "BidetsCarga":"Bidets en carga",
+                "PalletsEqCarga":"Pallets eq. CARGA",
+                "MayorCargaPedido":"Mayor pedido (pallets eq.)",
+                "PISO_DUCHA":"Pisos ducha",
+                "BANERA":"Bañeras",
+                "LozaEquivalente":"LOZA equivalente total",
+                "LineasLoza":"Líneas PEDIDOS LOZA",
+                "UnidadesLoza":"Unidades PEDIDOS LOZA",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "CARGA LOZA se evalúa por pedido/preparación: 6 combos/inodoros = 1 pallet y 10 bidets = 1 pallet. "
+            "Sólo pedidos individuales de 3 pallets equivalentes o más marcan 🚽 CARGA LOZA. "
+            "Varios pedidos chicos no se acumulan para disparar la marca. Pisos de ducha y bañeras se muestran, "
+            "pero se consideran carga normal de la jornada."
+        )
 
     st.markdown("### 👥 Dotación y productividad")
     op = actividad[(actividad["Fecha"].dt.date >= ini) & (actividad["Fecha"].dt.date <= fin)].copy()
@@ -753,9 +1220,16 @@ def render_objetivo() -> None:
         )
 
     st.markdown("### 📋 Resumen diario")
-    tabla = d[["Fecha","Lineas","Objetivo","Diferencia","Cumplimiento","Unidades","Contenedores","OperariosActivos","ApoyosActivos","LineasOperario","UnidadesOperario","Estado"]].copy()
+    tabla = d[["Fecha","Mix","Lineas","Objetivo","CumplimientoLineas","Unidades","ObjetivoUnidades","CumplimientoUnidades","Cumplimiento","PctSan","Contenedores","OperariosActivos","ApoyosActivos","LineasOperario","UnidadesOperario","Estado"]].copy()
     tabla["Fecha"] = tabla["Fecha"].dt.strftime("%d/%m/%Y")
-    st.dataframe(tabla, use_container_width=True, hide_index=True, column_config={"Cumplimiento":st.column_config.NumberColumn("Cumplimiento", format="%.1%%"), "LineasOperario":st.column_config.NumberColumn("L/operario", format="%.1f"), "UnidadesOperario":st.column_config.NumberColumn("U/operario", format="%.1f")})
+    st.dataframe(tabla, use_container_width=True, hide_index=True, column_config={
+        "CumplimientoLineas":st.column_config.NumberColumn("Cumpl. líneas", format="%.1%%"),
+        "CumplimientoUnidades":st.column_config.NumberColumn("Cumpl. unidades", format="%.1%%"),
+        "Cumplimiento":st.column_config.NumberColumn("Cumpl. operativo", format="%.1%%"),
+        "PctSan":st.column_config.NumberColumn("% SAN", format="%.1%%"),
+        "LineasOperario":st.column_config.NumberColumn("L/operario", format="%.1f"),
+        "UnidadesOperario":st.column_config.NumberColumn("U/operario", format="%.1f")
+    })
 
     with st.expander("ℹ️ Criterio de operario activo"):
         st.write(
