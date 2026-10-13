@@ -1082,6 +1082,13 @@ def construir_contexto_tareas(
             if _c in avance_despachos.columns:
                 avance_despachos[_c] = avance_despachos[_c].astype(int)
 
+    # Compatibilidad con obtener_carros_criticos: alias del avance real por carro.
+    if isinstance(avance_despachos, pd.DataFrame):
+        if "TotalPreparaciones" not in avance_despachos.columns and "TotalTareas" in avance_despachos.columns:
+            avance_despachos["TotalPreparaciones"] = avance_despachos["TotalTareas"]
+        if "PreparacionesFinalizadas" not in avance_despachos.columns and "TareasFinalizadas" in avance_despachos.columns:
+            avance_despachos["PreparacionesFinalizadas"] = avance_despachos["TareasFinalizadas"]
+
     carros_criticos = obtener_carros_criticos(tabla_operativa, avance_despachos)
     pendiente_pick = obtener_pendiente_pick(tabla_operativa, tabla_pedidos)
     organizacion_pre = obtener_organizacion_pre(tabla_operativa)
