@@ -1112,6 +1112,16 @@ def obtener_carros_criticos(
     if criticos.empty:
         return pd.DataFrame(columns=columnas_salida)
 
+    # Compatibilidad con versiones que entregan el avance por tareas.
+    # No altera los cálculos existentes ni los datos originales.
+    equivalencias = {
+        "TotalPreparaciones": "TotalTareas",
+        "PreparacionesFinalizadas": "TareasFinalizadas",
+    }
+    for destino, origen in equivalencias.items():
+        if destino not in criticos.columns and origen in criticos.columns:
+            criticos[destino] = criticos[origen]
+
     tabla = tabla_operativa.merge(
         criticos[
             [
@@ -1604,3 +1614,4 @@ def obtener_organizacion_pre(tabla_operativa):
 # ==========================================================
 # FIN DEL MÓDULO TAREAS
 # ==========================================================
+
