@@ -3,8 +3,17 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from utils.google_sheets import (
-    COLUMNAS_CANCELACIONES_ENTREGA,
+COLUMNAS_CANCELACIONES_ENTREGA = [
+    "CancelacionEntregaID", "Remito", "Cliente", "Motivo", "Observacion",
+    "UsuarioSolicitante", "FechaSolicitud", "EstadoCancelacion",
+    "TelefonoDestino", "EstadoWhatsApp", "FechaEnvioWhatsApp",
+    "ResponsableConfirmacion", "FechaConfirmacion", "ObservacionConfirmacion",
+    "NumeroIR", "FechaIR", "EstadoReingreso", "FechaReingreso", "FechaCierre",
+    "ResponsableGestion", "FechaInicioGestion", "ResultadoOperativo",
+    "ResponsableIR", "ObservacionIR", "ResponsableReingreso",
+    "ObservacionReingreso", "ResultadoFinal", "UltimaActualizacion",
+]
+from utils.consultas.persistencia_google import (
     asegurar_hoja,
     leer_hoja,
 )
@@ -20,10 +29,10 @@ def _validar_hoja_cancelaciones() -> bool:
 @st.cache_data(ttl=30, show_spinner=False)
 def leer_cancelaciones_entrega() -> pd.DataFrame:
     """
-    Lee CancelacionesEntrega una sola vez y conserva el resultado 30 segundos.
+    Lee commercial.cancelacion_entrega una sola vez y conserva el resultado 30 segundos.
 
     Streamlit devuelve una copia del DataFrame cacheado, por lo que puede
-    filtrarse en cada página sin generar nuevas consultas a Google Sheets.
+    filtrarse en cada página sin generar nuevas consultas a PostgreSQL.
     """
     _validar_hoja_cancelaciones()
     tabla = leer_hoja("CancelacionesEntrega")

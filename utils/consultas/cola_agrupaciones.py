@@ -4,28 +4,17 @@ import json
 import os
 import socket
 import uuid
-from datetime import datetime
-from pathlib import Path
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from sqlalchemy import text
 
-try:
-    import streamlit as st
-except ImportError:
-    st = None
+from database import engine
 
 
-SPREADSHEET_ID = "1OHWMhUFjnm9IEtOIjNswXZlevgAwt74f2fqYzHFcDBQ"
-NOMBRE_HOJA = "ColaAgrupaciones"
-RUTA_JSON = Path("config/google_drive.json")
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+TABLA_COLA = "execution.orden_agrupacion"
 
 COLUMNAS_COLA = [
     "OrdenID",
@@ -50,6 +39,40 @@ COLUMNAS_COLA = [
 
 ESTADOS_TERMINALES = {"COMPLETADA", "ERROR", "CANCELADA"}
 
+_SQL_A_LEGACY = {
+    "orden_id": "OrdenID",
+    "fecha_solicitud": "FechaSolicitud",
+    "usuario_solicitud": "UsuarioSolicitud",
+    "camioneta": "Camioneta",
+    "codigo_despacho": "CodigoDespacho",
+    "codigos_despacho_json": "CodigosDespachoJSON",
+    "usar_filtro_codigo_despacho": "UsarFiltroCodigoDespacho",
+    "pedidos_json": "PedidosJSON",
+    "cantidad_pedidos": "CantidadPedidos",
+    "estado": "Estado",
+    "etapa": "Etapa",
+    "mensaje": "Mensaje",
+    "fecha_inicio": "FechaInicio",
+    "fecha_fin": "FechaFin",
+    "duracion_segundos": "DuracionSegundos",
+    "intentos": "Intentos",
+    "worker_id": "WorkerID",
+    "ultima_actualizacion": "UltimaActualizacion",
+}
+
+_LEGACY_A_SQL = {v: k for k, v in _SQL_A_LEGACY.items()}
+
+_COLUMNAS_JSON = {"CodigosDespachoJSON", "PedidosJSON"}
+_COLUMNAS_FECHA = {
+    "FechaSolicitud",
+    "FechaInicio",
+    "FechaFin",
+    "UltimaActualizacion",
+}
+_COLUMNAS_ENTERAS = {"CantidadPedidos", "Intentos"}
+_COLUMNAS_NUMERICAS = {"DuracionSegundos"}
+_COLUMNAS_BOOLEANAS = {"UsarFiltroCodigoDespacho"}
+
 
 def ahora_texto() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -71,292 +94,366 @@ def limpiar_valor(valor: Any) -> str:
     return str(valor).strip()
 
 
-def crear_credenciales():
-    if RUTA_JSON.exists():
-        return service_account.Credentials.from_service_account_file(
-            RUTA_JSON,
-            scopes=SCOPES,
-        )
+def _texto_fecha(valor: Any) -> str:
+    if valor is None:
+        return ""
 
-    if st is not None:
+    if isinstance(valor, datetime):
+        return valor.strftime("%Y-%m-%d %H:%M:%S")
+
+    if isinstance(valor, date):
+        return valor.strftime("%Y-%m-%d")
+
+    return limpiar_valor(valor)
+
+
+def _json_texto(valor: Any) -> str:
+    if valor is None or valor == "":
+        return "[]"
+
+    if isinstance(valor, str):
+        texto_valor = valor.strip()
+        if not texto_valor:
+            return "[]"
+
         try:
-            datos = dict(st.secrets["gcp_service_account"])
-            return service_account.Credentials.from_service_account_info(
-                datos,
-                scopes=SCOPES,
-            )
-        except Exception:
-            pass
+            json.loads(texto_valor)
+            return texto_valor
+        except json.JSONDecodeError:
+            return json.dumps(valor, ensure_ascii=False)
 
-    secreto_json = os.getenv("GCP_SERVICE_ACCOUNT_JSON", "").strip()
-
-    if secreto_json:
-        return service_account.Credentials.from_service_account_info(
-            json.loads(secreto_json),
-            scopes=SCOPES,
-        )
-
-    raise RuntimeError(
-        "No se encontraron credenciales de Google. "
-        "Usá config/google_drive.json en la PC o "
-        "[gcp_service_account] en Streamlit Secrets."
-    )
+    return json.dumps(valor, ensure_ascii=False)
 
 
-def crear_servicio_sheets():
-    return build(
-        "sheets",
-        "v4",
-        credentials=crear_credenciales(),
-        cache_discovery=False,
-    )
+def _a_bool(valor: Any) -> bool:
+    if isinstance(valor, bool):
+        return valor
+
+    return str(valor).strip().upper() in {
+        "TRUE",
+        "1",
+        "SI",
+        "SÍ",
+        "YES",
+    }
 
 
-def nombre_rango(rango: str = "") -> str:
-    if rango:
-        return f"'{NOMBRE_HOJA}'!{rango}"
+def _a_entero(valor: Any, defecto: int = 0) -> int:
+    if valor is None or str(valor).strip() == "":
+        return defecto
 
-    return f"'{NOMBRE_HOJA}'"
+    try:
+        return int(float(str(valor).strip()))
+    except (TypeError, ValueError):
+        return defecto
 
 
-def numero_a_columna_excel(numero: int) -> str:
-    resultado = ""
+def _a_numero_o_none(valor: Any) -> float | None:
+    if valor is None or str(valor).strip() == "":
+        return None
 
-    while numero:
-        numero, resto = divmod(numero - 1, 26)
-        resultado = chr(65 + resto) + resultado
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
 
-    return resultado
+
+def _a_datetime_o_none(valor: Any) -> datetime | None:
+    if valor is None or str(valor).strip() == "":
+        return None
+
+    if isinstance(valor, datetime):
+        return valor
+
+    if isinstance(valor, date):
+        return datetime.combine(valor, datetime.min.time())
+
+    convertido = pd.to_datetime(valor, errors="coerce")
+    if pd.isna(convertido):
+        return None
+
+    if hasattr(convertido, "to_pydatetime"):
+        return convertido.to_pydatetime()
+
+    return convertido
+
+
+def _valor_sql(columna_legacy: str, valor: Any) -> Any:
+    if columna_legacy in _COLUMNAS_JSON:
+        if valor is None or valor == "":
+            return []
+
+        if isinstance(valor, str):
+            try:
+                return json.loads(valor)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"JSON inválido para {columna_legacy}: {valor}"
+                ) from error
+
+        return valor
+
+    if columna_legacy in _COLUMNAS_BOOLEANAS:
+        return _a_bool(valor)
+
+    if columna_legacy in _COLUMNAS_ENTERAS:
+        return _a_entero(valor)
+
+    if columna_legacy in _COLUMNAS_NUMERICAS:
+        return _a_numero_o_none(valor)
+
+    if columna_legacy in _COLUMNAS_FECHA:
+        return _a_datetime_o_none(valor)
+
+    texto_valor = limpiar_valor(valor)
+    return texto_valor if texto_valor else None
+
+
+def _registro_legacy(fila: dict[str, Any]) -> dict[str, Any]:
+    salida: dict[str, Any] = {}
+
+    for columna_sql, columna_legacy in _SQL_A_LEGACY.items():
+        valor = fila.get(columna_sql)
+
+        if columna_legacy in _COLUMNAS_JSON:
+            salida[columna_legacy] = _json_texto(valor)
+        elif columna_legacy in _COLUMNAS_FECHA:
+            salida[columna_legacy] = _texto_fecha(valor)
+        elif columna_legacy in _COLUMNAS_BOOLEANAS:
+            salida[columna_legacy] = bool(valor) if valor is not None else False
+        elif isinstance(valor, Decimal):
+            salida[columna_legacy] = float(valor)
+        elif valor is None:
+            salida[columna_legacy] = ""
+        else:
+            salida[columna_legacy] = valor
+
+    return salida
+
+
+def _select_base() -> str:
+    return """
+        SELECT
+            orden_id,
+            fecha_solicitud,
+            usuario_solicitud,
+            camioneta,
+            codigo_despacho,
+            codigos_despacho_json,
+            usar_filtro_codigo_despacho,
+            pedidos_json,
+            cantidad_pedidos,
+            estado,
+            etapa,
+            mensaje,
+            fecha_inicio,
+            fecha_fin,
+            duracion_segundos,
+            intentos,
+            worker_id,
+            ultima_actualizacion
+        FROM execution.orden_agrupacion
+    """
 
 
 def asegurar_hoja_cola() -> None:
-    servicio = crear_servicio_sheets()
+    """
+    Compatibilidad con el nombre de la implementación anterior.
 
-    metadata = (
-        servicio.spreadsheets()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            fields="sheets.properties.title",
-        )
-        .execute()
-    )
-
-    hojas = {
-        hoja["properties"]["title"]
-        for hoja in metadata.get("sheets", [])
-    }
-
-    if NOMBRE_HOJA not in hojas:
-        servicio.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={
-                "requests": [
-                    {
-                        "addSheet": {
-                            "properties": {
-                                "title": NOMBRE_HOJA,
-                            }
-                        }
-                    }
-                ]
-            },
-        ).execute()
-
-    encabezados = (
-        servicio.spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango("1:1"),
-        )
-        .execute()
-        .get("values", [])
-    )
-
-    actuales = encabezados[0] if encabezados else []
-
-    if not actuales:
-        servicio.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango("A1"),
-            valueInputOption="RAW",
-            body={"values": [COLUMNAS_COLA]},
-        ).execute()
-        return
-
-    if actuales == COLUMNAS_COLA:
-        return
-
-    # ------------------------------------------------------
-    # MIGRACIÓN AUTOMÁTICA DE ESTRUCTURA
-    # ------------------------------------------------------
-    # Si la hoja existe con una versión anterior, conserva los
-    # datos de las columnas conocidas, agrega las nuevas vacías
-    # y reordena todo según COLUMNAS_COLA.
-
-    valores_actuales = (
-        servicio.spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(),
-        )
-        .execute()
-        .get("values", [])
-    )
-
-    filas_actuales = valores_actuales[1:] if valores_actuales else []
-
-    filas_migradas = []
-
-    for fila in filas_actuales:
-        fila_completa = (
-            fila
-            + [""] * (len(actuales) - len(fila))
-        )
-
-        registro_actual = {
-            encabezado: fila_completa[indice]
-            for indice, encabezado in enumerate(actuales)
-            if encabezado
-        }
-
-        filas_migradas.append([
-            limpiar_valor(
-                registro_actual.get(columna, "")
-            )
-            for columna in COLUMNAS_COLA
-        ])
-
-    # Limpia la hoja completa para evitar que queden columnas
-    # antiguas o valores residuales fuera de la estructura nueva.
-    servicio.spreadsheets().values().clear(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango(),
-        body={},
-    ).execute()
-
-    valores_nuevos = [COLUMNAS_COLA] + filas_migradas
-
-    servicio.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango("A1"),
-        valueInputOption="RAW",
-        body={"values": valores_nuevos},
-    ).execute()
-
-    print(
-        "Hoja ColaAgrupaciones migrada automáticamente. "
-        f"Columnas anteriores: {actuales}. "
-        f"Columnas actuales: {COLUMNAS_COLA}",
-        flush=True,
-    )
+    La tabla execution.orden_agrupacion se crea por migración SQL/Alembic,
+    por lo que esta función ya no crea ni modifica Google Sheets.
+    """
+    return None
 
 
 def leer_cola() -> pd.DataFrame:
-    asegurar_hoja_cola()
-    servicio = crear_servicio_sheets()
-
-    valores = (
-        servicio.spreadsheets()
-        .values()
-        .get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(),
-        )
-        .execute()
-        .get("values", [])
+    consulta = text(
+        _select_base()
+        + """
+        ORDER BY fecha_solicitud ASC, orden_id ASC
+        """
     )
 
-    if len(valores) <= 1:
+    with engine.connect() as conexion:
+        filas = conexion.execute(consulta).mappings().all()
+
+    if not filas:
         return pd.DataFrame(columns=COLUMNAS_COLA)
 
-    encabezados = valores[0]
-    filas = []
+    registros = [
+        _registro_legacy(dict(fila))
+        for fila in filas
+    ]
 
-    for fila in valores[1:]:
-        completa = fila + [""] * (len(encabezados) - len(fila))
-        filas.append(completa[:len(encabezados)])
-
-    df = pd.DataFrame(filas, columns=encabezados)
-
-    for columna in COLUMNAS_COLA:
-        if columna not in df.columns:
-            df[columna] = ""
-
-    return df[COLUMNAS_COLA].copy()
+    return pd.DataFrame(registros, columns=COLUMNAS_COLA)
 
 
 def agregar_fila(registro: dict[str, Any]) -> None:
-    asegurar_hoja_cola()
-    servicio = crear_servicio_sheets()
+    orden_id = limpiar_valor(registro.get("OrdenID"))
 
-    fila = [
-        limpiar_valor(registro.get(columna, ""))
-        for columna in COLUMNAS_COLA
-    ]
+    if not orden_id:
+        raise ValueError("La orden debe tener OrdenID.")
 
-    servicio.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=nombre_rango("A1"),
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [fila]},
-    ).execute()
+    valores = {
+        columna_sql: _valor_sql(
+            columna_legacy,
+            registro.get(columna_legacy),
+        )
+        for columna_legacy, columna_sql in _LEGACY_A_SQL.items()
+    }
+
+    if valores["fecha_solicitud"] is None:
+        valores["fecha_solicitud"] = datetime.now()
+
+    if valores["ultima_actualizacion"] is None:
+        valores["ultima_actualizacion"] = datetime.now()
+
+    if not valores["estado"]:
+        valores["estado"] = "PENDIENTE"
+
+    consulta = text(
+        """
+        INSERT INTO execution.orden_agrupacion (
+            orden_id,
+            fecha_solicitud,
+            usuario_solicitud,
+            camioneta,
+            codigo_despacho,
+            codigos_despacho_json,
+            usar_filtro_codigo_despacho,
+            pedidos_json,
+            cantidad_pedidos,
+            estado,
+            etapa,
+            mensaje,
+            fecha_inicio,
+            fecha_fin,
+            duracion_segundos,
+            intentos,
+            worker_id,
+            ultima_actualizacion
+        )
+        VALUES (
+            :orden_id,
+            :fecha_solicitud,
+            :usuario_solicitud,
+            :camioneta,
+            :codigo_despacho,
+            CAST(:codigos_despacho_json AS jsonb),
+            :usar_filtro_codigo_despacho,
+            CAST(:pedidos_json AS jsonb),
+            :cantidad_pedidos,
+            :estado,
+            :etapa,
+            :mensaje,
+            :fecha_inicio,
+            :fecha_fin,
+            :duracion_segundos,
+            :intentos,
+            :worker_id,
+            :ultima_actualizacion
+        )
+        """
+    )
+
+    parametros = dict(valores)
+    parametros["codigos_despacho_json"] = json.dumps(
+        valores["codigos_despacho_json"],
+        ensure_ascii=False,
+    )
+    parametros["pedidos_json"] = json.dumps(
+        valores["pedidos_json"],
+        ensure_ascii=False,
+    )
+
+    with engine.begin() as conexion:
+        conexion.execute(consulta, parametros)
 
 
 def buscar_fila_orden(orden_id: str) -> int | None:
-    df = leer_cola()
+    """
+    Compatibilidad con la función anterior.
 
-    if df.empty:
-        return None
+    En PostgreSQL ya no existe un número físico de fila de Sheets.
+    Devuelve 1 si la orden existe y None si no existe.
+    """
+    consulta = text(
+        """
+        SELECT 1
+        FROM execution.orden_agrupacion
+        WHERE orden_id = :orden_id
+        LIMIT 1
+        """
+    )
 
-    coincidencias = df.index[
-        df["OrdenID"].astype(str).str.strip().eq(str(orden_id).strip())
-    ].tolist()
+    with engine.connect() as conexion:
+        existe = conexion.execute(
+            consulta,
+            {"orden_id": str(orden_id).strip()},
+        ).scalar_one_or_none()
 
-    if not coincidencias:
-        return None
-
-    return int(coincidencias[0]) + 2
+    return 1 if existe is not None else None
 
 
 def actualizar_orden(
     orden_id: str,
     cambios: dict[str, Any],
 ) -> None:
-    fila = buscar_fila_orden(orden_id)
+    orden_id = str(orden_id).strip()
 
-    if fila is None:
-        raise ValueError(f"No existe la orden {orden_id}.")
+    if not orden_id:
+        raise ValueError("OrdenID vacío.")
 
-    servicio = crear_servicio_sheets()
-    data = []
+    if not cambios:
+        return
 
-    cambios_finales = {
-        **cambios,
-        "UltimaActualizacion": ahora_texto(),
-    }
+    columnas_sql: list[str] = []
+    parametros: dict[str, Any] = {"orden_id": orden_id}
 
-    for columna, valor in cambios_finales.items():
-        if columna not in COLUMNAS_COLA:
-            raise ValueError(f"Columna inválida en cola: {columna}")
+    for indice, (columna_legacy, valor) in enumerate(cambios.items()):
+        if columna_legacy not in COLUMNAS_COLA:
+            raise ValueError(
+                f"Columna inválida en cola: {columna_legacy}"
+            )
 
-        indice = COLUMNAS_COLA.index(columna) + 1
-        letra = numero_a_columna_excel(indice)
+        if columna_legacy in {"OrdenID", "UltimaActualizacion"}:
+            if columna_legacy == "OrdenID":
+                raise ValueError("OrdenID no puede modificarse.")
+            continue
 
-        data.append({
-            "range": nombre_rango(f"{letra}{fila}"),
-            "values": [[limpiar_valor(valor)]],
-        })
+        columna_sql = _LEGACY_A_SQL[columna_legacy]
+        nombre_parametro = f"valor_{indice}"
+        valor_sql = _valor_sql(columna_legacy, valor)
 
-    servicio.spreadsheets().values().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={
-            "valueInputOption": "RAW",
-            "data": data,
-        },
-    ).execute()
+        if columna_legacy in _COLUMNAS_JSON:
+            columnas_sql.append(
+                f"{columna_sql} = CAST(:{nombre_parametro} AS jsonb)"
+            )
+            parametros[nombre_parametro] = json.dumps(
+                valor_sql,
+                ensure_ascii=False,
+            )
+        else:
+            columnas_sql.append(
+                f"{columna_sql} = :{nombre_parametro}"
+            )
+            parametros[nombre_parametro] = valor_sql
+
+    columnas_sql.append("ultima_actualizacion = NOW()")
+
+    consulta = text(
+        f"""
+        UPDATE execution.orden_agrupacion
+        SET {", ".join(columnas_sql)}
+        WHERE orden_id = :orden_id
+        """
+    )
+
+    with engine.begin() as conexion:
+        resultado = conexion.execute(consulta, parametros)
+
+        if resultado.rowcount == 0:
+            raise ValueError(f"No existe la orden {orden_id}.")
 
 
 def crear_orden_agrupacion(
@@ -387,80 +484,111 @@ def crear_orden_agrupacion(
     if not pedidos_normalizados:
         raise ValueError("La orden no contiene pedidos.")
 
-    orden_id = f"AGR-{datetime.now():%Y%m%d%H%M%S}-{uuid.uuid4().hex[:6].upper()}"
-    fecha = ahora_texto()
+    orden_id = (
+        f"AGR-{datetime.now():%Y%m%d%H%M%S}-"
+        f"{uuid.uuid4().hex[:6].upper()}"
+    )
 
-    agregar_fila({
-        "OrdenID": orden_id,
-        "FechaSolicitud": fecha,
-        "UsuarioSolicitud": usuario,
-        "Camioneta": camioneta,
-        "CodigoDespacho": codigo_despacho,
-        "CodigosDespachoJSON": json.dumps(
+    consulta = text(
+        """
+        INSERT INTO execution.orden_agrupacion (
+            orden_id,
+            fecha_solicitud,
+            usuario_solicitud,
+            camioneta,
+            codigo_despacho,
+            codigos_despacho_json,
+            usar_filtro_codigo_despacho,
+            pedidos_json,
+            cantidad_pedidos,
+            estado,
+            etapa,
+            mensaje,
+            intentos,
+            ultima_actualizacion
+        )
+        VALUES (
+            :orden_id,
+            NOW(),
+            :usuario_solicitud,
+            :camioneta,
+            :codigo_despacho,
+            CAST(:codigos_despacho_json AS jsonb),
+            :usar_filtro_codigo_despacho,
+            CAST(:pedidos_json AS jsonb),
+            :cantidad_pedidos,
+            'PENDIENTE',
+            'encolada',
+            'Orden recibida y pendiente de ejecución.',
+            0,
+            NOW()
+        )
+        """
+    )
+
+    parametros = {
+        "orden_id": orden_id,
+        "usuario_solicitud": limpiar_valor(usuario) or None,
+        "camioneta": limpiar_valor(camioneta),
+        "codigo_despacho": limpiar_valor(codigo_despacho) or None,
+        "codigos_despacho_json": json.dumps(
             codigos_normalizados,
             ensure_ascii=False,
         ),
-        "UsarFiltroCodigoDespacho": usar_filtro_codigo_despacho,
-        "PedidosJSON": json.dumps(
+        "usar_filtro_codigo_despacho": bool(
+            usar_filtro_codigo_despacho
+        ),
+        "pedidos_json": json.dumps(
             pedidos_normalizados,
             ensure_ascii=False,
         ),
-        "CantidadPedidos": len(pedidos_normalizados),
-        "Estado": "PENDIENTE",
-        "Etapa": "encolada",
-        "Mensaje": "Orden recibida y pendiente de ejecución.",
-        "FechaInicio": "",
-        "FechaFin": "",
-        "DuracionSegundos": "",
-        "Intentos": 0,
-        "WorkerID": "",
-        "UltimaActualizacion": fecha,
-    })
+        "cantidad_pedidos": len(pedidos_normalizados),
+    }
+
+    with engine.begin() as conexion:
+        conexion.execute(consulta, parametros)
 
     return orden_id
 
 
 def obtener_orden(orden_id: str) -> dict[str, Any] | None:
-    df = leer_cola()
+    consulta = text(
+        _select_base()
+        + """
+        WHERE orden_id = :orden_id
+        LIMIT 1
+        """
+    )
 
-    if df.empty:
+    with engine.connect() as conexion:
+        fila = conexion.execute(
+            consulta,
+            {"orden_id": str(orden_id).strip()},
+        ).mappings().first()
+
+    if fila is None:
         return None
 
-    filas = df[
-        df["OrdenID"].astype(str).str.strip().eq(str(orden_id).strip())
-    ]
-
-    if filas.empty:
-        return None
-
-    return filas.iloc[0].to_dict()
+    return _registro_legacy(dict(fila))
 
 
 def obtener_siguiente_pendiente() -> dict[str, Any] | None:
-    df = leer_cola()
-
-    if df.empty:
-        return None
-
-    pendientes = df[
-        df["Estado"].astype(str).str.strip().str.upper().eq("PENDIENTE")
-    ].copy()
-
-    if pendientes.empty:
-        return None
-
-    pendientes["_fecha"] = pd.to_datetime(
-        pendientes["FechaSolicitud"],
-        errors="coerce",
+    consulta = text(
+        _select_base()
+        + """
+        WHERE UPPER(TRIM(estado)) = 'PENDIENTE'
+        ORDER BY fecha_solicitud ASC, orden_id ASC
+        LIMIT 1
+        """
     )
 
-    pendientes = pendientes.sort_values(
-        by="_fecha",
-        ascending=True,
-        na_position="last",
-    )
+    with engine.connect() as conexion:
+        fila = conexion.execute(consulta).mappings().first()
 
-    return pendientes.iloc[0].drop(labels=["_fecha"]).to_dict()
+    if fila is None:
+        return None
+
+    return _registro_legacy(dict(fila))
 
 
 def marcar_en_proceso(
@@ -468,17 +596,33 @@ def marcar_en_proceso(
     worker_id: str,
     intentos: int,
 ) -> None:
-    actualizar_orden(
-        orden_id,
-        {
-            "Estado": "EN_PROCESO",
-            "Etapa": "inicio",
-            "Mensaje": "El worker tomó la orden.",
-            "FechaInicio": ahora_texto(),
-            "WorkerID": worker_id,
-            "Intentos": intentos,
-        },
+    consulta = text(
+        """
+        UPDATE execution.orden_agrupacion
+        SET
+            estado = 'EN_PROCESO',
+            etapa = 'inicio',
+            mensaje = 'El worker tomó la orden.',
+            fecha_inicio = NOW(),
+            worker_id = :worker_id,
+            intentos = :intentos,
+            ultima_actualizacion = NOW()
+        WHERE orden_id = :orden_id
+        """
     )
+
+    with engine.begin() as conexion:
+        resultado = conexion.execute(
+            consulta,
+            {
+                "orden_id": str(orden_id).strip(),
+                "worker_id": limpiar_valor(worker_id) or None,
+                "intentos": _a_entero(intentos),
+            },
+        )
+
+        if resultado.rowcount == 0:
+            raise ValueError(f"No existe la orden {orden_id}.")
 
 
 def worker_id_local() -> str:

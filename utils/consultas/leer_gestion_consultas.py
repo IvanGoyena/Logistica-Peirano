@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any
-import time
 
 import pandas as pd
 
@@ -16,18 +15,7 @@ from utils.google_sheets import (
     COLUMNAS_SOLICITUDES,
     COLUMNAS_URGENCIAS,
     leer_hoja,
-    asegurar_hoja,
 )
-
-
-# Última lectura correcta por hoja.
-# Sirve como respaldo ante cortes transitorios de Google Sheets
-# durante la vida del proceso de Streamlit.
-_ULTIMA_LECTURA_GOOGLE: dict[str, pd.DataFrame] = {}
-
-# Reintentos ante errores de red transitorios.
-_INTENTOS_LECTURA_GOOGLE = 1
-_ESPERA_REINTENTO_SEGUNDOS = 1.5
 
 
 # ==========================================================
@@ -152,58 +140,30 @@ def leer_tabla_google(
     columna_fecha: str | None = None,
 ) -> pd.DataFrame:
     """
-    Lee una hoja de Google Sheets. Los reintentos de transporte se realizan
-    en utils.google_sheets; aquí se conserva el último resultado válido.
-
-    Si Google falla después de los reintentos de transporte y existe una lectura correcta
-    previa de esa misma hoja en memoria, devuelve esa copia como respaldo.
-    Si todavía no hubo ninguna lectura correcta, mantiene el error visible
-    para no ocultar un problema real de conexión o configuración.
+    Lee una hoja de Google Sheets y garantiza que tenga
+    las columnas esperadas por la aplicación.
     """
 
-    ultimo_error: Exception | None = None
-    tabla = None
+    try:
 
-    for intento in range(1, _INTENTOS_LECTURA_GOOGLE + 1):
-        try:
-            tabla = leer_hoja(
-                nombre_hoja=nombre_hoja,
-                columnas=columnas,
-            )
-            ultimo_error = None
-            break
+        tabla = leer_hoja(
+            nombre_hoja=nombre_hoja,
+            columnas=columnas,
+        )
 
-        except Exception as error:
-            ultimo_error = error
-
-            print(
-                f"Google Sheets: error leyendo '{nombre_hoja}' "
-                f"(intento {intento}/{_INTENTOS_LECTURA_GOOGLE}): "
-                f"{type(error).__name__}: {error}"
-            )
-
-            if intento < _INTENTOS_LECTURA_GOOGLE:
-                time.sleep(_ESPERA_REINTENTO_SEGUNDOS * intento)
-
-    if ultimo_error is not None:
-        respaldo = _ULTIMA_LECTURA_GOOGLE.get(nombre_hoja)
-
-        if respaldo is not None:
-            print(
-                f"Google Sheets: se usa la última lectura correcta "
-                f"de '{nombre_hoja}' como respaldo."
-            )
-            return respaldo.copy().reset_index(drop=True)
+    except Exception as error:
 
         raise RuntimeError(
             f"No se pudo leer la hoja "
-            f"'{nombre_hoja}' de Google Sheets después de "
-            f"{_INTENTOS_LECTURA_GOOGLE} intentos: "
-            f"{ultimo_error}"
-        ) from ultimo_error
+            f"'{nombre_hoja}' de Google Sheets: "
+            f"{error}"
+        ) from error
 
     if tabla is None:
-        tabla = crear_dataframe_vacio(columnas)
+
+        tabla = crear_dataframe_vacio(
+            columnas
+        )
 
     tabla = asegurar_columnas(
         tabla,
@@ -211,23 +171,22 @@ def leer_tabla_google(
     )
 
     if "Pedido" in tabla.columns:
+
         tabla["Pedido"] = (
             tabla["Pedido"]
             .apply(normalizar_pedido)
         )
 
     if columna_fecha:
+
         tabla = ordenar_por_fecha(
             tabla,
             columna_fecha,
         )
 
-    tabla = tabla.reset_index(drop=True)
-
-    # Guardamos únicamente lecturas exitosas.
-    _ULTIMA_LECTURA_GOOGLE[nombre_hoja] = tabla.copy()
-
-    return tabla
+    return tabla.reset_index(
+        drop=True
+    )
 
 
 # ==========================================================
@@ -235,8 +194,10 @@ def leer_tabla_google(
 # ==========================================================
 
 def leer_solicitudes() -> pd.DataFrame:
-    """Lee todas las solicitudes comerciales."""
-    asegurar_hoja("Solicitudes")
+    """
+    Lee todas las solicitudes comerciales.
+    """
+
     return leer_tabla_google(
         nombre_hoja="Solicitudes",
         columnas=COLUMNAS_SOLICITUDES,
@@ -245,8 +206,10 @@ def leer_solicitudes() -> pd.DataFrame:
 
 
 def leer_urgencias() -> pd.DataFrame:
-    """Lee todas las urgencias comerciales."""
-    asegurar_hoja("Urgencias")
+    """
+    Lee todas las urgencias comerciales.
+    """
+
     return leer_tabla_google(
         nombre_hoja="Urgencias",
         columnas=COLUMNAS_URGENCIAS,
@@ -266,41 +229,18 @@ def leer_anulaciones() -> pd.DataFrame:
     )
 
 
-def leer_cancelaciones_entrega() -> pd.DataFrame:
-    """Lee todas las cancelaciones de entrega."""
 
-    asegurar_hoja("CancelacionesEntrega")
+def leer_cancelaciones_entrega() -> pd.DataFrame:
+    """
+    Lee todas las cancelaciones de entrega desde Google Sheets.
+    Se mantiene aquí también por compatibilidad con el sincronizador.
+    """
 
     return leer_tabla_google(
         nombre_hoja="CancelacionesEntrega",
         columnas=COLUMNAS_CANCELACIONES_ENTREGA,
         columna_fecha="FechaSolicitud",
     )
-
-
-def obtener_cancelaciones_entrega_activas() -> pd.DataFrame:
-    """Devuelve las cancelaciones que todavía requieren seguimiento."""
-
-    tabla = leer_cancelaciones_entrega()
-    if tabla.empty:
-        return tabla
-
-    estados_cerrados = {"FINALIZADA", "CANCELADA"}
-    estados = (
-        tabla["EstadoCancelacion"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    return tabla.loc[~estados.isin(estados_cerrados)].reset_index(drop=True)
-
-
-def obtener_historial_cancelaciones_entrega() -> pd.DataFrame:
-    """Devuelve el histórico completo de cancelaciones de entrega."""
-
-    return leer_cancelaciones_entrega()
 
 
 def leer_reclamos() -> pd.DataFrame:
@@ -516,52 +456,37 @@ def obtener_fotos_reclamo(
 def obtener_solicitudes_abiertas(
 ) -> pd.DataFrame:
     """
-    Devuelve todas las solicitudes que todavía requieren gestión.
-
-    Una solicitud se considera abierta mientras no tenga un
-    estado explícitamente cerrado. Esto permite conservar
-    compatibilidad con registros antiguos, estados vacíos o
-    variantes como Solicitada y Abierta.
+    Devuelve solicitudes que todavía requieren gestión.
     """
 
     tabla = leer_solicitudes()
 
-    if tabla is None or tabla.empty:
+    if tabla.empty:
         return tabla
 
-    if "EstadoSolicitud" not in tabla.columns:
-        return tabla.copy().reset_index(drop=True)
-
-    estados_cerrados = {
-        "FINALIZADA",
-        "FINALIZADO",
-        "RESUELTA",
-        "RESUELTO",
-        "CERRADA",
-        "CERRADO",
-        "RECHAZADA",
-        "RECHAZADO",
-        "CANCELADA",
-        "CANCELADO",
+    estados_abiertos = {
+        "PENDIENTE",
+        "EN REVISIÓN",
+        "EN REVISION",
+        "EN CURSO",
+        "EN GESTIÓN",
+        "EN GESTION",
     }
 
-    estados = (
+    mascara = (
         tabla["EstadoSolicitud"]
-        .fillna("")
         .astype(str)
         .str.strip()
         .str.upper()
-    )
-
-    mascara_abiertas = ~estados.isin(
-        estados_cerrados
+        .isin(estados_abiertos)
     )
 
     return (
-        tabla.loc[mascara_abiertas]
+        tabla.loc[mascara]
         .copy()
         .reset_index(drop=True)
     )
+
 
 # ==========================================================
 # URGENCIAS ACTIVAS
@@ -810,28 +735,6 @@ def pedido_tiene_reclamo_abierto(
 
 
 # ==========================================================
-# HISTÓRICOS POR TIPO DE GESTIÓN
-# ==========================================================
-
-def obtener_historial_solicitudes() -> pd.DataFrame:
-    """Devuelve todas las solicitudes, abiertas y cerradas."""
-
-    return leer_solicitudes()
-
-
-def obtener_historial_urgencias() -> pd.DataFrame:
-    """Devuelve todas las urgencias, activas y finalizadas."""
-
-    return leer_urgencias()
-
-
-def obtener_historial_reclamos() -> pd.DataFrame:
-    """Devuelve todos los reclamos, abiertos y cerrados."""
-
-    return leer_reclamos()
-
-
-# ==========================================================
 # HISTORIAL DEL PEDIDO
 # ==========================================================
 
@@ -1053,35 +956,3 @@ def obtener_resumen_gestion(
             obtener_pedidos_bloqueados()
         ),
     }
-
-# ==========================================================
-# LECTURA TOLERANTE PARA PANTALLAS INFORMATIVAS
-# ==========================================================
-
-def leer_tabla_google_segura(
-    nombre_hoja: str,
-    columnas: list[str],
-    columna_fecha: str | None = None,
-) -> tuple[pd.DataFrame, str]:
-    """
-    Variante tolerante para una pantalla que puede continuar
-    mostrando información parcial.
-
-    Devuelve (tabla, mensaje_error). Las funciones operativas
-    continúan usando leer_tabla_google para no ocultar fallos.
-    """
-
-    try:
-        return (
-            leer_tabla_google(
-                nombre_hoja=nombre_hoja,
-                columnas=columnas,
-                columna_fecha=columna_fecha,
-            ),
-            "",
-        )
-    except Exception as error:
-        return (
-            crear_dataframe_vacio(columnas),
-            str(error),
-        )

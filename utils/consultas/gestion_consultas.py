@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from utils.google_sheets import (
+from utils.consultas.persistencia_google import (
     agregar_registro,
     actualizar_registro,
     eliminar_registro,

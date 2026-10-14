@@ -1,4 +1,4 @@
-﻿# utils/gestion_urgencias_digip.py
+# utils/gestion_urgencias_digip.py
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from utils.google_sheets import (
+from utils.consultas.persistencia_sql import (
     actualizar_registro,
 )
 
@@ -18,7 +18,7 @@ from utils.consultas.leer_gestion_consultas import (
 
 
 # ==========================================================
-# CONFIGURACIÃ“N
+# CONFIGURACIÓN
 # ==========================================================
 
 ZONA_HORARIA = ZoneInfo(
@@ -34,7 +34,7 @@ def normalizar_pedido(
     valor,
 ) -> str:
     """
-    Normaliza nÃºmeros de pedido y transmisiones.
+    Normaliza números de pedido y transmisiones.
     """
 
     if valor is None:
@@ -63,13 +63,15 @@ def obtener_fecha_hora() -> str:
 # ==========================================================
 
 def obtener_urgencias_pendientes_digip(
+    tabla: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
-    Obtiene las urgencias que todavÃ­a deben ejecutarse
+    Obtiene las urgencias que todavía deben ejecutarse
     en DIGIP.
     """
 
-    tabla = leer_urgencias()
+    if tabla is None:
+        tabla = leer_urgencias()
 
     if tabla is None or tabla.empty:
         return pd.DataFrame()
@@ -169,7 +171,7 @@ def obtener_urgencias_pendientes_digip(
 def obtener_pedidos_pendientes_digip(
 ) -> list[str]:
     """
-    Devuelve los nÃºmeros de los pedidos pendientes.
+    Devuelve los números de los pedidos pendientes.
     """
 
     pendientes = (
@@ -206,7 +208,7 @@ def actualizar_estado_lote(
     registrar_fecha_ejecucion: bool = False,
 ) -> int:
     """
-    Actualiza en Google Sheets todas las urgencias
+    Actualiza en PostgreSQL todas las urgencias
     correspondientes a los pedidos indicados.
     """
 
@@ -311,7 +313,7 @@ def marcar_lote_procesando(
         pedidos,
         estado_urgencia="Procesando",
         estado_ejecucion="Procesando",
-        mensaje="EjecuciÃ³n iniciada.",
+        mensaje="Ejecución iniciada.",
     )
 
 

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from utils.google_sheets import agregar_registro, actualizar_registro, leer_hoja, asegurar_hoja
+from utils.consultas.persistencia_google import agregar_registro, actualizar_registro, leer_hoja, asegurar_hoja
 
 ZONA_HORARIA = ZoneInfo("America/Argentina/Buenos_Aires")
 ESTADOS_CERRADOS = {"FINALIZADA", "CANCELADA"}

@@ -1,82 +1,72 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
 from utils.consultas.leer_gestion_consultas import (
-    obtener_urgencias_activas,
-    obtener_solicitudes_abiertas,
-    obtener_historial_solicitudes,
-    obtener_historial_urgencias,
-    obtener_historial_reclamos,
+    leer_solicitudes,
+    leer_reclamos,
 )
 from utils.consultas.leer_devoluciones import (
+    leer_cancelaciones_entrega,
     obtener_cancelaciones_activas,
     obtener_historial_cancelaciones,
-)
-from utils.consultas.gestion_urgencias_digip import (
-    obtener_urgencias_pendientes_digip,
-    obtener_pedidos_pendientes_digip,
+    invalidar_cache_devoluciones,
 )
 
+_ESTADOS_ABIERTOS_SOLICITUD = {
+    "PENDIENTE", "PROGRAMADA", "EN REVISIÓN", "EN REVISION",
+    "EN CURSO", "EN GESTIÓN", "EN GESTION",
+}
 
-@st.cache_data(
-    ttl=60,
-    max_entries=4,
-    show_spinner=False,
-)
+def _estado(serie: pd.Series) -> pd.Series:
+    return serie.fillna("").astype(str).str.strip().str.upper()
+
+@st.cache_data(ttl=45, max_entries=4, show_spinner=False)
 def cargar_gestion_comercial_cache() -> dict[str, pd.DataFrame]:
     """
-    Centraliza la lectura de la gestiÃ³n persistida en Google Sheets.
-
-    Esta capa es intencionalmente independiente de los crudos WMS/ERP.
+    Gestión comercial visible en el host: Solicitudes y Reclamos.
+    Urgencia es un TipoSolicitud y ya no utiliza commercial.urgencia
+    ni cola/worker DIGIP desde Consultas Comerciales.
     """
+    solicitudes = leer_solicitudes()
+    reclamos = leer_reclamos()
+
+    if solicitudes is None:
+        solicitudes = pd.DataFrame()
+    if reclamos is None:
+        reclamos = pd.DataFrame()
+
+    if solicitudes.empty or "EstadoSolicitud" not in solicitudes.columns:
+        solicitudes_abiertas = solicitudes.copy()
+    else:
+        estados = _estado(solicitudes["EstadoSolicitud"])
+        solicitudes_abiertas = solicitudes.loc[
+            estados.isin(_ESTADOS_ABIERTOS_SOLICITUD)
+        ].copy().reset_index(drop=True)
+
+    vacio = pd.DataFrame()
     return {
-        "urgencias_activas": obtener_urgencias_activas(),
-        "solicitudes_abiertas": obtener_solicitudes_abiertas(),
-        "solicitudes_totales": obtener_historial_solicitudes(),
-        "urgencias_totales": obtener_historial_urgencias(),
-        "reclamos_totales": obtener_historial_reclamos(),
+        "solicitudes_abiertas": solicitudes_abiertas,
+        "solicitudes_totales": solicitudes.copy().reset_index(drop=True),
+        "reclamos_totales": reclamos.copy().reset_index(drop=True),
+        # Claves legacy vacías para que ninguna pantalla secundaria rompa
+        # durante la transición. No representan una función disponible.
+        "urgencias_activas": vacio.copy(),
+        "urgencias_totales": vacio.copy(),
+        "urgencias_digip": vacio.copy(),
+        "pedidos_urgentes_digip": [],
     }
 
-
-@st.cache_data(
-    ttl=60,
-    max_entries=4,
-    show_spinner=False,
-)
+@st.cache_data(ttl=45, max_entries=4, show_spinner=False)
 def cargar_cancelaciones_cache() -> dict[str, pd.DataFrame]:
-    """Lee la gestiÃ³n de cancelaciones de entrega desde Google Sheets."""
+    tabla = leer_cancelaciones_entrega()
     return {
-        "totales": obtener_historial_cancelaciones(),
-        "activas": obtener_cancelaciones_activas(),
+        "totales": obtener_historial_cancelaciones(tabla),
+        "activas": obtener_cancelaciones_activas(tabla),
     }
-
-
-@st.cache_data(
-    ttl=30,
-    max_entries=4,
-    show_spinner=False,
-)
-def cargar_urgencias_digip_cache() -> dict[str, object]:
-    """
-    Obtiene las urgencias comerciales todavÃ­a pendientes de ejecuciÃ³n
-    por el worker DIGIP.
-    """
-    return {
-        "urgencias": obtener_urgencias_pendientes_digip(),
-        "pedidos": obtener_pedidos_pendientes_digip(),
-    }
-
 
 def invalidar_cache_gestion() -> None:
-    """
-    Invalida Ãºnicamente datos dinÃ¡micos de Google Sheets.
-
-    Registrar, editar o cerrar una gestiÃ³n no vuelve a leer los crudos
-    operativos de WMS/ERP/Maestros.
-    """
     cargar_gestion_comercial_cache.clear()
     cargar_cancelaciones_cache.clear()
-    cargar_urgencias_digip_cache.clear()
-
+    invalidar_cache_devoluciones()

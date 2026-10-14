@@ -20,10 +20,14 @@ from zoneinfo import ZoneInfo
 from googleapiclient.http import MediaIoBaseUpload
 
 from utils.google_sheets import (
+    crear_servicio_drive_escritura,
+)
+from utils.consultas.persistencia_google import (
     agregar_registro,
     actualizar_registro,
-    crear_servicio_drive_escritura,
+    insertar_registro,
     leer_hoja,
+    transaccion,
 )
 
 
@@ -732,8 +736,6 @@ def guardar_reclamo_entrega(
 
     - Reclamos
     - ReclamosDetalle
-    - ReclamosFotos
-    - Google Drive
     """
 
     pedido = _normalizar_pedido(
@@ -863,33 +865,21 @@ def guardar_reclamo_entrega(
         "FechaCierre": "",
     }
 
-    # Primero se guarda la cabecera.
-    agregar_registro(
-        nombre_hoja="Reclamos",
-        registro=cabecera,
-    )
-
-    # Luego se guarda una fila por cada artículo.
-    for registro_detalle in detalle:
-
-        agregar_registro(
-            nombre_hoja=(
-                "ReclamosDetalle"
-            ),
-            registro=(
-                registro_detalle
-            ),
+    # Cabecera + detalle se guardan en una sola transacción SQL.
+    # Si falla una fila del detalle, no queda un reclamo incompleto.
+    with transaccion() as conexion:
+        insertar_registro(
+            nombre_hoja="Reclamos",
+            registro=cabecera,
+            conexion=conexion,
         )
 
-    fotos_guardadas = (
-        _guardar_fotos_reclamo(
-            reclamo_id=reclamo_id,
-            fotos=fotos or [],
-            usuario_creador=(
-                usuario_limpio
-            ),
-        )
-    )
+        for registro_detalle in detalle:
+            insertar_registro(
+                nombre_hoja="ReclamosDetalle",
+                registro=registro_detalle,
+                conexion=conexion,
+            )
 
     # ======================================================
     # ENVÍO DE CORREO
@@ -914,28 +904,6 @@ def guardar_reclamo_entrega(
     error_mail = ""
 
     if destinatarios_mail:
-
-        links_fotos = ""
-
-        if fotos_guardadas:
-
-            items_fotos = "".join(
-                (
-                    "<li>"
-                    f"<a href=\"{foto.get('URLArchivo', '')}\">"
-                    f"{foto.get('NombreArchivo', 'Ver fotografía')}"
-                    "</a>"
-                    "</li>"
-                )
-                for foto in fotos_guardadas
-                if foto.get("URLArchivo")
-            )
-
-            if items_fotos:
-                links_fotos = (
-                    "<h3>Fotografías</h3>"
-                    f"<ul>{items_fotos}</ul>"
-                )
 
         asunto_mail = (
             f"Nuevo reclamo | Pedido {pedido} | "
@@ -968,7 +936,6 @@ def guardar_reclamo_entrega(
             <h3>Descripción</h3>
             <p>{observaciones_limpias}</p>
 
-            {links_fotos}
         </div>
         """
 
@@ -995,9 +962,8 @@ def guardar_reclamo_entrega(
         "cantidad_articulos": len(
             detalle
         ),
-        "cantidad_fotos": len(
-            fotos_guardadas
-        ),
+        "cantidad_fotos": 0,
+        "error_fotos": "",
         "mail_enviado": mail_enviado,
         "error_mail": error_mail,
         "destinatario_mail": destinatarios_mail,
