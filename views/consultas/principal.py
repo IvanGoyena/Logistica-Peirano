@@ -512,6 +512,9 @@ def render() -> None:
     if "consultas_pedidos_gestion_multiple" not in st.session_state:
         st.session_state["consultas_pedidos_gestion_multiple"] = []
 
+    if "consultas_abrir_gestion_multiple" not in st.session_state:
+        st.session_state["consultas_abrir_gestion_multiple"] = False
+
     if "mostrar_historico_reclamos" not in st.session_state:
         st.session_state["mostrar_historico_reclamos"] = False
 
@@ -1812,6 +1815,8 @@ def render() -> None:
             if errores:
                 st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
             if not errores:
+                st.session_state["consultas_pedidos_gestion_multiple"] = []
+                st.session_state["consultas_abrir_gestion_multiple"] = False
                 st.toast("Gestión múltiple registrada.", icon="✅")
 
 
@@ -2287,6 +2292,7 @@ def render() -> None:
                 )
                 st.session_state["consultas_detalle_abierto"] = True
                 st.session_state["consultas_pedidos_gestion_multiple"] = []
+                st.session_state["consultas_abrir_gestion_multiple"] = False
         else:
             clientes = seleccionados["Cliente"].fillna("").astype(str).str.strip().nunique()
             unidades = int(pd.to_numeric(seleccionados["Unidades"], errors="coerce").fillna(0).sum())
@@ -2311,6 +2317,7 @@ def render() -> None:
                     .loc[lambda s: s.ne("")]
                     .tolist()
                 )
+                st.session_state["consultas_abrir_gestion_multiple"] = True
                 st.session_state["consultas_detalle_abierto"] = False
                 st.session_state["consultas_pedido_detalle"] = ""
 
@@ -2357,7 +2364,13 @@ def render() -> None:
 
             abrir_detalle_pedido(pedido_abierto)
 
-        elif pedidos_lote:
+        elif (
+            st.session_state.get(
+                "consultas_abrir_gestion_multiple",
+                False,
+            )
+            and pedidos_lote
+        ):
             lote_actual = tabla_visible_pedidos.loc[
                 tabla_visible_pedidos["Pedido"]
                 .fillna("")
@@ -2365,21 +2378,11 @@ def render() -> None:
                 .isin(pedidos_lote)
             ].copy()
 
+            # El disparador se consume ANTES de abrir el diálogo.
+            # Así, al cerrarlo con la X no vuelve a abrirse solo.
+            st.session_state["consultas_abrir_gestion_multiple"] = False
+
             if not lote_actual.empty:
-                st.markdown("---")
-
-                _, col_cerrar = st.columns([6, 1])
-                with col_cerrar:
-                    cerrar_lote = st.button(
-                        "✖ Cerrar gestión",
-                        width="stretch",
-                        key="btn_cerrar_gestion_multiple_consultas",
-                    )
-
-                if cerrar_lote:
-                    st.session_state["consultas_pedidos_gestion_multiple"] = []
-                    st.rerun(scope="fragment")
-
                 abrir_gestion_multiple(lote_actual)
 
     render_tabla_comercial_fragment()
