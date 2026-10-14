@@ -509,6 +509,9 @@ def render() -> None:
     if "consultas_pedido_detalle" not in st.session_state:
         st.session_state["consultas_pedido_detalle"] = ""
 
+    if "consultas_pedidos_gestion_multiple" not in st.session_state:
+        st.session_state["consultas_pedidos_gestion_multiple"] = []
+
     if "mostrar_historico_reclamos" not in st.session_state:
         st.session_state["mostrar_historico_reclamos"] = False
 
@@ -1988,7 +1991,7 @@ def render() -> None:
                         icon="📩",
                     )
                     invalidar_cache_gestion()
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
                 except Exception:
                     st.error("No se pudo registrar la solicitud.")
@@ -2255,7 +2258,11 @@ def render() -> None:
                     key="btn_detalle_tabla_consultas",
                 )
             if abrir_detalle:
-                abrir_detalle_pedido(str(fila_sel["Pedido"]).strip())
+                st.session_state["consultas_pedido_detalle"] = (
+                    str(fila_sel["Pedido"]).strip()
+                )
+                st.session_state["consultas_detalle_abierto"] = True
+                st.session_state["consultas_pedidos_gestion_multiple"] = []
         else:
             clientes = seleccionados["Cliente"].fillna("").astype(str).str.strip().nunique()
             unidades = int(pd.to_numeric(seleccionados["Unidades"], errors="coerce").fillna(0).sum())
@@ -2272,6 +2279,83 @@ def render() -> None:
                     key="btn_gestion_multiple_consultas",
                 )
             if gestionar_lote:
-                abrir_gestion_multiple(seleccionados)
+                st.session_state["consultas_pedidos_gestion_multiple"] = (
+                    seleccionados["Pedido"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda s: s.ne("")]
+                    .tolist()
+                )
+                st.session_state["consultas_detalle_abierto"] = False
+                st.session_state["consultas_pedido_detalle"] = ""
+
+        # ======================================================
+        # GESTIÓN PERSISTENTE DENTRO DEL FRAGMENT
+        # ======================================================
+        # La selección de la tabla provoca un rerun del fragmento.
+        # Por eso el pedido/lote elegido se guarda en session_state.
+        # Los widgets de la gestión pueden rerunear sin cerrar el panel.
+
+        pedido_abierto = str(
+            st.session_state.get("consultas_pedido_detalle", "")
+            or ""
+        ).strip()
+
+        detalle_abierto = bool(
+            st.session_state.get("consultas_detalle_abierto", False)
+        )
+
+        pedidos_lote = [
+            str(p).strip()
+            for p in st.session_state.get(
+                "consultas_pedidos_gestion_multiple",
+                [],
+            )
+            if str(p).strip()
+        ]
+
+        if detalle_abierto and pedido_abierto:
+            st.markdown("---")
+
+            _, col_cerrar = st.columns([6, 1])
+            with col_cerrar:
+                cerrar_detalle = st.button(
+                    "✖ Cerrar gestión",
+                    width="stretch",
+                    key="btn_cerrar_gestion_pedido_consultas",
+                )
+
+            if cerrar_detalle:
+                st.session_state["consultas_detalle_abierto"] = False
+                st.session_state["consultas_pedido_detalle"] = ""
+                st.rerun(scope="fragment")
+
+            abrir_detalle_pedido(pedido_abierto)
+
+        elif pedidos_lote:
+            lote_actual = tabla_visible_pedidos.loc[
+                tabla_visible_pedidos["Pedido"]
+                .fillna("")
+                .astype(str)
+                .isin(pedidos_lote)
+            ].copy()
+
+            if not lote_actual.empty:
+                st.markdown("---")
+
+                _, col_cerrar = st.columns([6, 1])
+                with col_cerrar:
+                    cerrar_lote = st.button(
+                        "✖ Cerrar gestión",
+                        width="stretch",
+                        key="btn_cerrar_gestion_multiple_consultas",
+                    )
+
+                if cerrar_lote:
+                    st.session_state["consultas_pedidos_gestion_multiple"] = []
+                    st.rerun(scope="fragment")
+
+                abrir_gestion_multiple(lote_actual)
 
     render_tabla_comercial_fragment()
