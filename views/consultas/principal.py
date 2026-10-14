@@ -11,7 +11,6 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 from utils.consultas.gestion_consultas import (
-    guardar_urgencia,
     guardar_solicitud,
     editar_solicitud,
     eliminar_solicitud,
@@ -28,17 +27,6 @@ from utils.consultas.leer_devoluciones import (
     estado_para_comercial,
 )
 
-from utils.consultas.gestion_urgencias_digip import (
-    marcar_lote_procesando,
-    marcar_lote_exitoso,
-    marcar_lote_error,
-)
-
-from utils.consultas.cola_agrupaciones import (
-    crear_orden_agrupacion,
-    obtener_orden,
-)
-
 from views.consultas.reclamos import (
     mostrar_boton_carga_reclamo,
 )
@@ -50,7 +38,6 @@ from utils.consultas.carga import (
 from utils.consultas.cache_gestion import (
     cargar_gestion_comercial_cache,
     cargar_cancelaciones_cache,
-    cargar_urgencias_digip_cache,
     invalidar_cache_gestion,
 )
 from models.consultas_comerciales.base_operativa import (
@@ -58,6 +45,8 @@ from models.consultas_comerciales.base_operativa import (
     construir_tabla_consultas_cache,
     limpiar_cache_modelo_consultas,
 )
+
+
 
 
 
@@ -218,6 +207,7 @@ def render() -> None:
                 "Cambio de prioridad",
                 "Coordinación de entrega",
                 "Postergar Entrega",
+                "Urgencia",
                 "Documentación",
                 "Otro",
             ]
@@ -508,6 +498,9 @@ def render() -> None:
     if "consultas_filtros_aplicados" not in st.session_state:
         st.session_state["consultas_filtros_aplicados"] = {
             "busqueda": "",
+            "estado_pedido": [],
+            "estado_preparacion": [],
+            "estado_operativo": [],
         }
 
     if "consultas_detalle_abierto" not in st.session_state:
@@ -521,9 +514,6 @@ def render() -> None:
 
     if "mostrar_historico_solicitudes" not in st.session_state:
         st.session_state["mostrar_historico_solicitudes"] = False
-
-    if "mostrar_historico_urgencias" not in st.session_state:
-        st.session_state["mostrar_historico_urgencias"] = False
 
     if "mostrar_historico_cancelaciones_entrega" not in st.session_state:
         st.session_state["mostrar_historico_cancelaciones_entrega"] = False
@@ -542,7 +532,7 @@ def render() -> None:
         st.markdown("#### 📚 Histórico de solicitudes")
         st.caption(
             "Solicitudes pendientes, en curso, finalizadas y canceladas "
-            "conservadas en Google Sheets."
+            "conservadas en PostgreSQL."
         )
 
         if solicitudes is None or solicitudes.empty:
@@ -600,76 +590,6 @@ def render() -> None:
             vista, width="stretch", hide_index=True,
             height=min(420, 85 + len(vista) * 35),
             key="tabla_historico_solicitudes",
-        )
-
-
-    def mostrar_historial_urgencias(
-        urgencias: pd.DataFrame,
-    ) -> None:
-        st.markdown("#### 📚 Histórico de urgencias")
-        st.caption(
-            "Urgencias pendientes, procesadas, agrupadas y con error "
-            "conservadas en Google Sheets."
-        )
-
-        if urgencias is None or urgencias.empty:
-            st.info("Todavía no hay urgencias registradas.", icon="🚨")
-            return
-
-        tabla = urgencias.copy()
-        for columna in [
-            "UrgenciaID", "Pedido", "Cliente", "Motivo",
-            "FechaRequerida", "Observacion", "UsuarioSolicitante",
-            "FechaSolicitud", "EstadoUrgencia", "AgrupadorDestino",
-            "EstadoEjecucionDIGIP", "MensajeEjecucionDIGIP",
-            "FechaEjecucionDIGIP",
-        ]:
-            if columna not in tabla.columns:
-                tabla[columna] = ""
-
-        tabla["FechaOrden"] = pd.to_datetime(
-            tabla["FechaSolicitud"], errors="coerce"
-        )
-        tabla["Fecha"] = tabla["FechaOrden"].dt.strftime(
-            "%d/%m/%Y %H:%M"
-        ).fillna(tabla["FechaSolicitud"].astype(str))
-        tabla = tabla.sort_values(
-            "FechaOrden", ascending=False, na_position="last"
-        )
-
-        busqueda = st.text_input(
-            "Buscar en urgencias",
-            placeholder="Pedido, cliente, motivo o ID...",
-            key="buscar_historico_urgencias",
-        )
-        if busqueda.strip():
-            mascara = pd.Series(False, index=tabla.index)
-            for columna in [
-                "UrgenciaID", "Pedido", "Cliente",
-                "Motivo", "Observacion",
-            ]:
-                mascara |= tabla[columna].astype(str).str.contains(
-                    busqueda.strip(), case=False, na=False, regex=False
-                )
-            tabla = tabla.loc[mascara]
-
-        vista = tabla[[
-            "UrgenciaID", "Pedido", "Cliente", "Motivo",
-            "FechaRequerida", "EstadoUrgencia",
-            "EstadoEjecucionDIGIP", "Fecha",
-            "MensajeEjecucionDIGIP",
-        ]].rename(columns={
-            "UrgenciaID": "ID",
-            "FechaRequerida": "Fecha requerida",
-            "EstadoUrgencia": "Estado",
-            "EstadoEjecucionDIGIP": "Ejecución DIGIP",
-            "MensajeEjecucionDIGIP": "Resultado DIGIP",
-        })
-
-        st.dataframe(
-            vista, width="stretch", hide_index=True,
-            height=min(420, 85 + len(vista) * 35),
-            key="tabla_historico_urgencias",
         )
 
 
@@ -887,65 +807,10 @@ def render() -> None:
             datos["tareas"],
         )
 
+        # Comercial trabaja sólo con pedidos todavía sin Hoja de Ruta.
+        # El histórico conserva las gestiones cerradas por separado.
+
         gestion_cache = cargar_gestion_comercial_cache()
-
-        # ------------------------------------------------------
-        # URGENCIAS ACTIVAS
-        # ------------------------------------------------------
-
-        urgencias_activas = gestion_cache["urgencias_activas"]
-
-        if urgencias_activas is None:
-            urgencias_activas = pd.DataFrame()
-
-        if not urgencias_activas.empty:
-            urgencias_activas = urgencias_activas.copy()
-
-            urgencias_activas["Pedido"] = (
-                urgencias_activas["Pedido"]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.replace(r"\.0$", "", regex=True)
-                .str.split("-")
-                .str[0]
-            )
-
-            urgencias_activas["FechaSolicitudOrden"] = pd.to_datetime(
-                urgencias_activas["FechaSolicitud"],
-                errors="coerce",
-            )
-
-            urgencias_activas = (
-                urgencias_activas
-                .sort_values(
-                    "FechaSolicitudOrden",
-                    ascending=False,
-                    na_position="last",
-                )
-                .drop_duplicates(
-                    subset=["Pedido"],
-                    keep="first",
-                )
-                .reset_index(drop=True)
-            )
-
-            pedidos_urgentes = set(
-                urgencias_activas["Pedido"].tolist()
-            )
-
-        else:
-            pedidos_urgentes = set()
-
-        tabla_consultas["Urgencia"] = (
-            tabla_consultas["Pedido"]
-            .astype(str)
-            .isin(pedidos_urgentes)
-            .map({
-                True: "🚨 Urgente",
-                False: "",
-            })
-        )
 
         # ------------------------------------------------------
         # SOLICITUDES ABIERTAS
@@ -984,17 +849,32 @@ def render() -> None:
             pedidos_con_solicitud = set(
                 solicitudes_abiertas["Pedido"].tolist()
             )
+
+            tipos_por_pedido = (
+                solicitudes_abiertas
+                .drop_duplicates(subset=["Pedido"], keep="first")
+                .set_index("Pedido")["TipoSolicitud"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .to_dict()
+            )
         else:
             pedidos_con_solicitud = set()
+            tipos_por_pedido = {}
+
+        def _estado_solicitud_tabla(pedido: object) -> str:
+            pedido_txt = str(pedido).strip()
+            if pedido_txt not in pedidos_con_solicitud:
+                return ""
+            if tipos_por_pedido.get(pedido_txt, "") == "URGENCIA":
+                return "🚨 Urgente"
+            return "📩 Pendiente"
 
         tabla_consultas["Solicitud"] = (
             tabla_consultas["Pedido"]
-            .astype(str)
-            .isin(pedidos_con_solicitud)
-            .map({
-                True: "📩 Pendiente",
-                False: "",
-            })
+            .apply(_estado_solicitud_tabla)
         )
 
     except Exception as error:
@@ -1004,30 +884,79 @@ def render() -> None:
 
 
     # ==========================================================
+    # CONSULTA RÁPIDA - PRIMERA ACCIÓN DEL USUARIO
+    # ==========================================================
+
+    st.markdown("### ⚡ Consulta rápida")
+    consulta_rapida = st.text_input(
+        "Pedido o cliente",
+        placeholder="Escribí número de pedido, código o nombre del cliente...",
+        key="consulta_rapida_comercial",
+        label_visibility="collapsed",
+    ).strip()
+
+    if consulta_rapida:
+        mascara_rapida = pd.Series(False, index=tabla_consultas.index)
+        for columna in ("Pedido", "ClienteCodigo", "CodigoLogistico", "Cliente"):
+            if columna in tabla_consultas.columns:
+                mascara_rapida |= (
+                    tabla_consultas[columna]
+                    .fillna("")
+                    .astype(str)
+                    .str.contains(consulta_rapida, case=False, na=False, regex=False)
+                )
+
+        resultado_rapido = tabla_consultas.loc[mascara_rapida].copy()
+        columnas_rapidas = [
+            "Pedido", "ClienteCodigo", "Cliente", "Unidades", "M3", "EstadoVolumetria",
+            "Planificacion", "Despacho",
+            "EstadoPedido", "EstadoPreparacion", "EstadoOperativo",
+            "Contenedor", "Solicitud",
+        ]
+        columnas_rapidas = [
+            columna for columna in columnas_rapidas
+            if columna in resultado_rapido.columns
+        ]
+
+        if resultado_rapido.empty:
+            st.info("No hay pedidos operativos que coincidan con la búsqueda.")
+        else:
+            st.dataframe(
+                resultado_rapido[columnas_rapidas].head(25),
+                width="stretch",
+                hide_index=True,
+                height=min(360, 85 + min(len(resultado_rapido), 25) * 35),
+                key="tabla_consulta_rapida_comercial",
+            )
+            if len(resultado_rapido) > 25:
+                st.caption(
+                    f"Se muestran 25 de {len(resultado_rapido)} coincidencias. "
+                    "Usá los filtros de la tabla general para acotar el resultado."
+                )
+    else:
+        st.caption(
+            f"{len(tabla_consultas):,} pedidos en el universo operativo actual."
+            .replace(",", ".")
+        )
+
+
+    # ==========================================================
     # CARGA INDEPENDIENTE DE RECLAMOS
     # ==========================================================
 
     with espacio_boton_reclamo.container():
-        mostrar_boton_carga_reclamo(
-            df_clientes=datos["clientes"],
-            df_articulos=datos["articulos"],
-        )
+        mostrar_boton_carga_reclamo()
 
 
     # ==========================================================
     # KPIs GENERALES DE GESTIÓN
     # ==========================================================
 
-    gestion_cache = cargar_gestion_comercial_cache()
     solicitudes_totales = gestion_cache["solicitudes_totales"]
-    urgencias_totales = gestion_cache["urgencias_totales"]
     reclamos_totales = gestion_cache["reclamos_totales"]
 
     if solicitudes_totales is None:
         solicitudes_totales = pd.DataFrame()
-
-    if urgencias_totales is None:
-        urgencias_totales = pd.DataFrame()
 
     if reclamos_totales is None:
         reclamos_totales = pd.DataFrame()
@@ -1070,16 +999,12 @@ def render() -> None:
     cantidad_solicitudes = len(
         solicitudes_totales
     )
-    cantidad_urgencias = len(
-        urgencias_totales
-    )
     cantidad_reclamos = len(
         reclamos_totales
     )
 
     total_gestiones = (
         cantidad_solicitudes
-        + cantidad_urgencias
         + cantidad_reclamos
     )
 
@@ -1087,10 +1012,6 @@ def render() -> None:
         contar_cerradas(
             solicitudes_totales,
             "EstadoSolicitud",
-        )
-        + contar_cerradas(
-            urgencias_totales,
-            "EstadoUrgencia",
         )
         + contar_cerradas(
             reclamos_totales,
@@ -1111,8 +1032,7 @@ def render() -> None:
         kpi_gestion_3,
         kpi_gestion_4,
         kpi_gestion_5,
-        kpi_gestion_6,
-    ) = st.columns(6)
+    ) = st.columns(5)
 
     kpi_gestion_1.metric(
         "📋 Total gestiones",
@@ -1135,14 +1055,159 @@ def render() -> None:
     )
 
     kpi_gestion_5.metric(
-        "🚨 Urgencias",
-        f"{cantidad_urgencias:,}".replace(",", "."),
-    )
-
-    kpi_gestion_6.metric(
         "🧾 Reclamos",
         f"{cantidad_reclamos:,}".replace(",", "."),
     )
+
+
+    # ==========================================================
+    # SOLICITUDES PENDIENTES - VISTA PRINCIPAL DE GESTIÓN
+    # ==========================================================
+
+    st.markdown("---")
+    sol_titulo, sol_historial = st.columns(
+        [5, 1.25], vertical_alignment="center"
+    )
+
+    with sol_titulo:
+        st.markdown("### 📩 Solicitudes pendientes")
+
+    with sol_historial:
+        if st.button(
+            "Ocultar histórico"
+            if st.session_state["mostrar_historico_solicitudes"]
+            else "📚 Histórico",
+            width="stretch",
+            key="btn_historico_solicitudes",
+        ):
+            st.session_state["mostrar_historico_solicitudes"] = (
+                not st.session_state["mostrar_historico_solicitudes"]
+            )
+            st.rerun()
+
+    if st.session_state["mostrar_historico_solicitudes"]:
+        mostrar_historial_solicitudes(solicitudes_totales)
+        st.divider()
+
+    if solicitudes_abiertas.empty:
+        st.info("No hay solicitudes pendientes de gestión.")
+    else:
+        solicitudes_resumen = solicitudes_abiertas.copy()
+
+        solicitudes_resumen["FechaSolicitudVisible"] = (
+            pd.to_datetime(
+                solicitudes_resumen["FechaSolicitud"],
+                errors="coerce",
+            )
+            .dt.strftime("%d/%m/%Y %H:%M")
+            .fillna(
+                solicitudes_resumen["FechaSolicitud"]
+                .fillna("")
+                .astype(str)
+            )
+        )
+
+        columnas_solicitudes = [
+            "SolicitudID",
+            "Pedido",
+            "Cliente",
+            "TipoSolicitud",
+            "Prioridad",
+            "Descripcion",
+            "UsuarioSolicitante",
+            "FechaSolicitudVisible",
+            "EstadoSolicitud",
+            "Responsable",
+            "Respuesta",
+        ]
+
+        for columna in columnas_solicitudes:
+            if columna not in solicitudes_resumen.columns:
+                solicitudes_resumen[columna] = ""
+
+        tabla_solicitudes_superior = (
+            solicitudes_resumen[columnas_solicitudes]
+            .rename(
+                columns={
+                    "SolicitudID": "ID",
+                    "TipoSolicitud": "Tipo",
+                    "Descripcion": "Detalle",
+                    "UsuarioSolicitante": "Solicitado por",
+                    "FechaSolicitudVisible": "Fecha",
+                    "EstadoSolicitud": "Estado",
+                    "Respuesta": "Respuesta Logística",
+                }
+            )
+            .reset_index(drop=True)
+        )
+
+        st.caption(
+            f"{len(tabla_solicitudes_superior):,} solicitudes abiertas"
+            .replace(",", ".")
+        )
+
+        evento_solicitudes_superior = st.dataframe(
+            tabla_solicitudes_superior,
+            width="stretch",
+            hide_index=True,
+            height=min(420, 85 + len(tabla_solicitudes_superior) * 35),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tabla_solicitudes_pendientes_consultas",
+            column_config={
+                "ID": None,
+                "Pedido": st.column_config.TextColumn("Pedido", width="small"),
+                "Cliente": st.column_config.TextColumn("Cliente", width="medium"),
+                "Tipo": st.column_config.TextColumn("Tipo", width="medium"),
+                "Prioridad": st.column_config.TextColumn("Prioridad", width="small"),
+                "Detalle": st.column_config.TextColumn("Detalle", width="large"),
+                "Solicitado por": st.column_config.TextColumn("Solicitado por", width="small"),
+                "Fecha": st.column_config.TextColumn("Fecha", width="small"),
+                "Estado": st.column_config.TextColumn("Estado", width="small"),
+                "Responsable": st.column_config.TextColumn("Responsable", width="small"),
+                "Respuesta Logística": st.column_config.TextColumn(
+                    "Respuesta Logística", width="large"
+                ),
+            },
+        )
+
+        filas_solicitudes_superior = (
+            evento_solicitudes_superior.selection.rows
+            if evento_solicitudes_superior is not None
+            else []
+        )
+
+        accion_solicitud_1, accion_solicitud_2 = st.columns(
+            [4, 1], vertical_alignment="center"
+        )
+
+        with accion_solicitud_1:
+            if filas_solicitudes_superior:
+                seleccion_superior = tabla_solicitudes_superior.iloc[
+                    filas_solicitudes_superior[0]
+                ]
+                st.caption(
+                    f"Seleccionada: pedido **{seleccion_superior['Pedido']}** · "
+                    f"{seleccion_superior['Tipo']} · {seleccion_superior['Estado']}"
+                )
+            else:
+                st.caption(
+                    "Seleccioná una solicitud para ver, editar o cancelar su gestión."
+                )
+
+        with accion_solicitud_2:
+            gestionar_solicitud_superior = st.button(
+                "📩 Gestionar",
+                type="primary",
+                width="stretch",
+                disabled=not bool(filas_solicitudes_superior),
+                key="btn_gestionar_solicitud_consultas",
+            )
+
+        if gestionar_solicitud_superior and filas_solicitudes_superior:
+            indice_superior = filas_solicitudes_superior[0]
+            solicitud_superior = solicitudes_resumen.iloc[indice_superior]
+            abrir_detalle_solicitud(solicitud_superior)
 
 
     if st.session_state["mostrar_historico_reclamos"]:
@@ -1153,8 +1218,7 @@ def render() -> None:
         st.markdown("### 📚 Histórico de reclamos")
         st.caption(
             "Incluye todos los reclamos abiertos, resueltos y rechazados "
-            "guardados en Google Sheets. La actualización del estado se realiza "
-            "desde Gestión de Pedidos."
+            "registrados en PostgreSQL."
         )
 
         if reclamos_totales.empty:
@@ -1439,57 +1503,7 @@ def render() -> None:
     st.markdown("---")
 
 
-    # ==========================================================
-    # APLICAR BÚSQUEDA GENERAL
-    # ==========================================================
-
-    filtros = st.session_state[
-        "consultas_filtros_aplicados"
-    ]
-
-    tabla_filtrada = tabla_consultas.copy()
-
-    texto_busqueda = str(
-        filtros.get("busqueda", "")
-    ).strip()
-
-    if texto_busqueda:
-
-        mascara = (
-            tabla_filtrada["Pedido"]
-            .astype(str)
-            .str.contains(
-                texto_busqueda,
-                case=False,
-                na=False,
-                regex=False,
-            )
-            |
-            tabla_filtrada["ClienteCodigo"]
-            .astype(str)
-            .str.contains(
-                texto_busqueda,
-                case=False,
-                na=False,
-                regex=False,
-            )
-            |
-            tabla_filtrada["Cliente"]
-            .astype(str)
-            .str.contains(
-                texto_busqueda,
-                case=False,
-                na=False,
-                regex=False,
-            )
-        )
-
-        tabla_filtrada = tabla_filtrada.loc[
-            mascara
-        ].copy()
-
-
-    # ==========================================================
+    # La búsqueda/filtros se aplican junto a la tabla comercial compacta.
 
     # CANCELACIONES DE ENTREGA - CARGA Y SEGUIMIENTO COMERCIAL
     # ==========================================================
@@ -1622,644 +1636,11 @@ def render() -> None:
         st.dataframe(vista[columnas].rename(columns={"EstadoComercial":"Estado","ResponsableGestion":"Responsable Logística","UltimaActualizacion":"Última actualización","ResultadoFinal":"Resultado"}),width="stretch",hide_index=True)
 
 
-    # GESTIÓN DE URGENCIAS DIGIP
     # ==========================================================
-
-    urgencias_digip_cache = cargar_urgencias_digip_cache()
-    urgencias_digip = urgencias_digip_cache["urgencias"]
-    pedidos_urgentes_digip = urgencias_digip_cache["pedidos"]
-
-    roles_ejecucion_urgencias = {
-        "admin",
-        "logistica",
-        "supervisor",
-    }
-
-    rol_actual = (
-        str(st.session_state.get("rol", ""))
-        .strip()
-        .lower()
-    )
-
-    puede_ejecutar_urgencias = (
-        rol_actual in roles_ejecucion_urgencias
-    )
-
-
-    def construir_orden_urgentes(
-        pedidos_urgentes: list[str],
-        tabla_pedidos: pd.DataFrame,
-    ) -> tuple[dict | None, list[str]]:
-        """
-        Prepara una única orden para el worker.
-
-        Si existen varios códigos de despacho, el worker abre una sola
-        preparación URGENTES, limpia el filtro de código y selecciona
-        todos los pedidos por número. Así se evita crear varias
-        preparaciones internas para el mismo destino.
-        """
-
-        if not pedidos_urgentes:
-            return None, []
-
-        columnas_requeridas = {
-            "Pedido",
-            "CodigoDespacho",
-        }
-
-        if not columnas_requeridas.issubset(
-            tabla_pedidos.columns
-        ):
-            faltantes = sorted(
-                columnas_requeridas
-                - set(tabla_pedidos.columns)
-            )
-
-            raise ValueError(
-                "No se puede preparar la urgencia. "
-                f"Faltan columnas: {faltantes}"
-            )
-
-        tabla_base = tabla_pedidos[
-            [
-                "Pedido",
-                "CodigoDespacho",
-            ]
-        ].copy()
-
-        tabla_base["Pedido"] = (
-            tabla_base["Pedido"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\.0$", "", regex=True)
-            .str.split("-")
-            .str[0]
-        )
-
-        tabla_base["CodigoDespacho"] = (
-            tabla_base["CodigoDespacho"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\.0$", "", regex=True)
-        )
-
-        pedidos_normalizados = list(
-            dict.fromkeys(
-                str(pedido).strip()
-                for pedido in pedidos_urgentes
-                if str(pedido).strip()
-            )
-        )
-
-        tabla_base = (
-            tabla_base[
-                tabla_base["Pedido"].isin(
-                    pedidos_normalizados
-                )
-            ]
-            .drop_duplicates(
-                subset=["Pedido"],
-                keep="first",
-            )
-            .copy()
-        )
-
-        pedidos_encontrados = set(
-            tabla_base["Pedido"].tolist()
-        )
-
-        pedidos_sin_codigo = set(
-            tabla_base.loc[
-                tabla_base["CodigoDespacho"].eq(""),
-                "Pedido",
-            ].tolist()
-        )
-
-        pedidos_no_encontrados = {
-            pedido
-            for pedido in pedidos_normalizados
-            if pedido not in pedidos_encontrados
-        }
-
-        pedidos_con_error = sorted(
-            pedidos_sin_codigo
-            | pedidos_no_encontrados
-        )
-
-        tabla_valida = tabla_base[
-            tabla_base["CodigoDespacho"].ne("")
-        ].copy()
-
-        pedidos_validos = (
-            tabla_valida["Pedido"]
-            .astype(str)
-            .drop_duplicates()
-            .tolist()
-        )
-
-        codigos_despacho = (
-            tabla_valida["CodigoDespacho"]
-            .astype(str)
-            .drop_duplicates()
-            .tolist()
-        )
-
-        if not pedidos_validos or not codigos_despacho:
-            return None, pedidos_con_error
-
-        orden = {
-            "codigo_despacho": codigos_despacho[0],
-            "codigos_despacho": codigos_despacho,
-            "usar_filtro_codigo_despacho": (
-                len(codigos_despacho) == 1
-            ),
-            "despacho": "URGENTES",
-            "pedidos": pedidos_validos,
-            "identificador": "URGENTES",
-        }
-
-        return orden, pedidos_con_error
-
-
-    orden_urgentes = None
-    pedidos_urgentes_sin_codigo = []
-
-    if pedidos_urgentes_digip:
-        try:
-            (
-                orden_urgentes,
-                pedidos_urgentes_sin_codigo,
-            ) = construir_orden_urgentes(
-                pedidos_urgentes=pedidos_urgentes_digip,
-                tabla_pedidos=tabla_operativa,
-            )
-
-        except Exception as error:
-            st.error(
-                "No se pudo preparar la agrupación "
-                "de pedidos urgentes."
-            )
-            logger.exception("Error controlado en el módulo de Consultas Comerciales.")
-
-
-    st.markdown("---")
-    urg_titulo, urg_historial = st.columns(
-        [5, 1.25], vertical_alignment="center"
-    )
-    with urg_titulo:
-        st.markdown("### 🚨 Gestión de urgencias")
-    with urg_historial:
-        if st.button(
-            "Ocultar histórico"
-            if st.session_state["mostrar_historico_urgencias"]
-            else "📚 Histórico",
-            width="stretch",
-            key="btn_historico_urgencias",
-        ):
-            st.session_state["mostrar_historico_urgencias"] = (
-                not st.session_state["mostrar_historico_urgencias"]
-            )
-            st.rerun()
-
-    if st.session_state["mostrar_historico_urgencias"]:
-        mostrar_historial_urgencias(urgencias_totales)
-        st.divider()
-
-    urg_col_1, urg_col_2, urg_col_3 = st.columns(
-        [1.2, 4.2, 1.6],
-        vertical_alignment="center",
-    )
-
-    with urg_col_1:
-        st.metric(
-            "Pendientes",
-            len(pedidos_urgentes_digip),
-        )
-
-    with urg_col_2:
-        if pedidos_urgentes_digip:
-            st.caption(
-                "**Pedidos pendientes:** "
-                + " | ".join(
-                    pedidos_urgentes_digip
-                )
-            )
-
-            if orden_urgentes:
-                cantidad_codigos = len(
-                    orden_urgentes["codigos_despacho"]
-                )
-
-                if cantidad_codigos == 1:
-                    st.caption(
-                        "Se enviará una orden al worker con destino "
-                        "**URGENTES**, filtrando por un código de despacho."
-                    )
-                else:
-                    st.caption(
-                        f"Se enviará una única orden al worker con "
-                        f"{cantidad_codigos} códigos de despacho. "
-                        "DIGIP buscará los pedidos por número sin "
-                        "filtrar la grilla."
-                    )
-
-        else:
-            st.caption(
-                "No hay pedidos urgentes pendientes de agrupar."
-            )
-
-    with urg_col_3:
-        enviar_urgentes_worker = st.button(
-            "🚀 Enviar al worker",
-            type="primary",
-            width="stretch",
-            disabled=(
-                orden_urgentes is None
-                or not puede_ejecutar_urgencias
-            ),
-            key="btn_enviar_urgentes_worker",
-        )
-
-
-    if pedidos_urgentes_sin_codigo:
-        st.warning(
-            "Los siguientes pedidos no tienen un Código de "
-            "Despacho válido y no podrán ejecutarse: "
-            + " | ".join(
-                pedidos_urgentes_sin_codigo
-            )
-        )
-
-
-    if not puede_ejecutar_urgencias:
-        st.caption(
-            "La ejecución está habilitada únicamente para "
-            "Administración, Logística y Supervisión."
-        )
-
-
-    if enviar_urgentes_worker and orden_urgentes:
-
-        pedidos_a_procesar = orden_urgentes["pedidos"]
-
-        usuario_solicitud = (
-            st.session_state.get("usuario")
-            or st.session_state.get("nombre_usuario")
-            or "Usuario app"
-        )
-
-        try:
-            # Primero se crea la orden. Solo después se cambia el
-            # estado de las urgencias a Procesando. Así, si Google
-            # Sheets falla, las urgencias no quedan bloqueadas.
-            orden_id = crear_orden_agrupacion(
-                camioneta="URGENTES",
-                codigo_despacho=(
-                    orden_urgentes["codigo_despacho"]
-                ),
-                codigos_despacho=(
-                    orden_urgentes["codigos_despacho"]
-                ),
-                usar_filtro_codigo_despacho=(
-                    orden_urgentes[
-                        "usar_filtro_codigo_despacho"
-                    ]
-                ),
-                pedidos=pedidos_a_procesar,
-                usuario=usuario_solicitud,
-            )
-
-            marcar_lote_procesando(
-                pedidos_a_procesar
-            )
-            invalidar_cache_gestion()
-
-            st.session_state[
-                "orden_worker_urgentes"
-            ] = orden_id
-
-            st.session_state[
-                "pedidos_orden_worker_urgentes"
-            ] = pedidos_a_procesar
-
-            st.session_state.pop(
-                "resultado_worker_urgentes_aplicado",
-                None,
-            )
-
-            st.success(
-                f"Orden {orden_id} enviada al worker de la PC."
-            )
-
-        except Exception as error:
-            st.error(
-                "No se pudo enviar la agrupación de urgencias "
-                "al worker."
-            )
-
-            logger.exception("Error controlado en el módulo de Consultas Comerciales.")
-
-
-    orden_worker_urgentes = st.session_state.get(
-        "orden_worker_urgentes",
-        "",
-    )
-
-    if orden_worker_urgentes:
-        orden_actual = obtener_orden(
-            orden_worker_urgentes
-        )
-
-        if orden_actual:
-            estado_orden = str(
-                orden_actual.get("Estado", "")
-            ).strip().upper()
-
-            etapa_orden = str(
-                orden_actual.get("Etapa", "")
-            ).strip()
-
-            mensaje_orden = str(
-                orden_actual.get("Mensaje", "")
-            ).strip()
-
-            pedidos_orden = st.session_state.get(
-                "pedidos_orden_worker_urgentes",
-                [],
-            )
-
-            if estado_orden == "COMPLETADA":
-                clave_aplicada = (
-                    "resultado_worker_urgentes_aplicado"
-                )
-
-                if (
-                    st.session_state.get(clave_aplicada)
-                    != orden_worker_urgentes
-                ):
-                    marcar_lote_exitoso(
-                        pedidos_orden,
-                        mensaje=(
-                            "Pedidos agrupados correctamente "
-                            "en el despacho URGENTES."
-                        ),
-                    )
-                    invalidar_cache_gestion()
-
-                    st.session_state[
-                        clave_aplicada
-                    ] = orden_worker_urgentes
-
-                st.success(
-                    f"✅ {len(pedidos_orden)} pedidos fueron "
-                    "agrupados correctamente en URGENTES."
-                )
-
-            elif estado_orden == "ERROR":
-                clave_aplicada = (
-                    "resultado_worker_urgentes_aplicado"
-                )
-
-                if (
-                    st.session_state.get(clave_aplicada)
-                    != orden_worker_urgentes
-                ):
-                    marcar_lote_error(
-                        pedidos_orden,
-                        mensaje=mensaje_orden,
-                    )
-                    invalidar_cache_gestion()
-
-                    st.session_state[
-                        clave_aplicada
-                    ] = orden_worker_urgentes
-
-                st.error(
-                    "La agrupación URGENTES terminó con error: "
-                    f"{mensaje_orden}"
-                )
-
-            elif estado_orden == "EN_PROCESO":
-                st.info(
-                    f"⚙️ Worker ejecutando URGENTES — "
-                    f"{etapa_orden}: {mensaje_orden}"
-                )
-
-            else:
-                st.warning(
-                    "🕒 La orden URGENTES está pendiente de ser "
-                    "tomada por el worker."
-                )
-
-            if estado_orden not in {
-                "COMPLETADA",
-                "ERROR",
-                "CANCELADA",
-            }:
-                st.button(
-                    "🔄 Consultar estado del worker",
-                    key="btn_consultar_worker_urgentes",
-                    help=(
-                        "Actualiza únicamente cuando necesitás "
-                        "consultar el avance."
-                    ),
-                )
-
-    st.markdown("---")
-    sol_titulo, sol_historial = st.columns(
-        [5, 1.25], vertical_alignment="center"
-    )
-    with sol_titulo:
-        st.markdown("### 📩 Solicitudes pendientes")
-    with sol_historial:
-        if st.button(
-            "Ocultar histórico"
-            if st.session_state["mostrar_historico_solicitudes"]
-            else "📚 Histórico",
-            width="stretch",
-            key="btn_historico_solicitudes",
-        ):
-            st.session_state["mostrar_historico_solicitudes"] = (
-                not st.session_state["mostrar_historico_solicitudes"]
-            )
-            st.rerun()
-
-    if st.session_state["mostrar_historico_solicitudes"]:
-        mostrar_historial_solicitudes(solicitudes_totales)
-        st.divider()
-
-    if solicitudes_abiertas.empty:
-        st.info("No hay solicitudes pendientes de gestión.")
-    else:
-        solicitudes_resumen = solicitudes_abiertas.copy()
-
-        solicitudes_resumen["FechaSolicitudVisible"] = (
-            pd.to_datetime(
-                solicitudes_resumen["FechaSolicitud"],
-                errors="coerce",
-            )
-            .dt.strftime("%d/%m/%Y %H:%M")
-            .fillna(
-                solicitudes_resumen["FechaSolicitud"]
-                .fillna("")
-                .astype(str)
-            )
-        )
-
-        tabla_solicitudes_superior = (
-            solicitudes_resumen[
-                [
-                    "SolicitudID",
-                    "Pedido",
-                    "Cliente",
-                    "TipoSolicitud",
-                    "Prioridad",
-                    "Descripcion",
-                    "UsuarioSolicitante",
-                    "FechaSolicitudVisible",
-                    "EstadoSolicitud",
-                    "Responsable",
-                    "Respuesta",
-                ]
-            ]
-            .rename(
-                columns={
-                    "SolicitudID": "ID",
-                    "TipoSolicitud": "Tipo",
-                    "Descripcion": "Detalle",
-                    "UsuarioSolicitante": "Solicitado por",
-                    "FechaSolicitudVisible": "Fecha",
-                    "EstadoSolicitud": "Estado",
-                    "Respuesta": "Respuesta Logística",
-                }
-            )
-            .reset_index(drop=True)
-        )
-
-        st.caption(
-            f"{len(tabla_solicitudes_superior):,} solicitudes abiertas"
-            .replace(",", ".")
-        )
-
-        evento_solicitudes_superior = st.dataframe(
-            tabla_solicitudes_superior,
-            width="stretch",
-            hide_index=True,
-            height=min(
-                420,
-                85 + len(tabla_solicitudes_superior) * 35,
-            ),
-            on_select="rerun",
-            selection_mode="single-row",
-            key="tabla_solicitudes_pendientes_consultas",
-            column_config={
-                "ID": None,
-                "Pedido": st.column_config.TextColumn(
-                    "Pedido",
-                    width="small",
-                ),
-                "Cliente": st.column_config.TextColumn(
-                    "Cliente",
-                    width="medium",
-                ),
-                "Tipo": st.column_config.TextColumn(
-                    "Tipo",
-                    width="medium",
-                ),
-                "Prioridad": st.column_config.TextColumn(
-                    "Prioridad",
-                    width="small",
-                ),
-                "Detalle": st.column_config.TextColumn(
-                    "Detalle",
-                    width="large",
-                ),
-                "Solicitado por": st.column_config.TextColumn(
-                    "Solicitado por",
-                    width="small",
-                ),
-                "Fecha": st.column_config.TextColumn(
-                    "Fecha",
-                    width="small",
-                ),
-                "Estado": st.column_config.TextColumn(
-                    "Estado",
-                    width="small",
-                ),
-                "Responsable": st.column_config.TextColumn(
-                    "Responsable",
-                    width="small",
-                ),
-                "Respuesta Logística": st.column_config.TextColumn(
-                    "Respuesta Logística",
-                    width="large",
-                ),
-            },
-        )
-
-        filas_solicitudes_superior = (
-            evento_solicitudes_superior.selection.rows
-            if evento_solicitudes_superior is not None
-            else []
-        )
-
-        accion_solicitud_1, accion_solicitud_2 = st.columns(
-            [4, 1],
-            vertical_alignment="center",
-        )
-
-        with accion_solicitud_1:
-            if filas_solicitudes_superior:
-                seleccion_superior = (
-                    tabla_solicitudes_superior.iloc[
-                        filas_solicitudes_superior[0]
-                    ]
-                )
-
-                st.caption(
-                    f"Seleccionada: pedido "
-                    f"**{seleccion_superior['Pedido']}** · "
-                    f"{seleccion_superior['Tipo']} · "
-                    f"{seleccion_superior['Estado']}"
-                )
-            else:
-                st.caption(
-                    "Seleccioná una solicitud para ver, editar "
-                    "o eliminar su gestión."
-                )
-
-        with accion_solicitud_2:
-            gestionar_solicitud_superior = st.button(
-                "📩 Gestionar",
-                type="primary",
-                width="stretch",
-                disabled=not bool(
-                    filas_solicitudes_superior
-                ),
-                key="btn_gestionar_solicitud_consultas",
-            )
-
-        if (
-            gestionar_solicitud_superior
-            and filas_solicitudes_superior
-        ):
-            indice_superior = filas_solicitudes_superior[0]
-
-            solicitud_superior = (
-                solicitudes_resumen.iloc[
-                    indice_superior
-                ]
-            )
-
-            abrir_detalle_solicitud(
-                solicitud_superior
-            )
-
-
-    st.markdown("---")
-
+    # URGENCIAS
+    # ==========================================================
+    # Desde V9 las urgencias son un TIPO DE SOLICITUD comercial.
+    # Comercial no tiene acceso a cola/worker DIGIP desde este módulo.
 
     # ==========================================================
     # CENTRO DE GESTIÓN DEL PEDIDO
@@ -2270,21 +1651,32 @@ def render() -> None:
         tabla_lote = seleccionados.copy().reset_index(drop=True)
         cantidad = len(tabla_lote)
         clientes_lote = sorted(
-            tabla_lote["Cliente"].fillna("").astype(str).str.strip().loc[lambda x: x.ne("")].unique().tolist()
+            tabla_lote["Cliente"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .loc[lambda x: x.ne("")]
+            .unique()
+            .tolist()
         )
         pedidos_lote = tabla_lote["Pedido"].astype(str).tolist()
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Pedidos", cantidad)
         c2.metric("Clientes", len(clientes_lote))
-        c3.metric("Unidades", int(pd.to_numeric(tabla_lote.get("Unidades", 0), errors="coerce").fillna(0).sum()))
+        c3.metric(
+            "Unidades",
+            int(
+                pd.to_numeric(
+                    tabla_lote.get("Unidades", 0),
+                    errors="coerce",
+                ).fillna(0).sum()
+            ),
+        )
         st.caption("Pedidos: " + " · ".join(pedidos_lote))
-
-        tipo_lote = st.radio(
-            "Gestión a generar",
-            ["Urgencia", "Solicitud"],
-            horizontal=True,
-            key="gestion_multiple_tipo",
+        st.info(
+            "La gestión múltiple genera Solicitudes. "
+            "Urgencia es un tipo de solicitud y no dispara ningún worker."
         )
 
         usuario = (
@@ -2293,169 +1685,109 @@ def render() -> None:
             or ""
         )
 
-        if tipo_lote == "Urgencia":
-            with st.form("form_urgencia_multiple", clear_on_submit=False):
-                motivo = st.selectbox(
-                    "Motivo de la urgencia",
-                    [
-                        "Compromiso con cliente", "Reclamo del cliente",
-                        "Entrega coordinada", "Retiro coordinado",
-                        "Obra o instalación", "Pedido atrasado",
-                        "Error interno", "Otro",
-                    ],
-                )
-                prioridad = st.selectbox("Prioridad", ["Alta", "Crítica"])
-                fecha = st.date_input("Fecha requerida", value=None)
-                observacion = st.text_area(
-                    "Observación",
-                    placeholder="Detalle común para todos los pedidos seleccionados...",
-                    height=100,
-                )
-                confirmar = st.form_submit_button(
-                    f"🚨 Generar gestión para {cantidad} pedidos",
-                    type="primary",
-                    width="stretch",
-                )
+        tipo_solicitud = st.selectbox(
+            "Tipo de solicitud",
+            [
+                "Urgencia",
+                "Consulta de estado",
+                "Cambio de prioridad",
+                "Coordinación de entrega",
+                "Postergar Entrega",
+                "Documentación",
+                "Otro",
+            ],
+            key="tipo_solicitud_multiple",
+        )
 
-            if confirmar:
-                if fecha is None or not observacion.strip() or not usuario:
-                    st.error(
-                        "No se puede registrar la gestión: todos los campos son obligatorios."
-                    )
-                    return
-
-                creadas, duplicadas, convertidas, errores = [], [], [], []
-                for _, fila_lote in tabla_lote.iterrows():
-                    pedido = str(fila_lote.get("Pedido", "")).strip()
-                    cliente = str(fila_lote.get("Cliente", "")).strip()
-                    if not pedido or not cliente:
-                        errores.append(f"{pedido or 'Sin pedido'}: faltan datos del pedido/cliente")
-                        continue
-                    try:
-                        volumen = float(fila_lote.get("M3", 0) or 0)
-                        if volumen > 2.0:
-                            descripcion = (
-                                "Solicitud convertida automáticamente desde URGENCIA por superar "
-                                "el límite operativo de 2.00 m³.\n"
-                                f"Volumen del pedido: {volumen:.3f} m³.\n"
-                                f"Motivo informado: {motivo}.\n"
-                                f"Prioridad: {prioridad}.\n"
-                                f"Fecha requerida: {fecha:%Y-%m-%d}.\n"
-                                f"Observación: {observacion.strip()}"
-                            )
-                            r = guardar_solicitud(
-                                pedido=pedido, cliente=cliente,
-                                tipo_solicitud="Cambio de prioridad",
-                                descripcion=descripcion, usuario_solicitante=usuario,
-                                prioridad="Alta",
-                            )
-                            (duplicadas if r.get("duplicado") else convertidas).append(pedido)
-                        else:
-                            r = guardar_urgencia(
-                                pedido=pedido, cliente=cliente, motivo=motivo,
-                                usuario_solicitante=usuario, prioridad=prioridad,
-                                fecha_requerida=fecha.strftime("%Y-%m-%d"),
-                                observacion=observacion.strip(),
-                            )
-                            (duplicadas if r.get("duplicado") else creadas).append(pedido)
-                    except Exception as error:
-                        errores.append(f"{pedido}: {error}")
-
-                invalidar_cache_gestion()
-                if creadas:
-                    st.success(f"Urgencias creadas: {len(creadas)} · " + ", ".join(creadas))
-                if convertidas:
-                    st.info(
-                        f"Convertidas a solicitud por superar 2 m³: {len(convertidas)} · "
-                        + ", ".join(convertidas)
-                    )
-                if duplicadas:
-                    st.warning(f"Ya tenían una gestión equivalente: {len(duplicadas)} · " + ", ".join(duplicadas))
-                if errores:
-                    st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
-                if not errores:
-                    st.toast("Gestión múltiple registrada.", icon="✅")
-
-        else:
-            tipo_solicitud = st.selectbox(
-                "Tipo de solicitud",
-                [
-                    "Consulta de estado", "Cambio de prioridad",
-                    "Coordinación de entrega", "Postergar Entrega",
-                    "Documentación", "Otro",
-                ],
-                key="tipo_solicitud_multiple",
+        with st.form("form_solicitud_multiple", clear_on_submit=False):
+            opciones_prioridad = (
+                ["Alta", "Crítica"]
+                if tipo_solicitud == "Urgencia"
+                else ["Normal", "Alta", "Baja"]
             )
-            with st.form("form_solicitud_multiple", clear_on_submit=False):
-                prioridad = st.selectbox("Prioridad", ["Normal", "Alta", "Baja"])
-                fecha_habilitacion = None
-                if tipo_solicitud == "Postergar Entrega":
-                    fecha_habilitacion = st.date_input(
-                        "Habilitar pedidos desde",
-                        value=None,
-                        help=(
-                            "Los pedidos quedan bloqueados hasta el día anterior y "
-                            "se liberan automáticamente desde esta fecha."
+            prioridad = st.selectbox("Prioridad", opciones_prioridad)
+
+            fecha_habilitacion = None
+            if tipo_solicitud == "Postergar Entrega":
+                fecha_habilitacion = st.date_input(
+                    "Habilitar pedidos desde",
+                    value=None,
+                    help=(
+                        "Los pedidos quedan bloqueados hasta el día anterior y "
+                        "se liberan automáticamente desde esta fecha."
+                    ),
+                )
+
+            descripcion = st.text_area(
+                "Descripción",
+                placeholder=(
+                    "Detalle común para todos los pedidos seleccionados..."
+                    if tipo_solicitud != "Urgencia"
+                    else "Indicá motivo, compromiso/fecha requerida y contexto de la urgencia..."
+                ),
+                height=110,
+            )
+            confirmar = st.form_submit_button(
+                f"📩 Generar solicitud para {cantidad} pedidos",
+                type="primary",
+                width="stretch",
+            )
+
+        if confirmar:
+            if not descripcion.strip() or not usuario:
+                st.error(
+                    "No se puede registrar la gestión: descripción y usuario son obligatorios."
+                )
+                return
+            if tipo_solicitud == "Postergar Entrega" and fecha_habilitacion is None:
+                st.error(
+                    "La fecha de habilitación es obligatoria para Postergar Entrega."
+                )
+                return
+
+            creadas, duplicadas, errores = [], [], []
+            for _, fila_lote in tabla_lote.iterrows():
+                pedido = str(fila_lote.get("Pedido", "")).strip()
+                cliente = str(fila_lote.get("Cliente", "")).strip()
+                if not pedido or not cliente:
+                    errores.append(
+                        f"{pedido or 'Sin pedido'}: faltan datos del pedido/cliente"
+                    )
+                    continue
+                try:
+                    r = guardar_solicitud(
+                        pedido=pedido,
+                        cliente=cliente,
+                        tipo_solicitud=tipo_solicitud,
+                        descripcion=descripcion.strip(),
+                        usuario_solicitante=usuario,
+                        prioridad=prioridad,
+                        fecha_habilitacion=(
+                            fecha_habilitacion.strftime("%Y-%m-%d")
+                            if fecha_habilitacion is not None
+                            else ""
                         ),
                     )
-                descripcion = st.text_area(
-                    "Descripción",
-                    placeholder="Detalle común para todos los pedidos seleccionados...",
-                    height=110,
+                    (duplicadas if r.get("duplicado") else creadas).append(pedido)
+                except Exception as error:
+                    errores.append(f"{pedido}: {error}")
+
+            invalidar_cache_gestion()
+            if creadas:
+                st.success(
+                    f"Solicitudes creadas: {len(creadas)} · " + ", ".join(creadas)
                 )
-                confirmar = st.form_submit_button(
-                    f"📩 Generar solicitud para {cantidad} pedidos",
-                    type="primary",
-                    width="stretch",
+            if duplicadas:
+                st.warning(
+                    f"Ya tenían una solicitud equivalente: {len(duplicadas)} · "
+                    + ", ".join(duplicadas)
                 )
-
-            if confirmar:
-                if not descripcion.strip() or not usuario:
-                    st.error(
-                        "No se puede registrar la gestión: todos los campos son obligatorios."
-                    )
-                    return
-                if tipo_solicitud == "Postergar Entrega" and fecha_habilitacion is None:
-                    st.error("La fecha de habilitación es obligatoria para Postergar Entrega.")
-                    return
-
-                creadas, duplicadas, errores = [], [], []
-                for _, fila_lote in tabla_lote.iterrows():
-                    pedido = str(fila_lote.get("Pedido", "")).strip()
-                    cliente = str(fila_lote.get("Cliente", "")).strip()
-                    if not pedido or not cliente:
-                        errores.append(f"{pedido or 'Sin pedido'}: faltan datos del pedido/cliente")
-                        continue
-                    try:
-                        r = guardar_solicitud(
-                            pedido=pedido, cliente=cliente,
-                            tipo_solicitud=tipo_solicitud,
-                            descripcion=descripcion.strip(),
-                            usuario_solicitante=usuario, prioridad=prioridad,
-                            fecha_habilitacion=(
-                                fecha_habilitacion.strftime("%Y-%m-%d")
-                                if fecha_habilitacion is not None else ""
-                            ),
-                        )
-                        (duplicadas if r.get("duplicado") else creadas).append(pedido)
-                    except Exception as error:
-                        errores.append(f"{pedido}: {error}")
-
-                invalidar_cache_gestion()
-                if creadas:
-                    st.success(f"Solicitudes creadas: {len(creadas)} · " + ", ".join(creadas))
-                if duplicadas:
-                    st.warning(f"Ya tenían una solicitud equivalente: {len(duplicadas)} · " + ", ".join(duplicadas))
-                if errores:
-                    st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
-                if not errores:
-                    st.toast("Gestión múltiple registrada.", icon="✅")
+            if errores:
+                st.error("No se pudieron procesar:\n- " + "\n- ".join(errores))
+            if not errores:
+                st.toast("Gestión múltiple registrada.", icon="✅")
 
 
-    @st.dialog(
-        "📦 Centro de gestión del pedido",
-        width="large",
-    )
     def abrir_detalle_pedido(
         pedido_detalle: str,
     ) -> None:
@@ -2549,313 +1881,120 @@ def render() -> None:
                     )
 
             st.divider()
-            st.markdown("##### 📋 Nueva gestión")
-
-            tipo_gestion = st.selectbox(
-                "Tipo de gestión",
-                options=[
-                    "Urgencia",
-                    "Solicitud",
-                ],
-                key=f"tipo_gestion_{fila['Pedido']}",
+            st.markdown("##### 📋 Nueva solicitud")
+            st.caption(
+                "Urgencia se registra como tipo de Solicitud. "
+                "Comercial no ejecuta workers ni agrupaciones desde este módulo."
             )
 
-            if tipo_gestion == "Urgencia":
-                # Regla operativa:
-                # los pedidos mayores a 2 m³ no se registran como urgencia.
-                # Se convierten automáticamente en una solicitud de prioridad.
-                try:
-                    volumen_pedido = float(fila.get("M3", 0) or 0)
-                except (TypeError, ValueError):
-                    volumen_pedido = 0.0
+            st.caption(
+                "Las solicitudes existentes se administran "
+                "desde la tabla superior «Solicitudes pendientes»."
+            )
 
-                limite_urgencia_m3 = 2.0
-                convertir_a_solicitud = (
-                    volumen_pedido > limite_urgencia_m3
+            tipo_solicitud = st.selectbox(
+                "Tipo de solicitud",
+                options=[
+                    "Urgencia",
+                    "Consulta de estado",
+                    "Cambio de prioridad",
+                    "Coordinación de entrega",
+                    "Postergar Entrega",
+                    "Documentación",
+                    "Otro",
+                ],
+                key=f"tipo_solicitud_nueva_{fila['Pedido']}",
+            )
+
+            with st.form(
+                f"form_solicitud_{fila['Pedido']}",
+                clear_on_submit=True,
+            ):
+                opciones_prioridad = (
+                    ["Alta", "Crítica"]
+                    if tipo_solicitud == "Urgencia"
+                    else ["Normal", "Alta", "Baja"]
+                )
+                prioridad_solicitud = st.selectbox(
+                    "Prioridad",
+                    options=opciones_prioridad,
                 )
 
-                if convertir_a_solicitud:
-                    st.warning(
-                        f"Este pedido tiene {volumen_pedido:.3f} m³ y "
-                        f"supera el límite de {limite_urgencia_m3:.2f} m³ "
-                        "para urgencias. La gestión se registrará "
-                        "automáticamente como SOLICITUD de prioridad."
-                    )
-
-                urgencia_pedido = pd.DataFrame()
-
-                if not urgencias_activas.empty:
-                    urgencia_pedido = urgencias_activas[
-                        urgencias_activas["Pedido"]
-                        .astype(str)
-                        .eq(str(fila["Pedido"]))
-                    ].copy()
-
-                if not urgencia_pedido.empty:
-                    ultima_urgencia = urgencia_pedido.iloc[0]
-
-                    st.warning(
-                        "Este pedido ya está marcado como urgente."
-                    )
-
-                    st.caption(
-                        f"**Motivo:** "
-                        f"{ultima_urgencia.get('Motivo', '') or 'Sin detalle'}  \\n"
-                        f"**Solicitado por:** "
-                        f"{ultima_urgencia.get('UsuarioSolicitante', '') or 'Sin dato'}  \\n"
-                        f"**Fecha:** "
-                        f"{ultima_urgencia.get('FechaSolicitud', '') or 'Sin dato'}  \\n"
-                        f"**Estado DIGIP:** "
-                        f"{ultima_urgencia.get('EstadoEjecucionDIGIP', '') or 'Pendiente'}"
-                    )
-
-                else:
-                    with st.form(
-                        f"form_urgencia_{fila['Pedido']}",
-                        clear_on_submit=True,
-                    ):
-                        motivo_urgencia = st.selectbox(
-                            "Motivo de la urgencia",
-                            options=[
-                                "Compromiso con cliente",
-                                "Reclamo del cliente",
-                                "Entrega coordinada",
-                                "Retiro coordinado",
-                                "Obra o instalación",
-                                "Pedido atrasado",
-                                "Error interno",
-                                "Otro",
-                            ],
-                        )
-
-                        prioridad_urgencia = st.selectbox(
-                            "Prioridad",
-                            options=["Alta", "Crítica"],
-                        )
-
-                        fecha_requerida = st.date_input(
-                            "Fecha requerida",
-                            value=None,
-                        )
-
-                        observacion_urgencia = st.text_area(
-                            "Observación",
-                            placeholder=(
-                                "Detalle breve para Logística..."
-                            ),
-                            height=90,
-                        )
-
-                        texto_boton_urgencia = (
-                            "📩 Registrar como solicitud"
-                            if convertir_a_solicitud
-                            else "🚨 Marcar como urgente"
-                        )
-
-                        confirmar_urgencia = st.form_submit_button(
-                            texto_boton_urgencia,
-                            type="primary",
-                            width="stretch",
-                        )
-
-                    if confirmar_urgencia:
-                        if (
-                            fecha_requerida is None
-                            or not str(observacion_urgencia).strip()
-                        ):
-                            st.error(
-                                "Completá todos los campos de la urgencia: "
-                                "motivo, prioridad, fecha requerida y observación."
-                            )
-                            st.stop()
-
-                        usuario_solicitante = (
-                            st.session_state.get("usuario")
-                            or st.session_state.get("nombre_usuario")
-                            or "Usuario no identificado"
-                        )
-
-                        try:
-                            fecha_requerida_texto = (
-                                fecha_requerida.strftime("%Y-%m-%d")
-                                if fecha_requerida is not None
-                                else "Sin fecha requerida"
-                            )
-
-                            if convertir_a_solicitud:
-                                descripcion_convertida = (
-                                    "Solicitud convertida automáticamente desde "
-                                    "URGENCIA por superar el límite operativo "
-                                    f"de {limite_urgencia_m3:.2f} m³.\n"
-                                    f"Volumen del pedido: {volumen_pedido:.3f} m³.\n"
-                                    f"Motivo informado: {motivo_urgencia}.\n"
-                                    f"Fecha requerida: {fecha_requerida_texto}.\n"
-                                    f"Observación: "
-                                    f"{observacion_urgencia.strip() or 'Sin observación'}"
-                                )
-
-                                resultado_solicitud = guardar_solicitud(
-                                    pedido=fila["Pedido"],
-                                    cliente=fila["Cliente"],
-                                    tipo_solicitud="Cambio de prioridad",
-                                    descripcion=descripcion_convertida,
-                                    usuario_solicitante=usuario_solicitante,
-                                    prioridad="Alta",
-                                )
-
-                                st.success(
-                                    "El pedido supera los 2 m³. "
-                                    "La gestión se registró como SOLICITUD "
-                                    "de prioridad."
-                                )
-
-                                st.toast(
-                                    "Urgencia convertida en solicitud.",
-                                    icon="📩",
-                                )
-
-                            else:
-                                resultado_urgencia = guardar_urgencia(
-                                    pedido=fila["Pedido"],
-                                    cliente=fila["Cliente"],
-                                    motivo=motivo_urgencia,
-                                    usuario_solicitante=usuario_solicitante,
-                                    prioridad=prioridad_urgencia,
-                                    fecha_requerida=(
-                                        fecha_requerida.strftime("%Y-%m-%d")
-                                        if fecha_requerida is not None
-                                        else ""
-                                    ),
-                                    observacion=observacion_urgencia,
-                                )
-
-                                st.success(
-                                    resultado_urgencia["mensaje"]
-                                )
-
-                                st.toast(
-                                    "Pedido agregado a la cola de urgencias.",
-                                    icon="🚨",
-                                )
-
-                            invalidar_cache_gestion()
-                            st.rerun()
-
-                        except Exception as error:
-                            st.error(
-                                "No se pudo registrar la gestión."
-                            )
-                            logger.exception("Error controlado en el módulo de Consultas Comerciales.")
-
-            elif tipo_gestion == "Solicitud":
-                st.caption(
-                    "Las solicitudes existentes se administran "
-                    "desde la tabla superior «Solicitudes pendientes»."
-                )
-
-                tipo_solicitud = st.selectbox(
-                    "Tipo de solicitud",
-                    options=[
-                        "Consulta de estado",
-                        "Cambio de prioridad",
-                        "Coordinación de entrega",
-                        "Postergar Entrega",
-                        "Documentación",
-                        "Otro",
-                    ],
-                    key=f"tipo_solicitud_nueva_{fila['Pedido']}",
-                )
-
-                with st.form(
-                    f"form_solicitud_{fila['Pedido']}",
-                    clear_on_submit=True,
-                ):
-                    prioridad_solicitud = st.selectbox(
-                        "Prioridad",
-                        options=[
-                            "Normal",
-                            "Alta",
-                            "Baja",
-                        ],
-                    )
-
-                    fecha_habilitacion = None
-                    if tipo_solicitud == "Postergar Entrega":
-                        fecha_habilitacion = st.date_input(
-                            "Habilitar pedido desde",
-                            value=None,
-                            help=(
-                                "Hasta el día anterior el pedido queda bloqueado. "
-                                "Desde esta fecha vuelve automáticamente a planificación."
-                            ),
-                        )
-
-                    descripcion_solicitud = st.text_area(
-                        "Descripción",
-                        placeholder=(
-                            "Detalle de la solicitud para Logística..."
+                fecha_habilitacion = None
+                if tipo_solicitud == "Postergar Entrega":
+                    fecha_habilitacion = st.date_input(
+                        "Habilitar pedido desde",
+                        value=None,
+                        help=(
+                            "Hasta el día anterior el pedido queda bloqueado. "
+                            "Desde esta fecha vuelve automáticamente a planificación."
                         ),
-                        height=110,
                     )
 
-                    confirmar_solicitud = st.form_submit_button(
-                        "📩 Registrar solicitud",
-                        type="primary",
-                        width="stretch",
+                descripcion_solicitud = st.text_area(
+                    "Descripción",
+                    placeholder=(
+                        "Indicá motivo, compromiso/fecha requerida y contexto de la urgencia..."
+                        if tipo_solicitud == "Urgencia"
+                        else "Detalle de la solicitud para Logística..."
+                    ),
+                    height=110,
+                )
+
+                confirmar_solicitud = st.form_submit_button(
+                    "📩 Registrar solicitud",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if confirmar_solicitud:
+                if not str(descripcion_solicitud).strip():
+                    st.error("La descripción es obligatoria.")
+                    st.stop()
+
+                if (
+                    tipo_solicitud == "Postergar Entrega"
+                    and fecha_habilitacion is None
+                ):
+                    st.error(
+                        "Indicá la fecha desde la que el pedido vuelve a quedar habilitado."
+                    )
+                    st.stop()
+
+                usuario_solicitante = (
+                    st.session_state.get("usuario")
+                    or st.session_state.get("nombre_usuario")
+                    or "Usuario no identificado"
+                )
+
+                try:
+                    resultado_solicitud = guardar_solicitud(
+                        pedido=fila["Pedido"],
+                        cliente=fila["Cliente"],
+                        tipo_solicitud=tipo_solicitud,
+                        descripcion=descripcion_solicitud,
+                        usuario_solicitante=usuario_solicitante,
+                        prioridad=prioridad_solicitud,
+                        fecha_habilitacion=(
+                            fecha_habilitacion.strftime("%Y-%m-%d")
+                            if fecha_habilitacion is not None
+                            else ""
+                        ),
                     )
 
-                if confirmar_solicitud:
-                    if not str(descripcion_solicitud).strip():
-                        st.error("La descripción es obligatoria.")
-                        st.stop()
-
-                    if (
-                        tipo_solicitud == "Postergar Entrega"
-                        and fecha_habilitacion is None
-                    ):
-                        st.error(
-                            "Indicá la fecha desde la que el pedido vuelve a quedar habilitado."
-                        )
-                        st.stop()
-
-                    usuario_solicitante = (
-                        st.session_state.get("usuario")
-                        or st.session_state.get("nombre_usuario")
-                        or "Usuario no identificado"
+                    st.success(resultado_solicitud["mensaje"])
+                    st.toast(
+                        "Solicitud agregada a la gestión comercial.",
+                        icon="📩",
                     )
+                    invalidar_cache_gestion()
+                    st.rerun()
 
-                    try:
-                        resultado_solicitud = guardar_solicitud(
-                            pedido=fila["Pedido"],
-                            cliente=fila["Cliente"],
-                            tipo_solicitud=tipo_solicitud,
-                            descripcion=descripcion_solicitud,
-                            usuario_solicitante=usuario_solicitante,
-                            prioridad=prioridad_solicitud,
-                            fecha_habilitacion=(
-                                fecha_habilitacion.strftime("%Y-%m-%d")
-                                if fecha_habilitacion is not None
-                                else ""
-                            ),
-                        )
-
-                        st.success(
-                            resultado_solicitud["mensaje"]
-                        )
-
-                        st.toast(
-                            "Solicitud agregada a la gestión comercial.",
-                            icon="📩",
-                        )
-
-                        invalidar_cache_gestion()
-                        st.rerun()
-
-                    except Exception as error:
-                        st.error(
-                            "No se pudo registrar la solicitud."
-                        )
-                        logger.exception("Error controlado en el módulo de Consultas Comerciales.")
+                except Exception:
+                    st.error("No se pudo registrar la solicitud.")
+                    logger.exception(
+                        "Error controlado en el módulo de Consultas Comerciales."
+                    )
 
             fecha_transmision = fila[
                 "FechaTransmisionERP"
@@ -2896,172 +2035,181 @@ def render() -> None:
 
 
     # ==========================================================
-    # BÚSQUEDA Y RESUMEN DE LA TABLA
+    # BÚSQUEDA Y FILTROS DE LA TABLA
     # ==========================================================
 
     st.markdown("---")
-    st.subheader("🔎 Buscar y consultar pedidos")
+    st.subheader("🔎 Pedidos activos")
 
-    filtros_actuales = st.session_state[
-        "consultas_filtros_aplicados"
-    ]
+    filtros_actuales = st.session_state["consultas_filtros_aplicados"]
 
-    with st.form(
-        "form_busqueda_consultas",
-        clear_on_submit=False,
-    ):
-
-        buscar_col, aplicar_col, limpiar_col = st.columns(
-            [5, 1.15, 1.15],
-            vertical_alignment="bottom",
+    def _opciones(columna: str) -> list[str]:
+        if columna not in tabla_consultas.columns:
+            return []
+        return sorted(
+            x for x in
+            tabla_consultas[columna].fillna("").astype(str).str.strip().unique().tolist()
+            if x
         )
 
-        with buscar_col:
+    opciones_estado_pedido = _opciones("EstadoPedido")
+    opciones_estado_preparacion = _opciones("EstadoPreparacion")
+    opciones_estado_operativo = _opciones("EstadoOperativo")
+
+    with st.form("form_busqueda_consultas", clear_on_submit=False):
+        f1, f2, f3, f4 = st.columns([2.8, 1.4, 1.5, 1.4])
+
+        with f1:
             busqueda_form = st.text_input(
-                "Pedido o cliente",
-                value=filtros_actuales["busqueda"],
-                placeholder=(
-                    "Ingresá un pedido, código de cliente "
-                    "o nombre del cliente"
-                ),
-                label_visibility="collapsed",
+                "Buscar",
+                value=filtros_actuales.get("busqueda", ""),
+                placeholder="Pedido, código o cliente",
             )
 
-        with aplicar_col:
-            aplicar = st.form_submit_button(
-                "🔎 Buscar",
-                type="primary",
-                width="stretch",
+        with f2:
+            estado_pedido_form = st.multiselect(
+                "Estado pedido",
+                options=opciones_estado_pedido,
+                default=[
+                    x for x in filtros_actuales.get("estado_pedido", [])
+                    if x in opciones_estado_pedido
+                ],
             )
 
-        with limpiar_col:
-            limpiar = st.form_submit_button(
-                "🧹 Quitar filtro",
-                width="stretch",
+        with f3:
+            estado_preparacion_form = st.multiselect(
+                "Estado preparación",
+                options=opciones_estado_preparacion,
+                default=[
+                    x for x in filtros_actuales.get("estado_preparacion", [])
+                    if x in opciones_estado_preparacion
+                ],
             )
 
+        with f4:
+            estado_operativo_form = st.multiselect(
+                "Semáforo",
+                options=opciones_estado_operativo,
+                default=[
+                    x for x in filtros_actuales.get("estado_operativo", [])
+                    if x in opciones_estado_operativo
+                ],
+            )
+
+        b1, b2, _ = st.columns([1.2, 1.2, 5])
+        with b1:
+            aplicar = st.form_submit_button("🔎 Aplicar", type="primary", width="stretch")
+        with b2:
+            limpiar = st.form_submit_button("🧹 Limpiar", width="stretch")
 
     if aplicar:
         st.session_state["consultas_filtros_aplicados"] = {
             "busqueda": busqueda_form.strip(),
+            "estado_pedido": estado_pedido_form,
+            "estado_preparacion": estado_preparacion_form,
+            "estado_operativo": estado_operativo_form,
         }
-
         st.session_state["consultas_detalle_abierto"] = False
         st.session_state["consultas_pedido_detalle"] = ""
         st.session_state["consulta_pedido_seleccionado"] = ""
-
         st.rerun()
-
 
     if limpiar:
         st.session_state["consultas_filtros_aplicados"] = {
             "busqueda": "",
+            "estado_pedido": [],
+            "estado_preparacion": [],
+            "estado_operativo": [],
         }
-
         st.session_state["consultas_detalle_abierto"] = False
         st.session_state["consultas_pedido_detalle"] = ""
         st.session_state["consulta_pedido_seleccionado"] = ""
-
         st.rerun()
 
+    filtros = st.session_state["consultas_filtros_aplicados"]
+    tabla_filtrada = tabla_consultas.copy()
+
+    texto_busqueda = str(filtros.get("busqueda", "")).strip()
+    if texto_busqueda:
+        mascara = pd.Series(False, index=tabla_filtrada.index)
+        for columna in ["Pedido", "ClienteCodigo", "CodigoLogistico", "Cliente"]:
+            if columna in tabla_filtrada.columns:
+                mascara |= (
+                    tabla_filtrada[columna].fillna("").astype(str)
+                    .str.contains(texto_busqueda, case=False, na=False, regex=False)
+                )
+        tabla_filtrada = tabla_filtrada.loc[mascara].copy()
+
+    for columna, clave in [
+        ("EstadoPedido", "estado_pedido"),
+        ("EstadoPreparacion", "estado_preparacion"),
+        ("EstadoOperativo", "estado_operativo"),
+    ]:
+        seleccion = filtros.get(clave, [])
+        if seleccion and columna in tabla_filtrada.columns:
+            tabla_filtrada = tabla_filtrada[
+                tabla_filtrada[columna].fillna("").astype(str).isin(seleccion)
+            ].copy()
 
     # ==========================================================
-    # TABLA GENERAL DE PEDIDOS
+    # TABLA COMERCIAL COMPACTA
     # ==========================================================
 
     st.subheader("Tabla general de pedidos")
 
-    # ==========================================================
-    # TABLA GENERAL A ANCHO COMPLETO
-    # ==========================================================
-
-    COLUMN_CONFIG = {
-        "Pedido": st.column_config.TextColumn(
-            "Pedido",
-            width="small",
-        ),
-        "Fecha": st.column_config.DateColumn(
-            "Fecha",
-            format="DD/MM/YYYY",
-            width="small",
-        ),
-        "FechaTransmisionERP": st.column_config.DateColumn(
-            "Fecha transmisión",
-            format="DD/MM/YYYY",
-            width="small",
-        ),
-        "HoraTransmisionERP": st.column_config.TextColumn(
-            "Hora",
-            width="small",
-        ),
-        "NroEnvioERP": st.column_config.TextColumn(
-            "N.º envío",
-            width="small",
-        ),
-        "ClienteCodigo": st.column_config.TextColumn(
-            "Código",
-            width="small",
-        ),
-        "Cliente": st.column_config.TextColumn(
-            "Cliente",
-            width="large",
-        ),
-        "Unidades": st.column_config.NumberColumn(
-            "Unidades",
-            format="%d",
-            width="small",
-        ),
-        "M3": st.column_config.NumberColumn(
-            "M³",
-            format="%.3f",
-            width="small",
-        ),
-        "Familias": st.column_config.TextColumn(
-            "Familias",
-            width="medium",
-        ),
-        "Planificacion": st.column_config.TextColumn(
-            "Planificación",
-            width="small",
-        ),
-        "Despacho": st.column_config.TextColumn(
-            "Despacho",
-            width="medium",
-        ),
-        "Urgencia": st.column_config.TextColumn(
-            "Urgencia",
-            width="small",
-        ),
-        "Solicitud": st.column_config.TextColumn(
-            "Solicitud",
-            width="small",
-        ),
-        "CategoriaComercial": st.column_config.TextColumn(
-            "Estado",
-            width="medium",
-        ),
-        "EstadoComercial": st.column_config.TextColumn(
-            "Situación actual",
-            width="large",
-        ),
-        "Contenedor": st.column_config.TextColumn(
-            "Carro / Contenedor",
-            width="medium",
-        ),
-    }
-
+    columnas_visibles = [
+        "Pedido",
+        "FechaCreacion",
+        "FechaTransmisionERP",
+        "ClienteCodigo",
+        "Cliente",
+        "Unidades",
+        "M3",
+        "EstadoVolumetria",
+        "Planificacion",
+        "Despacho",
+        "EstadoPedido",
+        "EstadoPreparacion",
+        "EstadoOperativo",
+        "Contenedor",
+        "Solicitud",
+    ]
+    columnas_visibles = [c for c in columnas_visibles if c in tabla_filtrada.columns]
 
     tabla_visible_pedidos = (
-        tabla_filtrada
+        tabla_filtrada[columnas_visibles]
         .reset_index(drop=True)
         .copy()
     )
 
+    COLUMN_CONFIG = {
+        "Pedido": st.column_config.TextColumn("Pedido", width="small"),
+        "FechaCreacion": st.column_config.DateColumn(
+            "Creación", format="DD/MM/YYYY", width="small"
+        ),
+        "FechaTransmisionERP": st.column_config.DateColumn(
+            "Transmisión", format="DD/MM/YYYY", width="small"
+        ),
+        "ClienteCodigo": st.column_config.TextColumn(
+            "Código cliente", width="small"
+        ),
+        "Cliente": st.column_config.TextColumn("Cliente", width="large"),
+        "Unidades": st.column_config.NumberColumn("Unid.", format="%d", width="small"),
+        "M3": st.column_config.NumberColumn("M³", format="%.3f", width="small"),
+        "EstadoVolumetria": st.column_config.TextColumn("Volumetría", width="small"),
+        "Planificacion": st.column_config.TextColumn("Planificación", width="small"),
+        "Despacho": st.column_config.TextColumn("Despacho", width="medium"),
+        "EstadoPedido": st.column_config.TextColumn("Estado pedido", width="small"),
+        "EstadoPreparacion": st.column_config.TextColumn(
+            "Estado preparación", width="small"
+        ),
+        "EstadoOperativo": st.column_config.TextColumn("Estado", width="small"),
+        "Contenedor": st.column_config.TextColumn("Carro pendiente", width="medium"),
+        "Solicitud": st.column_config.TextColumn("Solicitud", width="small"),
+    }
+
     st.caption(
-        (
-            f"{len(tabla_visible_pedidos):,} pedidos visibles "
-            f"de {len(tabla_consultas):,}"
-        ).replace(",", ".")
+        f"{len(tabla_visible_pedidos):,} pedidos visibles".replace(",", ".")
     )
 
     evento_tabla_pedidos = st.dataframe(
