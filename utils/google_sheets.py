@@ -2,18 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-import time
-import socket
-import ssl
-import http.client
 
 import pandas as pd
 import streamlit as st
 
 from google.oauth2 import service_account
-from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 
 # ==========================================================
@@ -49,6 +43,7 @@ COLUMNAS_SOLICITUDES = [
     "Responsable",
     "Respuesta",
     "FechaResolucion",
+    "FechaHabilitacion",
 ]
 
 
@@ -171,165 +166,7 @@ COLUMNAS_CANCELACIONES_ENTREGA = [
     "UltimaActualizacion",
 ]
 
-# ==========================================================
-# INVENTARIOS CÍCLICOS
-# ==========================================================
-
-COLUMNAS_INVENTARIO_PLANES = [
-    "InventarioID",
-    "FechaCreacion",
-    "FechaPlanificada",
-    "TipoInventario",
-    "GrupoInventario",
-    "Responsable",
-    "ResponsableNombre",
-    "Estado",
-    "CantidadArticulos",
-    "CantidadUbicaciones",
-    "UsuarioCreacion",
-    "UsuarioCreacionNombre",
-    "Observaciones",
-    "FechaInicio",
-    "FechaFinalizacion",
-]
-
-COLUMNAS_INVENTARIO_ITEMS = [
-    "ItemID",
-    "InventarioID",
-    "ArticuloCodigo",
-    "ArticuloDescripcion",
-    "GrupoInventario",
-    "Familia",
-    "Familia2",
-    "Sectorizacion",
-    "Ubicacion",
-    "Contenedor",
-    "FuenteDetalle",
-    "CantidadSistemaUbicacion",
-    "StockERPInicial",
-    "StockWMSInicial",
-    "DiferenciaInicial",
-    "PrioridadInicial",
-    "ScorePrioridad",
-    "MotivoPrioridad",
-    "EstadoItem",
-    "OrdenConteo",
-    "TipoUbicacion",
-    "AreaUbicacion",
-    "PasilloUbicacion",
-]
-
-COLUMNAS_INVENTARIO_CONTEOS = [
-    "ConteoID",
-    "InventarioID",
-    "ItemID",
-    "ArticuloCodigo",
-    "Ubicacion",
-    "Contenedor",
-    "CantidadContada",
-    "UsuarioConteo",
-    "UsuarioConteoNombre",
-    "FechaConteo",
-    "Observacion",
-    "OrigenConteo",
-    "ImportacionID",
-    "ArchivoOrigen",
-    "FilaArchivo",
-    "CantidadFotoUnidades",
-    "CantidadFotoCajas",
-    "CantidadRelevadaUnidades",
-    "CantidadRelevadaCajas",
-    "DiferenciaArchivo",
-    "FotoPertenece",
-    "ClaveImportacion",
-    "EstadoValidacion",
-]
-
-COLUMNAS_INVENTARIO_RECONTEOS = [
-    "ReconteoID",
-    "InventarioID",
-    "ItemID",
-    "ArticuloCodigo",
-    "Ubicacion",
-    "Contenedor",
-    "CantidadRecontada",
-    "UsuarioReconteo",
-    "UsuarioReconteoNombre",
-    "FechaReconteo",
-    "Observacion",
-]
-
-
-COLUMNAS_INVENTARIO_IMPORTACIONES = [
-    "ImportacionID",
-    "InventarioID",
-    "TipoImportacion",
-    "NombreArchivo",
-    "HashArchivo",
-    "FechaCarga",
-    "UsuarioCarga",
-    "UsuarioCargaNombre",
-    "RegistrosOriginales",
-    "RegistrosValidos",
-    "DuplicadosArchivo",
-    "FueraDelPlan",
-    "Ambiguos",
-    "Errores",
-    "EstadoImportacion",
-]
-
-COLUMNAS_INVENTARIO_ACCIONES = [
-    "AccionID", "InventarioID", "ArticuloCodigo", "ArticuloDescripcion",
-    "Diagnostico", "AccionSugerida", "SistemaObjetivo", "TipoUbicacion",
-    "UbicacionesSugeridas", "DiferenciaERPvsWMS", "DiferenciaFisicavsWMS",
-    "EstadoAccion", "Responsable", "FechaCreacion", "FechaActualizacion",
-    "UsuarioUltimaActualizacion", "CausaRaiz", "Resolucion", "Observaciones",
-]
-
-COLUMNAS_INVENTARIO_HISTORIAL = [
-    "HistorialID",
-    "InventarioID",
-    "ItemID",
-    "ArticuloCodigo",
-    "Accion",
-    "EstadoAnterior",
-    "EstadoNuevo",
-    "Usuario",
-    "UsuarioNombre",
-    "Fecha",
-    "Detalle",
-]
-
-
-# ==========================================================
-# PLANNING OPERATIVO / COORDINACIÓN
-# ==========================================================
-
-COLUMNAS_PLANNING_COORDINACION = [
-    "CoordinacionID", "Tipo", "Referencia", "FechaEntrega",
-    "FechaSugerida", "FechaCoordinada", "Lineas", "Unidades",
-    "Estado", "Usuario", "FechaRegistro", "FechaActualizacion", "Observacion",
-]
-
-COLUMNAS_PLANNING_HISTORIAL = [
-    "HistorialID", "CoordinacionID", "Tipo", "Referencia",
-    "FechaEntrega", "FechaSugerida", "FechaAnterior", "FechaNueva",
-    "Lineas", "Unidades", "Accion", "Usuario", "Fecha", "Observacion",
-]
-
-# Persistencia del agrupado físico del módulo Tareas.
-COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO = [
-    "Clave", "DespachoId", "Preparacion", "Pedido", "Agrupador", "Estado",
-]
-
-
 ESTRUCTURA_HOJAS = {
-
-    "PlanningCoordinacion": COLUMNAS_PLANNING_COORDINACION,
-
-    "PlanningHistorial": COLUMNAS_PLANNING_HISTORIAL,
-
-    "PedidosAgrupadosDespacho": COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO,
 
     "Solicitudes": COLUMNAS_SOLICITUDES,
 
@@ -349,23 +186,7 @@ ESTRUCTURA_HOJAS = {
 
     "CoberturaInformados": COLUMNAS_COBERTURA_INFORMADOS,
 
-    "InventarioPlanes": COLUMNAS_INVENTARIO_PLANES,
-
-    "InventarioItems": COLUMNAS_INVENTARIO_ITEMS,
-
-    "InventarioConteos": COLUMNAS_INVENTARIO_CONTEOS,
-
-    "InventarioReconteos": COLUMNAS_INVENTARIO_RECONTEOS,
-
-    "InventarioImportaciones": COLUMNAS_INVENTARIO_IMPORTACIONES,
-
-    "InventarioAcciones": COLUMNAS_INVENTARIO_ACCIONES,
-
-    "InventarioHistorial": COLUMNAS_INVENTARIO_HISTORIAL,
-
 }
-
-
 
 
 # ==========================================================
@@ -401,9 +222,12 @@ def crear_credenciales():
     )
 
 
-@st.cache_resource(ttl=1800)
+@st.cache_resource
 def crear_servicio_sheets():
-    """Crea y reutiliza el servicio de Google Sheets."""
+    """
+    Crea el servicio de Google Sheets.
+    """
+
     return build(
         "sheets",
         "v4",
@@ -412,87 +236,7 @@ def crear_servicio_sheets():
     )
 
 
-# Reintentos de transporte. Si una conexión HTTP queda cortada, se descarta
-# el servicio cacheado antes del siguiente intento para forzar una conexión nueva.
-_INTENTOS_RED_GOOGLE = 3
-_ESPERAS_RED_GOOGLE = (1.5, 3.0)
-
-
-def _es_error_autenticacion_google(error: Exception) -> bool:
-    if isinstance(error, RefreshError):
-        return True
-    if isinstance(error, HttpError):
-        try:
-            if int(error.resp.status) in (401, 403):
-                return True
-        except Exception:
-            pass
-    texto = f"{type(error).__name__}: {error}".lower()
-    return any(m in texto for m in (
-        "invalid_grant", "invalid jwt", "token must be a short-lived token",
-        "check your iat and exp", "invalid credentials", "unauthorized"
-    ))
-
-
-def _es_error_transitorio_red(error: Exception) -> bool:
-    if isinstance(error, (ConnectionResetError, ConnectionAbortedError, ConnectionError,
-                          TimeoutError, socket.timeout, ssl.SSLError, http.client.HTTPException)):
-        return True
-    if isinstance(error, HttpError):
-        try:
-            if int(error.resp.status) in (429, 500, 502, 503, 504):
-                return True
-        except Exception:
-            pass
-    texto = f"{type(error).__name__}: {error}".lower()
-    return any(m in texto for m in (
-        "winerror 10053", "winerror 10054", "winerror 10060", "connection reset", "connection aborted",
-        "remotedisconnected", "timed out", "timeout", "temporarily unavailable",
-        "service unavailable", "rate limit"
-    ))
-
-def _reiniciar_servicio_sheets() -> None:
-    """Descarta el cliente HTTP actual para que el próximo intento reconecte."""
-    try:
-        crear_servicio_sheets.clear()
-    except Exception:
-        pass
-
-
-def _ejecutar_sheets_con_reintentos(crear_peticion):
-    """Lecturas/idempotentes: recupera token/JWT, red, 429 y 5xx."""
-    ultimo_error: Exception | None = None
-    for intento in range(1, _INTENTOS_RED_GOOGLE + 1):
-        try:
-            servicio = crear_servicio_sheets()
-            return crear_peticion(servicio).execute()
-        except Exception as error:
-            ultimo_error = error
-            if not (_es_error_autenticacion_google(error) or _es_error_transitorio_red(error)):
-                raise
-            print(f"Google Sheets: error recuperable (intento {intento}/{_INTENTOS_RED_GOOGLE}): {type(error).__name__}: {error}")
-            _reiniciar_servicio_sheets()
-            if intento < _INTENTOS_RED_GOOGLE:
-                time.sleep(_ESPERAS_RED_GOOGLE[min(intento - 1, len(_ESPERAS_RED_GOOGLE) - 1)])
-    assert ultimo_error is not None
-    raise ultimo_error
-
-
-def _ejecutar_escritura_sheets_segura(crear_peticion):
-    """Escrituras: reintenta sólo fallos claros de autenticación, evitando duplicados por cortes ambiguos."""
-    try:
-        servicio = crear_servicio_sheets()
-        return crear_peticion(servicio).execute()
-    except Exception as error:
-        if not _es_error_autenticacion_google(error):
-            raise
-        print("Google Sheets: token/JWT rechazado en escritura; recreando servicio y reintentando una vez.")
-        _reiniciar_servicio_sheets()
-        servicio = crear_servicio_sheets()
-        return crear_peticion(servicio).execute()
-
-
-@st.cache_resource(ttl=1800)
+@st.cache_resource
 def crear_servicio_drive_escritura():
     """
     Crea el servicio de Google Drive con permisos de escritura.
@@ -553,17 +297,21 @@ def nombre_rango(nombre_hoja: str, rango: str = "") -> str:
 # VALIDACIÓN DE LA PLANILLA
 # ==========================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
 def obtener_nombres_hojas() -> list[str]:
     """
     Devuelve las pestañas existentes en la planilla.
     """
 
-    planilla = _ejecutar_sheets_con_reintentos(
-        lambda servicio: servicio.spreadsheets().get(
+    servicio = crear_servicio_sheets()
+
+    planilla = (
+        servicio
+        .spreadsheets()
+        .get(
             spreadsheetId=SPREADSHEET_ID,
             fields="sheets.properties.title",
         )
+        .execute()
     )
 
     return [
@@ -595,17 +343,22 @@ def crear_hoja(nombre_hoja: str) -> None:
     ).execute()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def leer_encabezados(nombre_hoja: str) -> list[str]:
     """
     Lee la primera fila de una hoja.
     """
 
-    resultado = _ejecutar_sheets_con_reintentos(
-        lambda servicio: servicio.spreadsheets().values().get(
+    servicio = crear_servicio_sheets()
+
+    resultado = (
+        servicio
+        .spreadsheets()
+        .values()
+        .get(
             spreadsheetId=SPREADSHEET_ID,
             range=nombre_rango(nombre_hoja, "1:1"),
         )
+        .execute()
     )
 
     valores = resultado.get("values", [])
@@ -627,15 +380,16 @@ def escribir_encabezados(
     Escribe los encabezados en la primera fila.
     """
 
-    _ejecutar_escritura_sheets_segura(
-        lambda servicio: servicio.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(nombre_hoja, "A1"),
-            valueInputOption="RAW",
-            body={"values": [columnas]},
-        )
-    )
-    limpiar_cache_google_sheets(metadata=True)
+    servicio = crear_servicio_sheets()
+
+    servicio.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=nombre_rango(nombre_hoja, "A1"),
+        valueInputOption="RAW",
+        body={
+            "values": [columnas],
+        },
+    ).execute()
 
 
 def asegurar_hoja(nombre_hoja: str) -> None:
@@ -658,24 +412,17 @@ def asegurar_hoja(nombre_hoja: str) -> None:
         return
 
     if encabezados != columnas:
-        # Compatibilidad hacia atrás: hojas históricas de otros módulos pueden
-        # tener columnas adicionales o un esquema evolucionado. Si contienen
-        # todas las columnas mínimas requeridas, no se reescriben ni bloquean.
-        if all(col in encabezados for col in columnas):
-            return
-
-        # Migración segura: si sólo faltan columnas nuevas al final, se amplía
-        # el encabezado sin tocar los registros existentes.
+        # Migración segura: si la hoja conserva el mismo orden y sólo le
+        # faltan columnas nuevas al final, se amplían los encabezados sin
+        # tocar los registros existentes.
         if columnas[:len(encabezados)] == encabezados:
             escribir_encabezados(nombre_hoja, columnas)
             return
 
-        faltantes = [col for col in columnas if col not in encabezados]
         raise ValueError(
-            f"La hoja '{nombre_hoja}' no contiene las columnas mínimas esperadas. "
-            f"Faltan: {faltantes}"
+            f"La hoja '{nombre_hoja}' tiene encabezados diferentes "
+            "a los esperados."
         )
-
 
 
 def inicializar_planilla() -> dict[str, Any]:
@@ -733,42 +480,13 @@ def inicializar_planilla() -> dict[str, Any]:
 # LECTURA
 # ==========================================================
 
-@st.cache_data(ttl=20, max_entries=40, show_spinner=False)
-def _leer_hoja_cache(
-    nombre_hoja: str,
-    columnas_cache: tuple[str, ...] | None = None,
-) -> pd.DataFrame:
-    """Lectura cacheada para reducir requests a Google Sheets."""
-
-    columnas = (
-        list(columnas_cache)
-        if columnas_cache is not None
-        else None
-    )
-    return _leer_hoja_sin_cache(
-        nombre_hoja,
-        columnas,
-    )
-
-
 def leer_hoja(
     nombre_hoja: str,
     columnas: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Lee una hoja usando una caché corta y devuelve una copia."""
-
-    resultado = _leer_hoja_cache(
-        nombre_hoja,
-        tuple(columnas) if columnas else None,
-    )
-    return resultado.copy()
-
-
-def _leer_hoja_sin_cache(
-    nombre_hoja: str,
-    columnas: list[str] | None = None,
-) -> pd.DataFrame:
-    """Lectura real de Google Sheets."""
+    """
+    Lee una pestaña completa y devuelve un DataFrame.
+    """
 
     if nombre_hoja not in ESTRUCTURA_HOJAS:
         raise ValueError(
@@ -781,16 +499,17 @@ def _leer_hoja_sin_cache(
         else ESTRUCTURA_HOJAS[nombre_hoja]
     )
 
-    resultado = _ejecutar_sheets_con_reintentos(
-        lambda servicio: (
-            servicio
-            .spreadsheets()
-            .values()
-            .get(
-                spreadsheetId=SPREADSHEET_ID,
-                range=nombre_rango(nombre_hoja),
-            )
+    servicio = crear_servicio_sheets()
+
+    resultado = (
+        servicio
+        .spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja),
         )
+        .execute()
     )
 
     valores = resultado.get("values", [])
@@ -833,19 +552,6 @@ def _leer_hoja_sin_cache(
     ].copy()
 
 
-def limpiar_cache_google_sheets(
-    *,
-    metadata: bool = False,
-) -> None:
-    """Invalida sólo las capas de lectura de Google Sheets."""
-
-    _leer_hoja_cache.clear()
-
-    if metadata:
-        obtener_nombres_hojas.clear()
-        leer_encabezados.clear()
-
-
 # ==========================================================
 # INSERCIÓN
 # ==========================================================
@@ -854,66 +560,72 @@ def agregar_registro(
     nombre_hoja: str,
     registro: dict[str, Any],
 ) -> None:
-    """Agrega una fila sin volver a leer encabezados."""
+    """
+    Agrega una fila respetando los encabezados REALES de la hoja.
+
+    Esto evita corrimientos cuando la estructura configurada en Python
+    y las columnas existentes en Google Sheets no coinciden exactamente.
+    """
 
     if nombre_hoja not in ESTRUCTURA_HOJAS:
         raise ValueError(
             f"Hoja no configurada: {nombre_hoja}"
         )
 
-    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+    servicio = crear_servicio_sheets()
+
+    respuesta_encabezados = (
+        servicio
+        .spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=nombre_rango(nombre_hoja, "1:1"),
+        )
+        .execute()
+    )
+
+    filas_encabezado = respuesta_encabezados.get(
+        "values",
+        [],
+    )
+
+    if filas_encabezado and filas_encabezado[0]:
+        columnas = [
+            limpiar_valor(columna)
+            for columna in filas_encabezado[0]
+            if limpiar_valor(columna)
+        ]
+    else:
+        columnas = ESTRUCTURA_HOJAS[nombre_hoja]
+
+    columnas_esperadas = ESTRUCTURA_HOJAS[nombre_hoja]
+    faltantes = [
+        columna
+        for columna in columnas_esperadas
+        if columna not in columnas
+    ]
+
+    if faltantes:
+        raise ValueError(
+            f"La hoja '{nombre_hoja}' no contiene las columnas "
+            f"requeridas: {', '.join(faltantes)}"
+        )
+
     fila = [
         limpiar_valor(registro.get(columna, ""))
         for columna in columnas
     ]
 
-    _ejecutar_escritura_sheets_segura(
-        lambda servicio: servicio.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(nombre_hoja, "A1"),
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [fila]},
-        )
-    )
-
-    limpiar_cache_google_sheets()
-
-
-def agregar_registros(
-    nombre_hoja: str,
-    registros: list[dict[str, Any]],
-) -> None:
-    """Agrega múltiples filas en una sola llamada."""
-
-    if not registros:
-        return
-
-    if nombre_hoja not in ESTRUCTURA_HOJAS:
-        raise ValueError(
-            f"Hoja no configurada: {nombre_hoja}"
-        )
-
-    columnas = ESTRUCTURA_HOJAS[nombre_hoja]
-    filas = [
-        [
-            limpiar_valor(registro.get(columna, ""))
-            for columna in columnas
-        ]
-        for registro in registros
-    ]
-
-    _ejecutar_escritura_sheets_segura(
-        lambda servicio: servicio.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range=nombre_rango(nombre_hoja, "A1"),
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": filas},
-        )
-    )
-
-    limpiar_cache_google_sheets()
+    servicio.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=nombre_rango(nombre_hoja, "A1"),
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={
+            "values": [fila],
+        },
+    ).execute()
 
 
 # ==========================================================
@@ -1045,8 +757,6 @@ def actualizar_registro(
         },
     ).execute()
 
-    limpiar_cache_google_sheets()
-
 
 def eliminar_registro(
     nombre_hoja: str,
@@ -1116,8 +826,6 @@ def eliminar_registro(
         },
     ).execute()
 
-    limpiar_cache_google_sheets()
-
 
 # ==========================================================
 # UTILIDADES DE COLUMNAS
@@ -1145,148 +853,3 @@ def numero_a_columna_excel(numero: int) -> str:
         resultado = chr(65 + resto) + resultado
 
     return resultado
-
-
-# ==========================================================
-# API DE AGRUPADO FÍSICO / TAREAS
-# ==========================================================
-
-def leer_pedidos_agrupados_despacho() -> pd.DataFrame:
-    """Lee los pedidos marcados como agrupados físicamente."""
-    asegurar_hoja("PedidosAgrupadosDespacho")
-    return leer_hoja("PedidosAgrupadosDespacho")
-
-
-def guardar_pedidos_agrupados_despacho(registros: list[dict[str, Any]]) -> int:
-    """
-    Guarda en lote el estado de agrupado físico.
-
-    La Clave (DespachoId|Preparacion) es única: si ya existe, se actualiza
-    en lugar de duplicar la fila. Devuelve la cantidad de registros procesados.
-    """
-    if not registros:
-        return 0
-
-    asegurar_hoja("PedidosAgrupadosDespacho")
-    actuales = leer_hoja("PedidosAgrupadosDespacho")
-
-    claves_existentes: set[str] = set()
-    if not actuales.empty and "Clave" in actuales.columns:
-        claves_existentes = set(
-            actuales["Clave"].fillna("").astype(str).str.strip().loc[lambda x: x.ne("")].tolist()
-        )
-
-    nuevos: list[dict[str, Any]] = []
-    procesados = 0
-
-    for registro in registros:
-        clave = limpiar_valor(registro.get("Clave", ""))
-        if not clave:
-            continue
-
-        fila = {
-            columna: limpiar_valor(registro.get(columna, ""))
-            for columna in COLUMNAS_PEDIDOS_AGRUPADOS_DESPACHO
-        }
-        fila["Clave"] = clave
-        fila["Estado"] = fila["Estado"] or "AGRUPADO"
-
-        if clave in claves_existentes:
-            actualizar_registro(
-                "PedidosAgrupadosDespacho",
-                "Clave",
-                clave,
-                fila,
-            )
-        else:
-            nuevos.append(fila)
-            claves_existentes.add(clave)
-
-        procesados += 1
-
-    if nuevos:
-        agregar_registros("PedidosAgrupadosDespacho", nuevos)
-
-    return procesados
-
-
-# ==========================================================
-# API DE PLANNING OPERATIVO
-# ==========================================================
-
-def leer_planning_coordinacion() -> pd.DataFrame:
-    """Lee las decisiones persistidas del planning. Crea la hoja si hace falta."""
-    asegurar_hoja("PlanningCoordinacion")
-    return leer_hoja("PlanningCoordinacion")
-
-
-def guardar_planning_coordinacion(registro: dict[str, Any]) -> None:
-    """Upsert de una coordinación y alta de su historial de cambios."""
-    from datetime import datetime
-    asegurar_hoja("PlanningCoordinacion")
-    asegurar_hoja("PlanningHistorial")
-
-    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tipo = limpiar_valor(registro.get("Tipo", "")).upper()
-    referencia = limpiar_valor(registro.get("Referencia", ""))
-    if not tipo or not referencia:
-        raise ValueError("Tipo y Referencia son obligatorios para guardar el planning.")
-
-    coordinacion_id = limpiar_valor(registro.get("CoordinacionID")) or f"{tipo}|{referencia}"
-    actuales = leer_hoja("PlanningCoordinacion")
-    anterior = ""
-    fecha_registro = ahora
-    existe = False
-    if not actuales.empty and "CoordinacionID" in actuales.columns:
-        m = actuales["CoordinacionID"].fillna("").astype(str).str.strip().eq(coordinacion_id)
-        if m.any():
-            existe = True
-            fila = actuales.loc[m].iloc[0]
-            anterior = limpiar_valor(fila.get("FechaCoordinada", ""))
-            fecha_registro = limpiar_valor(fila.get("FechaRegistro", "")) or ahora
-
-    nuevo = {
-        "CoordinacionID": coordinacion_id,
-        "Tipo": tipo,
-        "Referencia": referencia,
-        "FechaEntrega": limpiar_valor(registro.get("FechaEntrega", "")),
-        "FechaSugerida": limpiar_valor(registro.get("FechaSugerida", "")),
-        "FechaCoordinada": limpiar_valor(registro.get("FechaCoordinada", "")),
-        "Lineas": limpiar_valor(registro.get("Lineas", "")),
-        "Unidades": limpiar_valor(registro.get("Unidades", "")),
-        "Estado": limpiar_valor(registro.get("Estado", "PLANIFICADO")) or "PLANIFICADO",
-        "Usuario": limpiar_valor(registro.get("Usuario", "")),
-        "FechaRegistro": fecha_registro,
-        "FechaActualizacion": ahora,
-        "Observacion": limpiar_valor(registro.get("Observacion", "")),
-    }
-
-    if existe:
-        actualizar_registro("PlanningCoordinacion", "CoordinacionID", coordinacion_id, nuevo)
-        accion = "REPROGRAMADO" if anterior != nuevo["FechaCoordinada"] else "ACTUALIZADO"
-    else:
-        agregar_registro("PlanningCoordinacion", nuevo)
-        accion = "PLANIFICADO"
-
-    hist = {
-        "HistorialID": f"{coordinacion_id}|{ahora}",
-        "CoordinacionID": coordinacion_id,
-        "Tipo": tipo,
-        "Referencia": referencia,
-        "FechaEntrega": nuevo["FechaEntrega"],
-        "FechaSugerida": nuevo["FechaSugerida"],
-        "FechaAnterior": anterior,
-        "FechaNueva": nuevo["FechaCoordinada"],
-        "Lineas": nuevo["Lineas"],
-        "Unidades": nuevo["Unidades"],
-        "Accion": accion,
-        "Usuario": nuevo["Usuario"],
-        "Fecha": ahora,
-        "Observacion": nuevo["Observacion"],
-    }
-    agregar_registro("PlanningHistorial", hist)
-
-
-def leer_planning_historial() -> pd.DataFrame:
-    asegurar_hoja("PlanningHistorial")
-    return leer_hoja("PlanningHistorial")
