@@ -1184,10 +1184,22 @@ def render() -> None:
             [4, 1], vertical_alignment="center"
         )
 
+        indice_solicitud_superior = (
+            filas_solicitudes_superior[0]
+            if filas_solicitudes_superior
+            else None
+        )
+
+        seleccion_solicitud_valida = (
+            indice_solicitud_superior is not None
+            and 0 <= int(indice_solicitud_superior) < len(tabla_solicitudes_superior)
+            and 0 <= int(indice_solicitud_superior) < len(solicitudes_resumen)
+        )
+
         with accion_solicitud_1:
-            if filas_solicitudes_superior:
+            if seleccion_solicitud_valida:
                 seleccion_superior = tabla_solicitudes_superior.iloc[
-                    filas_solicitudes_superior[0]
+                    int(indice_solicitud_superior)
                 ]
                 st.caption(
                     f"Seleccionada: pedido **{seleccion_superior['Pedido']}** · "
@@ -1203,13 +1215,14 @@ def render() -> None:
                 "📩 Gestionar",
                 type="primary",
                 width="stretch",
-                disabled=not bool(filas_solicitudes_superior),
+                disabled=not seleccion_solicitud_valida,
                 key="btn_gestionar_solicitud_consultas",
             )
 
-        if gestionar_solicitud_superior and filas_solicitudes_superior:
-            indice_superior = filas_solicitudes_superior[0]
-            solicitud_superior = solicitudes_resumen.iloc[indice_superior]
+        if gestionar_solicitud_superior and seleccion_solicitud_valida:
+            solicitud_superior = solicitudes_resumen.iloc[
+                int(indice_solicitud_superior)
+            ]
             abrir_detalle_solicitud(solicitud_superior)
 
 
@@ -1458,10 +1471,21 @@ def render() -> None:
             )
 
             with reclamo_accion_1:
-                if filas_reclamos_consultas:
+                indice_reclamo_tabla = (
+                    filas_reclamos_consultas[0]
+                    if filas_reclamos_consultas
+                    else None
+                )
+
+                seleccion_reclamo_valida = (
+                    indice_reclamo_tabla is not None
+                    and 0 <= int(indice_reclamo_tabla) < len(tabla_reclamos_consultas)
+                )
+
+                if seleccion_reclamo_valida:
                     fila_reclamo_seleccionada = (
                         tabla_reclamos_consultas.iloc[
-                            filas_reclamos_consultas[0]
+                            int(indice_reclamo_tabla)
                         ]
                     )
 
