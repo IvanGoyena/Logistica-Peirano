@@ -2151,123 +2151,127 @@ def render() -> None:
                 tabla_filtrada[columna].fillna("").astype(str).isin(seleccion)
             ].copy()
 
-    # ==========================================================
-    # TABLA COMERCIAL COMPACTA
-    # ==========================================================
+    @st.fragment
+    def render_tabla_comercial_fragment() -> None:
+        # ==========================================================
+        # TABLA COMERCIAL COMPACTA
+        # ==========================================================
 
-    st.subheader("Tabla general de pedidos")
+        st.subheader("Tabla general de pedidos")
 
-    columnas_visibles = [
-        "Pedido",
-        "FechaCreacion",
-        "FechaTransmisionERP",
-        "ClienteCodigo",
-        "Cliente",
-        "Unidades",
-        "M3",
-        "EstadoVolumetria",
-        "Planificacion",
-        "Despacho",
-        "EstadoPedido",
-        "EstadoPreparacion",
-        "EstadoOperativo",
-        "Contenedor",
-        "Solicitud",
-    ]
-    columnas_visibles = [c for c in columnas_visibles if c in tabla_filtrada.columns]
+        columnas_visibles = [
+            "Pedido",
+            "FechaCreacion",
+            "FechaTransmisionERP",
+            "ClienteCodigo",
+            "Cliente",
+            "Unidades",
+            "M3",
+            "EstadoVolumetria",
+            "Planificacion",
+            "Despacho",
+            "EstadoPedido",
+            "EstadoPreparacion",
+            "EstadoOperativo",
+            "Contenedor",
+            "Solicitud",
+        ]
+        columnas_visibles = [c for c in columnas_visibles if c in tabla_filtrada.columns]
 
-    tabla_visible_pedidos = (
-        tabla_filtrada[columnas_visibles]
-        .reset_index(drop=True)
-        .copy()
-    )
-
-    COLUMN_CONFIG = {
-        "Pedido": st.column_config.TextColumn("Pedido", width="small"),
-        "FechaCreacion": st.column_config.DateColumn(
-            "Creación", format="DD/MM/YYYY", width="small"
-        ),
-        "FechaTransmisionERP": st.column_config.DateColumn(
-            "Transmisión", format="DD/MM/YYYY", width="small"
-        ),
-        "ClienteCodigo": st.column_config.TextColumn(
-            "Código cliente", width="small"
-        ),
-        "Cliente": st.column_config.TextColumn("Cliente", width="large"),
-        "Unidades": st.column_config.NumberColumn("Unid.", format="%d", width="small"),
-        "M3": st.column_config.NumberColumn("M³", format="%.3f", width="small"),
-        "EstadoVolumetria": st.column_config.TextColumn("Volumetría", width="small"),
-        "Planificacion": st.column_config.TextColumn("Planificación", width="small"),
-        "Despacho": st.column_config.TextColumn("Despacho", width="medium"),
-        "EstadoPedido": st.column_config.TextColumn("Estado pedido", width="small"),
-        "EstadoPreparacion": st.column_config.TextColumn(
-            "Estado preparación", width="small"
-        ),
-        "EstadoOperativo": st.column_config.TextColumn("Estado", width="small"),
-        "Contenedor": st.column_config.TextColumn("Carro pendiente", width="medium"),
-        "Solicitud": st.column_config.TextColumn("Solicitud", width="small"),
-    }
-
-    st.caption(
-        f"{len(tabla_visible_pedidos):,} pedidos visibles".replace(",", ".")
-    )
-
-    evento_tabla_pedidos = st.dataframe(
-        tabla_visible_pedidos,
-        width="stretch",
-        hide_index=True,
-        height=500,
-        column_config=COLUMN_CONFIG,
-        on_select="rerun",
-        selection_mode="multi-row",
-        key="tabla_general_consultas",
-    )
-
-    indices_seleccionados = (
-        list(evento_tabla_pedidos.selection.rows)
-        if evento_tabla_pedidos is not None
-        else []
-    )
-    indices_seleccionados = [
-        i for i in indices_seleccionados
-        if 0 <= i < len(tabla_visible_pedidos)
-    ]
-    seleccionados = tabla_visible_pedidos.iloc[indices_seleccionados].copy()
-
-    cantidad_seleccionada = len(seleccionados)
-    if cantidad_seleccionada == 0:
-        st.caption(
-            "Seleccioná uno o varios pedidos. Con uno podés abrir el detalle; "
-            "con varios podés generar una misma urgencia o solicitud en lote."
+        tabla_visible_pedidos = (
+            tabla_filtrada[columnas_visibles]
+            .reset_index(drop=True)
+            .copy()
         )
-    elif cantidad_seleccionada == 1:
-        fila_sel = seleccionados.iloc[0]
-        c_info, c_accion = st.columns([5, 1], vertical_alignment="center")
-        with c_info:
+
+        COLUMN_CONFIG = {
+            "Pedido": st.column_config.TextColumn("Pedido", width="small"),
+            "FechaCreacion": st.column_config.DateColumn(
+                "Creación", format="DD/MM/YYYY", width="small"
+            ),
+            "FechaTransmisionERP": st.column_config.DateColumn(
+                "Transmisión", format="DD/MM/YYYY", width="small"
+            ),
+            "ClienteCodigo": st.column_config.TextColumn(
+                "Código cliente", width="small"
+            ),
+            "Cliente": st.column_config.TextColumn("Cliente", width="large"),
+            "Unidades": st.column_config.NumberColumn("Unid.", format="%d", width="small"),
+            "M3": st.column_config.NumberColumn("M³", format="%.3f", width="small"),
+            "EstadoVolumetria": st.column_config.TextColumn("Volumetría", width="small"),
+            "Planificacion": st.column_config.TextColumn("Planificación", width="small"),
+            "Despacho": st.column_config.TextColumn("Despacho", width="medium"),
+            "EstadoPedido": st.column_config.TextColumn("Estado pedido", width="small"),
+            "EstadoPreparacion": st.column_config.TextColumn(
+                "Estado preparación", width="small"
+            ),
+            "EstadoOperativo": st.column_config.TextColumn("Estado", width="small"),
+            "Contenedor": st.column_config.TextColumn("Carro pendiente", width="medium"),
+            "Solicitud": st.column_config.TextColumn("Solicitud", width="small"),
+        }
+
+        st.caption(
+            f"{len(tabla_visible_pedidos):,} pedidos visibles".replace(",", ".")
+        )
+
+        evento_tabla_pedidos = st.dataframe(
+            tabla_visible_pedidos,
+            width="stretch",
+            hide_index=True,
+            height=500,
+            column_config=COLUMN_CONFIG,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key="tabla_general_consultas",
+        )
+
+        indices_seleccionados = (
+            list(evento_tabla_pedidos.selection.rows)
+            if evento_tabla_pedidos is not None
+            else []
+        )
+        indices_seleccionados = [
+            i for i in indices_seleccionados
+            if 0 <= i < len(tabla_visible_pedidos)
+        ]
+        seleccionados = tabla_visible_pedidos.iloc[indices_seleccionados].copy()
+
+        cantidad_seleccionada = len(seleccionados)
+        if cantidad_seleccionada == 0:
             st.caption(
-                f"Seleccionado: pedido **{fila_sel['Pedido']}** · {fila_sel['Cliente']}"
+                "Seleccioná uno o varios pedidos. Con uno podés abrir el detalle; "
+                "con varios podés generar una misma urgencia o solicitud en lote."
             )
-        with c_accion:
-            abrir_detalle = st.button(
-                "👁 Ver detalle", type="primary", width="stretch",
-                key="btn_detalle_tabla_consultas",
-            )
-        if abrir_detalle:
-            abrir_detalle_pedido(str(fila_sel["Pedido"]).strip())
-    else:
-        clientes = seleccionados["Cliente"].fillna("").astype(str).str.strip().nunique()
-        unidades = int(pd.to_numeric(seleccionados["Unidades"], errors="coerce").fillna(0).sum())
-        c_info, c_accion = st.columns([4, 1.4], vertical_alignment="center")
-        with c_info:
-            st.caption(
-                f"**{cantidad_seleccionada} pedidos seleccionados** · "
-                f"{clientes} cliente{'s' if clientes != 1 else ''} · "
-                f"{unidades} unidades"
-            )
-        with c_accion:
-            gestionar_lote = st.button(
-                "📚 Gestionar selección", type="primary", width="stretch",
-                key="btn_gestion_multiple_consultas",
-            )
-        if gestionar_lote:
-            abrir_gestion_multiple(seleccionados)
+        elif cantidad_seleccionada == 1:
+            fila_sel = seleccionados.iloc[0]
+            c_info, c_accion = st.columns([5, 1], vertical_alignment="center")
+            with c_info:
+                st.caption(
+                    f"Seleccionado: pedido **{fila_sel['Pedido']}** · {fila_sel['Cliente']}"
+                )
+            with c_accion:
+                abrir_detalle = st.button(
+                    "👁 Ver detalle", type="primary", width="stretch",
+                    key="btn_detalle_tabla_consultas",
+                )
+            if abrir_detalle:
+                abrir_detalle_pedido(str(fila_sel["Pedido"]).strip())
+        else:
+            clientes = seleccionados["Cliente"].fillna("").astype(str).str.strip().nunique()
+            unidades = int(pd.to_numeric(seleccionados["Unidades"], errors="coerce").fillna(0).sum())
+            c_info, c_accion = st.columns([4, 1.4], vertical_alignment="center")
+            with c_info:
+                st.caption(
+                    f"**{cantidad_seleccionada} pedidos seleccionados** · "
+                    f"{clientes} cliente{'s' if clientes != 1 else ''} · "
+                    f"{unidades} unidades"
+                )
+            with c_accion:
+                gestionar_lote = st.button(
+                    "📚 Gestionar selección", type="primary", width="stretch",
+                    key="btn_gestion_multiple_consultas",
+                )
+            if gestionar_lote:
+                abrir_gestion_multiple(seleccionados)
+
+    render_tabla_comercial_fragment()
